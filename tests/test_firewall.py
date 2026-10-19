@@ -498,6 +498,34 @@ class TestCollect(Base):
         self.assertEqual(events, ["HFW-OUT-LEAK", "HFW-IN-LAN", "HFW-FWD-VM-KS", "HFW-OUT-KS",
                                   "HFW-OUT-LAN-ALLOW"])     # no *-NEW, no IN-NOISE events
 
+    def test_tones(self):
+        p, rows, _ = self.audit()
+        self.assertEqual([(r[2], t) for r, t in zip(rows, [r["tone"] for r in p["rows"]])], [
+            ("allow", "blue"), ("drop", "red"), ("drop", "red"), ("zone", "plain"),
+            ("block", "yellow"), ("allow", "blue"), ("allow", "blue"), ("allow", "blue")])
+        s = self.collect()
+        tones = {r["cells"][0]: r["tone"] for r in self.panel(s, "counters")["rows"]}
+        self.assertEqual(tones, {"out_dns_vpn": "blue", "out_wg": "blue", "out_probe": "blue",
+                                 "out_dns": "yellow", "out_ks": "red", "out_leak": "yellow",
+                                 "in_noise": "plain", "in_vpn": "plain"})
+        green = lambda pid: [i["k"] for i in self.panel(s, pid)["items"] if i.get("tone")]
+        self.assertEqual(green("hostfw"), ["table", "mode", "boot mode", "log reader"])
+        self.assertEqual(green("vpn"), ["tunnel", "handshake", "fwmark", "default v4"])
+        self.assertTrue(all(i["tone"] == "green" for i in self.panel(s, "vpn")["items"]
+                            if "tone" in i))
+
+    def test_no_tone_on_problems(self):
+        self.host.set("nft list chain", ok(fix("nft-observe.json")))
+        self.host.set("wg fwmark", ok("0x1\n"))
+        s = self.collect()
+        hostfw = {i["k"]: i for i in self.panel(s, "hostfw")["items"]}
+        self.assertNotIn("tone", hostfw["mode"])                       # observe = warn
+        self.assertNotIn("tone", hostfw["boot mode"])                  # differs from live
+        vpn = {i["k"]: i for i in self.panel(s, "vpn")["items"]}
+        self.assertNotIn("tone", vpn["fwmark"])                        # mismatch = crit
+        self.assertEqual(next(r for r in self.panel(s, "counters")["rows"]
+                              if r["cells"][0] == "out_dns")["tone"], "plain")   # pass
+
     def test_audit_observe(self):
         _, rows, _ = self.audit("nft-observe.json")
         self.assertEqual(rows[4][2], "pass")                        # logged, not blocked

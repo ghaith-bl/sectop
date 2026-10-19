@@ -95,6 +95,9 @@ table (rows max 200):
 
 Row `detail` optional: extra k / v pairs shown on `enter` under the cells (max 40).
 
+`tone` optional on kv items and table rows: `plain`, `red`, `blue`, `yellow`, `green`.
+A color for meaning (a verdict, a healthy state), not a severity. See Screen (color).
+
 spark (values max 120, numbers):
 
 ```json
@@ -173,7 +176,10 @@ spark (values max 120, numbers):
 - Redraw: full after a collect (not while paused) or a key (incl. resize); between those
   only the clock line, once a second.
 - Every string goes through `display()`. Width counted in terminal cells (wide chars = 2).
-- Color only for problems: ok values plain; info, warn, crit, unknown colored.
+- Color: severity first. ok plain; info, warn, crit, unknown colored. With a `tone`:
+  the tone color replaces ok / info / warn, warn adds bold, crit always stays crit
+  (bold red). 256-color terminal: soft tones (xterm 210 red, 111 blue, 222 yellow,
+  114 green), crit 196. Else the 8 basic colors; no color support: plain.
 - Box lines: Unicode box drawing (U+2500 block), written as escapes in the source.
 
 ## Validation (`core/module.py`)

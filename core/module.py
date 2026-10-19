@@ -16,6 +16,7 @@ SEVS = ("ok", "info", "warn", "crit")
 EVENT_SEVS = ("info", "warn", "crit")
 SEV_RANK = {"ok": 0, "info": 1, "warn": 2, "crit": 3}
 PANEL_TYPES = ("kv", "table", "spark")
+TONES = ("plain", "red", "blue", "yellow", "green")   # optional color hint, not severity
 
 MAX_STR = 512
 MAX_PANELS = 8
@@ -97,9 +98,17 @@ def _kv(p: dict, w: str) -> dict:
     for i, it in enumerate(_list(p, "items", w)[:MAX_ITEMS]):
         wi = f"{w}.items[{i}]"
         it = _dict(it, wi)
-        items.append({"k": _str(it, "k", wi), "v": _str(it, "v", wi),
-                      "sev": _choice(it, "sev", SEVS, wi, "ok")})
+        item = {"k": _str(it, "k", wi), "v": _str(it, "v", wi),
+                "sev": _choice(it, "sev", SEVS, wi, "ok")}
+        _tone(it, item, wi)
+        items.append(item)
     return {"items": items}
+
+
+def _tone(src: dict, out: dict, w: str) -> None:
+    """Optional `tone`: copied only when given."""
+    if "tone" in src:
+        out["tone"] = _choice(src, "tone", TONES, w)
 
 
 def _table(p: dict, w: str) -> dict:
@@ -117,6 +126,7 @@ def _table(p: dict, w: str) -> dict:
             raise InvalidSnapshot(f"{wr}.cells: {len(cols)} str required")
         row = {"cells": [truncate(c, MAX_STR) for c in cells],
                "sev": _choice(r, "sev", SEVS, wr, "ok")}
+        _tone(r, row, wr)
         if "detail" in r:
             row["detail"] = _detail(r, wr)
         rows.append(row)

@@ -160,6 +160,22 @@ class TestValidate(unittest.TestCase):
             s2["panels"][1]["rows"][0]["detail"] = bad
             self.assertInvalid(s2)
 
+    def test_tone(self):
+        s = snap()
+        s["panels"][0]["items"][0]["tone"] = "green"
+        s["panels"][1]["rows"][0]["tone"] = "red"
+        out = validate(s)
+        self.assertEqual(out["panels"][0]["items"][0]["tone"], "green")
+        self.assertEqual(out["panels"][1]["rows"][0]["tone"], "red")
+        self.assertNotIn("tone", out["panels"][0]["items"][1])               # optional
+        for bad in ("pink", "", 1, None):
+            s2 = snap()
+            s2["panels"][1]["rows"][0]["tone"] = bad
+            self.assertInvalid(s2)
+            s3 = snap()
+            s3["panels"][0]["items"][0]["tone"] = bad
+            self.assertInvalid(s3)
+
     def test_rows_cut(self):
         s = snap()
         s["panels"][1]["rows"] = [{"cells": ["a", "b"]}] * 1000

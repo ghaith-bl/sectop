@@ -83,6 +83,10 @@ hostfw (kv), vpn (kv), hostfw counters (table: pkts, new this tick, bytes; zero 
 hidden, count in the title), out_leak (table, see below), blocked / tick (spark, deny
 kinds except hidden), audit (table, see below), connections (table, max 50).
 
+- Colors (`tone`): audit, out_leak and counter rows by verdict: allow blue, drop (kill
+  switch) red, block yellow, zone / pass / deny plain. Healthy kv values green (table
+  loaded, mode enforce, boot mode = live, log reader ok, tunnel up, handshake fresh,
+  fwmark in set, default route = kill switch / tunnel). Problems keep their severity color.
 - hostfw `log reader` = sectop's own kernel log reader (ok / behind / error), not a log view.
   System journal view: security screen (phase 3).
 - vpn `recv / sent` = bytes received / sent through the tunnel since it came up

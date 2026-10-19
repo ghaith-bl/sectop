@@ -78,6 +78,13 @@ VERDICT_NOTE = {
 }
 
 
+TONE = {"allow": "blue", "drop": "red", "block": "yellow"}   # verdict -> color, else plain
+
+
+def _tone(verdict: str) -> str:
+    return TONE.get(verdict, "plain")
+
+
 def kind_sev(name: str) -> str | None:
     """Severity of new packets for a counter / log kind. None = never raises status."""
     if name in ALLOWED:
@@ -199,8 +206,12 @@ def _since(sec: float) -> str:
     return f"{sec // 3600}h {sec % 3600 // 60:02d}m"
 
 
-def _item(k: str, v: str, sev: str = "ok") -> dict:
-    return {"k": k, "v": v, "sev": sev}
+def _item(k: str, v: str, sev: str = "ok", tone: str = "") -> dict:
+    """kv item; tone green = healthy state (drawn only while sev is ok)."""
+    out = {"k": k, "v": v, "sev": sev}
+    if tone and sev == "ok":
+        out["tone"] = tone
+    return out
 
 
 # --- sources --------------------------------------------------------------
@@ -216,19 +227,21 @@ def _hostfw(st: State, checks: list) -> tuple:
         return items, None, "-"
     counters = nft.counters(res.out)
     st.comments = nft.comments(res.out)
-    items.append(_item("table", "loaded"))
+    items.append(_item("table", "loaded", tone="green"))
 
     res = st.cmd("nft", "-j", "list", "chain", *TABLE, "enforce")
     live = nft.mode(res.out) if res.rc == 0 else "unknown"
     sev = {"enforce": "ok", "observe": "warn"}.get(live, "warn")
     if sev != "ok":
         checks.append((sev, f"mode {live}"))
-    items.append(_item("mode", live if res.rc == 0 else f"unknown ({_fail(res)})", sev))
+    items.append(_item("mode", live if res.rc == 0 else f"unknown ({_fail(res)})", sev,
+                       "green"))
 
     try:
         boot = _read(st.mode_file, st.owner)
         boot = boot.strip() if boot is not None else "-"
-        items.append(_item("boot mode", boot, "ok" if boot in (live, "-") else "info"))
+        items.append(_item("boot mode", boot, "ok" if boot in (live, "-") else "info",
+                           "green" if boot == live else ""))
     except (OSError, ValueError) as e:
         items.append(_item("boot mode", str(e), "warn"))
         checks.append(("warn", "boot mode unreadable"))
@@ -269,7 +282,7 @@ def _rollback_state(text: str, now: float) -> tuple:
     return (f"{out} -> {action}" if action else out), armed
 
 
-def _counters(st: State, counters: dict | None, now: float) -> tuple:
+def _counters(st: State, counters: dict | None, now: float, live: str = "?") -> tuple:
     """-> (table panel or None, totals, deltas). Updates held severities."""
     if counters is None:
         return None, {}, {}
@@ -289,7 +302,8 @@ def _counters(st: State, counters: dict | None, now: float) -> tuple:
             continue                                          # zero counters hidden
         sev = kind_sev(name) if st.held.get(name, 0) > now else None
         rows.append({"cells": [name, str(pkts), f"+{deltas[name]}" if deltas[name] else "",
-                               _human(nbytes)], "sev": sev or "ok"})
+                               _human(nbytes)], "sev": sev or "ok",
+                     "tone": _tone(_verdict(name, live))})
     zero = len(counters) - len(rows)
     title = "hostfw counters" + (f"  ({zero} zero hidden)" if zero else "")
     panel = {"id": "counters", "title": title, "type": "table",
@@ -327,7 +341,7 @@ def _events(st: State, checks: list, items: list) -> tuple:
         state = "behind (output cut, catching up)"
     if bad:
         state = f"{bad} bad line(s)"
-    items.append(_item("log reader", state, "ok" if state == "ok" else "info"))
+    items.append(_item("log reader", state, "ok" if state == "ok" else "info", "green"))
 
     out = []
     for e in entries:
@@ -370,7 +384,7 @@ def _audit(st: State, entries: list, cs: list, live: str) -> dict:
         st.audit.appendleft({
             "cells": [st.hms(e.ts), e.dir, verdict, proto, f.get("UID") or "-",
                       prog, journal.src(e), journal.dst(e), iface],
-            "sev": kind_sev(e.kind) or "ok",
+            "sev": kind_sev(e.kind) or "ok", "tone": _tone(verdict),
             "detail": _audit_detail(st, e, verdict)})
     return {"id": "audit", "title": f"audit {len(st.audit)}", "type": "table",
             "columns": list(AUDIT_COLUMNS), "rows": list(st.audit)}
@@ -385,7 +399,7 @@ def _vpn(st: State, checks: list, wall: float) -> tuple:
         st.prev_tx = None
         return [_item("tunnel", f"{t} down ({_fail(res)})", "warn")], f"{t} down", None, False
     hs = vpn.handshake(res.out)
-    items = [_item("tunnel", f"{t} up")]
+    items = [_item("tunnel", f"{t} up", tone="green")]
 
     res = st.cmd("wg", "show", t, "transfer")
     rx, tx = vpn.transfer(res.out) if res.rc == 0 else (None, None)
@@ -409,7 +423,7 @@ def _vpn(st: State, checks: list, wall: float) -> tuple:
         elif age > HS_STALE:
             items.append(_item("handshake", f"{_age(age)} ago (idle)"))
         else:
-            items.append(_item("handshake", f"{_age(age)} ago"))
+            items.append(_item("handshake", f"{_age(age)} ago", tone="green"))
         hs_text = f"hs {_age(age)}"
     if rx is not None:                 # since the tunnel came up: received / sent
         items.append(_item("recv / sent", f"{_human(rx)}B / {_human(tx)}B"))
@@ -430,7 +444,7 @@ def _fwmark(st: State, mark, tunnel_up: bool, checks: list) -> dict | None:
     if not tunnel_up:
         return _item("fwmark", "set " + (", ".join(hex(e) for e in elems) or "empty"))
     if mark is not None and mark in elems:
-        return _item("fwmark", f"{hex(mark)} (in set)")
+        return _item("fwmark", f"{hex(mark)} (in set)", tone="green")
     checks.append(("crit", "fwmark mismatch"))
     live = hex(mark) if mark is not None else "off"
     return _item("fwmark", f"live {live}, set {', '.join(hex(e) for e in elems) or 'empty'}",
@@ -452,9 +466,9 @@ def _routes(st: State, checks: list) -> list:
             continue
         dev, metric, gw = rts[0]
         if dev in st.ks:
-            items.append(_item(key, f"{dev} (kill switch)"))
+            items.append(_item(key, f"{dev} (kill switch)", tone="green"))
         elif dev == st.tunnel:
-            items.append(_item(key, dev))
+            items.append(_item(key, dev, tone="green"))
         else:
             items.append(_item(key, f"{dev} via {gw or '-'} metric {metric}", "warn"))
             checks.append(("warn", f"{key} not kill switch"))
@@ -529,12 +543,12 @@ def _leak_box(st: State, entries: list, up: bool, total, live: str) -> dict:
         detail = [("meaning", CONTEXT_NOTE[ctx])]
         if st.boot is not None:
             detail.append(("after boot", _since(e.ts - st.boot)))
+        verdict = _verdict(e.kind, live)
         rows.append({
             "cells": [st.hms(e.ts), f.get("UID") or "-", f.get("PROTO", "-").lower(),
                       journal.dst(e), f.get("OUT") or "-", ctx],
-            "sev": "info" if ctx == "pre-connect" else "crit",
-            "detail": [{"k": k, "v": v} for k, v in detail]
-                      + _audit_detail(st, e, _verdict(e.kind, live))})
+            "sev": "info" if ctx == "pre-connect" else "crit", "tone": _tone(verdict),
+            "detail": [{"k": k, "v": v} for k, v in detail] + _audit_detail(st, e, verdict)})
     title = f"out_leak {total if total is not None else '?'}"
     if len(st.leaks) > LEAK_ROWS:
         title += f"  (newest {LEAK_ROWS} of {len(st.leaks)} lines)"
@@ -626,7 +640,7 @@ def collect(st: State) -> dict:
 
     fw_items, counters, live = _safe(lambda: _hostfw(st, checks), "nft", checks,
                                      lambda e: ([_item("table", e, "warn")], None, "?"))
-    table, totals, deltas = _safe(lambda: _counters(st, counters, now), "counters", checks,
+    table, totals, deltas = _safe(lambda: _counters(st, counters, now, live), "counters", checks,
                                   lambda e: (None, {}, {}))
     _held_checks(st, now, checks)
     events, entries = _safe(lambda: _events(st, checks, fw_items), "journal", checks,

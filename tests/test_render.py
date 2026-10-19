@@ -142,6 +142,31 @@ class TestBoxes(unittest.TestCase):
         self.assertEqual(part(lines, "x        149")[1], "crit")
         self.assertEqual(part(lines, " out_leak / tick ")[1], "warn")    # title sev
 
+    def test_tone_styles(self):
+        m = mod()
+        rows = m["panels"][1]["rows"]
+        rows[:] = [{"cells": [f"r{i}", "10.0.0.1"], "sev": sev, "tone": tone}
+                   for i, (sev, tone) in enumerate((("ok", "blue"), ("info", "red"),
+                                                    ("warn", "yellow"), ("crit", "red"),
+                                                    ("warn", "plain")))]
+        rows.append({"cells": ["r5", "10.0.0.1"], "sev": "info"})            # no tone: sev
+        m["panels"][0]["items"][0]["tone"] = "green"
+        lines = lay([m], ui=UI(2, focus={0: "firewall/mode"}))   # no cursor in the table
+        styles = [part(lines, f"r{i}  ")[1] for i in range(6)]
+        self.assertEqual(styles, ["blue", "red", "bold yellow", "crit", "bold plain", "info"])
+        box = [line for line in lay([m]) if text(line).startswith(BV)]  # table focused
+        self.assertEqual(part(box, "enforce")[1], "green")
+        ui = UI(2, sel={"firewall/conns": 2})
+        self.assertEqual(part(lay([m], ui=ui), "r2  ")[1], render.SEL + "bold yellow")
+
+    def test_attr(self):
+        render._ATTR.update(plain=0, red=1 << 20)
+        self.assertEqual(render.attr("red"), 1 << 20)
+        self.assertEqual(render.attr("sel bold red"),
+                         (1 << 20) | render.curses.A_REVERSE | render.curses.A_BOLD)
+        self.assertEqual(render.attr("bold plain"), render.curses.A_BOLD)
+        self.assertEqual(render.attr("nope"), render.curses.A_NORMAL)
+
     def test_mask(self):
         lines = lay(feed=[ev()])
         self.assertTrue(find(lines, "x        149.112.x.x"))

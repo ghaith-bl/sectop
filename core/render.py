@@ -39,6 +39,10 @@ SPARK_W = 40                                 # spark content width
 GRID_MIN = 4                                 # narrower: no boxes
 ALERT_RANK = {"crit": 0, "warn": 1, "unknown": 2}
 SEL = "sel "                                 # style prefix: reverse video
+BOLD = "bold "                               # style prefix: bold (warn line with a tone)
+# tone colors: soft on 256-color terminals (xterm palette), basic colors otherwise
+TONE_256 = {"red": 210, "blue": 111, "yellow": 222, "green": 114}
+CRIT_256 = 196
 
 # box drawing, U+2500 block
 BH, BV = "\u2500", "\u2502"
@@ -186,6 +190,15 @@ def _sev(sev: str) -> str:
     return "plain" if sev == "ok" else sev
 
 
+def _style(it: dict) -> str:
+    """Style of a kv item / table row. crit always wins; a tone (meaning, e.g. a
+    verdict) replaces the ok / info / warn color, warn adds bold."""
+    tone = it.get("tone")
+    if not tone or it["sev"] == "crit":
+        return _sev(it["sev"])
+    return (BOLD if it["sev"] == "warn" else "") + tone
+
+
 def _num(v) -> str:
     return f"{v:g}" if isinstance(v, float) else str(v)
 
@@ -291,7 +304,7 @@ class _Box:
         dash = [_line(w, mask, ("-", "dim"))]
         if self.kind == "kv":
             keys, kw = self.prep
-            body = [_line(w, mask, (pad(k, kw) + "  ", "dim"), (it["v"], _sev(it["sev"])))
+            body = [_line(w, mask, (pad(k, kw) + "  ", "dim"), (it["v"], _style(it)))
                     for k, it in zip(keys, d["items"])]
             return [], body or dash
         if self.kind == "table":
@@ -301,7 +314,7 @@ class _Box:
             def row(cells):
                 return "  ".join(pad(c, cw) for c, cw in zip(cells, widths)).rstrip()
 
-            body = [_line(w, mask, (row(cells), _sev(r["sev"])))
+            body = [_line(w, mask, (row(cells), _style(r)))
                     for cells, r in zip(rows, d["rows"])]
             return [_line(w, mask, (row(head), "dim"))], body or dash
         if self.kind == "spark":
@@ -651,12 +664,17 @@ def setup(stdscr) -> None:
                  focus=curses.A_REVERSE | curses.A_BOLD)
     colors = {"ok": curses.COLOR_GREEN, "info": curses.COLOR_CYAN,
               "warn": curses.COLOR_YELLOW, "crit": curses.COLOR_RED,
-              "unknown": curses.COLOR_MAGENTA}
+              "unknown": curses.COLOR_MAGENTA,
+              "red": curses.COLOR_RED, "blue": curses.COLOR_BLUE,
+              "yellow": curses.COLOR_YELLOW, "green": curses.COLOR_GREEN}
     if not curses.has_colors():
         _ATTR.update(ok=plain, info=plain, warn=curses.A_BOLD,
-                     crit=curses.A_BOLD | curses.A_REVERSE, unknown=curses.A_DIM)
+                     crit=curses.A_BOLD | curses.A_REVERSE, unknown=curses.A_DIM,
+                     red=plain, blue=plain, yellow=plain, green=plain)
         return
     curses.start_color()
+    if getattr(curses, "COLORS", 8) >= 256:
+        colors.update(TONE_256, crit=CRIT_256)
     bg = curses.COLOR_BLACK
     try:
         curses.use_default_colors()
@@ -670,9 +688,12 @@ def setup(stdscr) -> None:
 
 
 def attr(style: str) -> int:
+    extra = curses.A_NORMAL
     if style.startswith(SEL):
-        return _ATTR.get(style[len(SEL):], curses.A_NORMAL) | curses.A_REVERSE
-    return _ATTR.get(style, curses.A_NORMAL)
+        style, extra = style[len(SEL):], extra | curses.A_REVERSE
+    if style.startswith(BOLD):
+        style, extra = style[len(BOLD):], extra | curses.A_BOLD
+    return _ATTR.get(style, curses.A_NORMAL) | extra
 
 
 def _paint(stdscr, y: int, line: list) -> None:
