@@ -117,13 +117,18 @@ spark (values max 120, numbers):
 
 ```python
 run(argv: list[str], timeout: float = 1.5) -> Result
-# Result(rc: int, out: str, err: str, timed_out: bool)
+# Result(rc: int, out: str, err: str, timed_out: bool, truncated: bool)
 ```
 
-- `argv[0]` absolute path. No shell.
-- env: `PATH=/usr/sbin:/usr/bin`, `LC_ALL=C`. stdin `/dev/null`.
-- out / err decoded utf-8 with `errors="replace"`, max 1 MiB each.
-- Timeout -> process killed, `timed_out=True`. Module decides what it means.
+- `argv[0]` absolute path. No shell. Bad argv or timeout -> `ValueError` (bug in module).
+- Binary must be a regular file, owned by root, not group/other writable
+  (checked on the symlink target). Else not run, `rc=126`. Missing -> `rc=127`.
+- env: `PATH=/usr/sbin:/usr/bin`, `LC_ALL=C`. stdin `/dev/null`. cwd `/`.
+- Own session: timeout or limit kills the whole process group (`rc=-9`).
+- timeout: wall time, max 30 s. Includes a process that closed its pipes but still runs.
+- out / err: max 1 MiB each, decoded utf-8 with `errors="replace"`.
+  Over limit -> killed, `truncated=True`, output kept up to the limit.
+- Module decides what rc / timed_out / truncated mean.
 
 ## Display safety (`core/sanitize.py`)
 
