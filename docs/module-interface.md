@@ -5,8 +5,21 @@ Modules collect data only. They never draw.
 
 ## Layout
 
-- `modules/<name>/__init__.py`
-- Registered in `core/registry.py`. Static list, no dynamic loading from config paths.
+- `modules/<name>/__init__.py`. `NAME` must equal `<name>`.
+- Registered in `core/registry.py`: `MODULES`, import names `modules.<name>`,
+  in display order. Static list, no dynamic loading from config paths.
+
+## Loading (`core/registry.py`)
+
+- Config table for a module not in `MODULES` -> `ConfigError`, refuse to start.
+- `enabled = false` -> module not imported at all.
+- Per module: import -> `check_module()` + NAME check -> `init(cfg)`.
+  `cfg` = deep copy of the options. Interval = config `interval`, else module INTERVAL.
+- Any failure -> that module disabled, error `<stage>: <ExcType>: <message>`
+  (stage: import, check, init). Other modules still load.
+  `SystemExit` from a module is caught too. `KeyboardInterrupt` is not.
+- `close()`: only modules whose init succeeded, reverse order.
+  Errors collected, the rest still closed.
 
 ## Module API
 
