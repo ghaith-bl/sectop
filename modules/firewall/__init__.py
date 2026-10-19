@@ -53,6 +53,14 @@ AUDIT_ONLY = {"out_new", "fwd_vm_new"}          # every new flow: audit box, no 
 KS_KINDS = {"out_ks", "fwd_vm_ks"}              # always dropped by hostfw
 LOG_ONLY = {"in_noise", "in_lan", "in_vpn"}     # hostfw logs, firewalld zone decides
 AUDIT_COLUMNS = ["time", "dir", "verdict", "proto", "uid", "prog", "src", "dst", "iface"]
+VERDICT_NOTE = {
+    "allow": "allowed by hostfw (logged new flow or exception)",
+    "drop": "kill switch: always dropped",
+    "zone": "hostfw only logs, the firewalld zone decides (default zone: drop)",
+    "block": "rejected by hostfw (enforce mode)",
+    "pass": "deny rule in observe mode: logged, not blocked",
+    "deny": "deny rule, mode unknown",
+}
 
 
 def kind_sev(name: str) -> str | None:
@@ -66,6 +74,10 @@ def _hms(ts: float) -> str:
     return time.strftime("%H:%M:%S", time.localtime(ts))
 
 
+def _stamp(ts: float) -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts)) + f".{int(ts * 1000) % 1000:03d}"
+
+
 def _bin(name: str) -> str:
     for d in ("/usr/bin", "/usr/sbin"):
         p = f"{d}/{name}"
@@ -77,11 +89,13 @@ def _bin(name: str) -> str:
 class State:
     def __init__(self, tunnel=DEFAULT_TUNNEL, ks=DEFAULT_KS, hold=HOLD, run=_run,
                  mono=time.monotonic, wall=time.time, owner=0,
-                 mode_file=MODE_FILE, rollback_file=ROLLBACK_FILE, hms=_hms):
+                 mode_file=MODE_FILE, rollback_file=ROLLBACK_FILE, hms=_hms, stamp=_stamp):
         self.tunnel, self.ks, self.hold = tunnel, tuple(ks), hold
         self.run, self.mono, self.wall, self.owner = run, mono, wall, owner
         self.mode_file, self.rollback_file = mode_file, rollback_file
         self.hms = hms                 # epoch -> "HH:MM:SS" for audit rows
+        self.stamp = stamp             # epoch -> full local time for audit detail
+        self.comments = {}             # counter name -> hostfw rule comment
         self.bins = {n: _bin(n) for n in ("nft", "journalctl", "ss", "wg", "ip")}
         self.cursor = None
         self.since = int(wall())
@@ -168,6 +182,7 @@ def _hostfw(st: State, checks: list) -> tuple:
         items.append(_item("table", msg, "crit"))
         return items, None, "-"
     counters = nft.counters(res.out)
+    st.comments = nft.comments(res.out)
     items.append(_item("table", "loaded"))
 
     res = st.cmd("nft", "-j", "list", "chain", *TABLE, "enforce")
@@ -318,10 +333,12 @@ def _audit(st: State, entries: list, cs: list, live: str) -> dict:
             iface = f"{f.get('IN') or '-'}>{f.get('OUT') or '-'}"
         else:
             prog, iface = "-", f.get("IN") or "-"
+        verdict = _verdict(e.kind, live)
         st.audit.appendleft({
-            "cells": [st.hms(e.ts), e.dir, _verdict(e.kind, live), proto, f.get("UID") or "-",
+            "cells": [st.hms(e.ts), e.dir, verdict, proto, f.get("UID") or "-",
                       prog, journal.src(e), journal.dst(e), iface],
-            "sev": kind_sev(e.kind) or "ok"})
+            "sev": kind_sev(e.kind) or "ok",
+            "detail": _audit_detail(st, e, verdict)})
     return {"id": "audit", "title": f"audit {len(st.audit)}", "type": "table",
             "columns": list(AUDIT_COLUMNS), "rows": list(st.audit)}
 
@@ -409,6 +426,17 @@ def _routes(st: State, checks: list) -> list:
             items.append(_item(key, f"{dev} via {gw or '-'} metric {metric}", "warn"))
             checks.append(("warn", f"{key} not kill switch"))
     return items
+
+
+def _audit_detail(st: State, e, verdict: str) -> list:
+    """Shown on enter: rule, verdict meaning, full time, every log field."""
+    rule = e.kind + (f"  {st.comments[e.kind]}" if st.comments.get(e.kind) else "")
+    out = [("rule", rule), ("verdict", f"{verdict}  {VERDICT_NOTE[verdict]}"),
+           ("time", st.stamp(e.ts)), ("prefix", e.code)]
+    out += [(k, v) for k, v in e.fields.items() if v]
+    if e.flags:
+        out.append(("flags", " ".join(e.flags)))
+    return [{"k": k, "v": v} for k, v in out]
 
 
 def _conns(st: State, checks: list) -> tuple:

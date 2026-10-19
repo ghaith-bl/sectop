@@ -52,6 +52,12 @@ class TestNft(unittest.TestCase):
         doc["nftables"].append(doc["nftables"][2])
         self.assertEqual(nft.mode(json.dumps(doc)), "unknown")
 
+    def test_comments(self):
+        c = nft.comments(fix("nft-counters.json"))
+        self.assertEqual(c["out_leak"], "host to internet outside the tunnel")
+        self.assertEqual(len(c), 17)
+        self.assertEqual(nft.comments('{"nftables": [{"counter": {"name": "x"}}]}'), {})
+
     def test_set(self):
         self.assertEqual(nft.set_elems(fix("nft-wg-fwmark.json")), [0xea13b2c])
         self.assertEqual(nft.set_elems('{"nftables": [{"set": {"name": "s"}}]}'), [])
@@ -445,6 +451,7 @@ class TestCollect(unittest.TestCase):
         self.host.set("nft list chain", ok(fix(chain)))
         self.host.set("journalctl", ok(fix("journal-audit.json")))
         self.st.hms = lambda ts: f"t{int(ts) % 100}"
+        self.st.stamp = lambda ts: f"T{ts:.3f}"
         p = self.panel(self.collect(), "audit")
         return p, [r["cells"] for r in p["rows"]], [r["sev"] for r in p["rows"]]
 
@@ -472,6 +479,18 @@ class TestCollect(unittest.TestCase):
              "proton0"],                                            # program from ss
         ])
         self.assertEqual(sevs, ["ok", "info", "info", "warn", "crit", "ok", "ok", "ok"])
+        detail = {d["k"]: d["v"] for d in p["rows"][4]["detail"]}     # the OUT-LEAK row
+        self.assertEqual(detail["rule"], "out_leak  host to internet outside the tunnel")
+        self.assertEqual(detail["verdict"], "block  rejected by hostfw (enforce mode)")
+        self.assertEqual(detail["time"], "T1792410754.000")
+        self.assertEqual(detail["prefix"], "HFW-OUT-LEAK")
+        self.assertEqual((detail["TTL"], detail["UID"], detail["flags"]), ("64", "1000", "DF SYN"))
+        self.assertNotIn("IN", detail)                               # empty field skipped
+        keys = [d["k"] for d in p["rows"][4]["detail"]]
+        self.assertEqual(keys[:6], ["rule", "verdict", "time", "prefix", "OUT", "SRC"])
+        inbound = {d["k"]: d["v"] for d in p["rows"][3]["detail"]}
+        self.assertTrue(inbound["verdict"].startswith("zone  hostfw only logs"))
+        self.assertEqual(inbound["MAC"], "02:00:00:00:00:02:02:00:00:00:00:03:08:00")
         events = [e["code"] for e in fw.collect(self.st)["events"]]
         self.assertEqual(events, ["HFW-OUT-LEAK", "HFW-IN-LAN", "HFW-FWD-VM-KS", "HFW-OUT-KS",
                                   "HFW-OUT-LAN-ALLOW"])     # no *-NEW, no IN-NOISE events

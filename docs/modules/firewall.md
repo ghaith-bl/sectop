@@ -93,6 +93,9 @@ out_new / fwd_vm_new (every new flow) go to the audit box only, not to events.
 | src, dst | address:port, IPv6 compressed (`[v6]:port`) |
 | iface | out: OUT, in: IN, fwd: IN>OUT |
 
+- Row detail (`enter`): rule (kind + hostfw counter comment), verdict meaning, full local
+  time, log prefix, every non-empty log field in log order (IN, OUT, MAC, SRC, DST, LEN, TTL,
+  PROTO, ports, UID ...), flags (DF, SYN ...).
 - Blocked lines are samples (hostfw rate limit 10/min per rule), allowed new flows
   5/s burst 50. Counters stay exact.
 - Program for blocked flows: mostly `?` (rejected connect closes before the next poll).

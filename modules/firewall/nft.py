@@ -28,6 +28,17 @@ def counters(text: str) -> dict:
     return out
 
 
+def comments(text: str) -> dict:
+    """`list counters table inet hostfw` -> {name: comment} (rule meaning)."""
+    out = {}
+    for it in _items(text):
+        c = it.get("counter")
+        if isinstance(c, dict) and isinstance(c.get("name"), str) \
+                and isinstance(c.get("comment"), str):
+            out[c["name"]] = c["comment"]
+    return out
+
+
 def mode(text: str) -> str:
     """`list chain inet hostfw enforce` -> observe | enforce | unknown.
 
