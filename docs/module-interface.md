@@ -6,8 +6,9 @@ Modules collect data only. They never draw.
 ## Layout
 
 - `modules/<name>/__init__.py`. `NAME` must equal `<name>`.
-- Registered in `core/registry.py`: `MODULES`, import names `modules.<name>`,
-  in display order. Static list, no dynamic loading from config paths.
+- Registered in `core/registry.py`: `MODULES`, import names `modules.<name>`.
+  Static list, no dynamic loading from config paths.
+- Placed on exactly one screen in `core/screens.py` (see Screen).
 
 ## Loading (`core/registry.py`)
 
@@ -110,6 +111,7 @@ spark (values max 120, numbers):
 - `code`: short stable id, used for filter.
 - `msg`: one line.
 - Core adds `src` = module NAME. Shared feed, last 500, newest first.
+  Shown in the events box of the module's screen (if that screen has one).
 
 ## Errors (`core/app.py`)
 
@@ -124,14 +126,35 @@ spark (values max 120, numbers):
 - Module not loaded (registry error) -> status unknown, header shows the error.
   Disabled -> shown as OFF.
 
-## Screen (`core/render.py`)
+## Screen (`core/render.py`, `core/screens.py`, `core/ui.py`)
 
-- Top line, then per module: header `[STATUS] name  summary  | flags`, then its panels.
-  Shared event feed at the bottom, newest first.
+- Screens are static in `core/screens.py`: name, modules (box order), events box yes / no,
+  note while empty. Each screen uses the whole terminal.
+- Start screen: `sectop [SCREEN]`, name or number, default 1. Unknown -> usage, rc 2.
+- Lines, top to bottom:
+  - tabs, mask state, clock
+  - alert bar: modules on any screen with status crit, warn or unknown, worst first.
+    Not while waiting for the first collect. (Phase 2: alert engine.)
+  - one header per module on this screen: `[STATUS] name  summary  | flags`
+  - box grid
+  - key help
+- Box grid: one box per panel, in module order, then the events box.
+  - Width: boxes join a row while they fit, extra width shared in the row.
+    Natural content width: kv = key + value (24..56 cells), table = its columns (min 24),
+    spark 40, events / note = full row. Sparks share a row only with sparks.
+  - Height: each row gets its content height. Leftover lines go to the last row with a
+    table, events or note. Too few lines: the tallest row shrinks first (lower row on a tie).
+    A row that cannot get one line is not drawn.
+  - Table header stays, rows scroll. Cut box: title shows `first-last/total`.
+  - Stale module: `(stale)` in each box title.
+- Focus: `tab` / `shift-tab`, focused title `[title]` in reverse. Gone -> first box.
+  Scroll keys act on the focused box, clamped to its content. Focus and scroll kept
+  per screen / box while sectop runs.
+- Keys: `1-9` screen, `tab` / `shift-tab` box, `j` `k` / arrows line, `space` `PgDn` /
+  `PgUp` page, `g` `G` / `Home` `End` top / bottom, `m` mask, `?` help (`Esc` closes), `q` quit.
 - Every string goes through `display()`. Width counted in terminal cells (wide chars = 2).
 - Color only for problems: ok values plain; info, warn, crit, unknown colored.
-- Short screen: feed keeps at least 6 lines, module lines cut with `... N more lines`.
-- Keys: `m` toggle public IP mask, `q` quit.
+- Box lines: Unicode box drawing (U+2500 block), written as escapes in the source.
 
 ## Validation (`core/module.py`)
 

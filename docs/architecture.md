@@ -18,21 +18,41 @@ can decide from what is on screen. Read-only until the privilege split.
   via `core.run.run()`.
 - Modules: collect only, return a Snapshot. Never draw, never act.
 - Core: scheduler, validation, alert engine, screens.
-- UI: curses, stdlib only. Layout = grid of boxes (design A).
+- UI: curses, stdlib only. One screen at a time, whole terminal, grid of boxes.
 
 ## Screens
 
 | key | screen | content |
 |---|---|---|
-| 1 | network | hostfw, vpn, counters (non-zero only), blocked spark, connections |
-| 2 | logs + posture | grouped warnings / errors / security events; posture checks |
-| 3 | system | cpu, memory, disk, io, temperatures, top processes, services |
+| 1 | firewall | hostfw, vpn, counters (non-zero only), sparks, audit (in + out, allowed + blocked), connections |
+| 2 | security | grouped warnings / errors / security events; posture checks |
+| 3 | processes | cpu, memory, disk, io, temperatures, top processes, services |
 
-- Alert bar on every screen: open alerts from all modules, worst first.
-- Event feed stays: raw module events, newest first.
+- Each screen uses the whole terminal. Static list in `core/screens.py`.
+- Start screen: `sectop [SCREEN]` (name or number). Switch: keys `1-3`.
+- Alert bar on every screen: problems from all screens, worst first.
+- Events box per screen: raw events of that screen's modules. Firewall: the audit box
+  replaces it.
 
-Keys (planned): `1-3` screen, `tab` next box, `j/k` scroll, `enter` detail, `/` filter,
-`a` ack alert, `p` pause, `m` mask, `?` help, `q` quit.
+Keys now: `1-3` screen, `tab` box, `j/k` scroll, `PgDn/PgUp` page, `m` mask, `?` help,
+`q` quit. Planned: `enter` detail, `/` filter, `a` ack alert, `p` pause.
+
+## Firewall audit
+
+Who talks to what, both ways, on the firewall screen.
+
+- Source: hostfw kernel log lines (`HFW-*`), incl. `HFW-OUT-NEW` / `HFW-FWD-VM-NEW`
+  (allowed new flows via the tunnel, hostfw 2026-10-19). Blocked lines are samples
+  (rate limit), counters are exact.
+- Row: time, dir, verdict, proto, uid, program, src, dst, iface. Color = severity.
+- Program name: netfilter logs only the UID.
+  - now: matched with `ss` (same 5-tuple) while the flow is still open
+  - later: Linux audit (`connect` syscall: pid + exe), also for blocked flows.
+    Needs a filter (volume); check auditctl docs first
+- Later, from the detail view (`enter`): short `tcpdump` on that host, bounded
+  (`-n -c 50 -s 128 -Z tcpdump` + run timeout). Fits "no long-lived children".
+- Actions phase: block key = destination into a hostfw block set with timeout
+  (hostfw can only tighten).
 
 ## Alerts
 
@@ -101,8 +121,8 @@ Stop / restart a service, kill a process. Only after the privilege split:
 
 ## Phases
 
-1. Core v2 UI: screens, boxes, focus, scroll, alert bar. Network screen only.
-   Firewall: hide zero counters.
+1. Core v2 UI: screens (whole terminal, start screen), boxes, focus, scroll, alert bar.
+   Firewall screen only. Firewall: hide zero counters, audit box, rollback expiry.
 2. Alert engine + noise list. Firewall checks move to it.
 3. Logs + posture, and system (read-only). Both required, order free.
 4. Privilege split (root collector service, unprivileged UI).

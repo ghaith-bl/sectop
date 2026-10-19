@@ -3,11 +3,13 @@
 Terminal security dashboard for my Silverblue workstation.
 Python 3 stdlib only (curses, tomllib). No third-party packages.
 
-Status: v1 in progress, not usable yet.
+Status: in progress (phase 1, docs/architecture.md). Runs in dev mode.
 
 ## Design
 
-- core: config, module registry, safe subprocess runner, sanitizer, curses renderer
+- core: config, module registry, safe subprocess runner, sanitizer, screens, curses renderer
+- screens: 1 firewall, 2 security, 3 processes. Each uses the whole terminal
+  (docs/architecture.md)
 - modules: collectors, return a JSON-serializable Snapshot
   (see docs/module-interface.md)
 - v1 runs as root. Later: collectors in a hardened root service, UI unprivileged
@@ -16,15 +18,17 @@ Status: v1 in progress, not usable yet.
 ## Modules
 
 - firewall: hostfw mode + counters, kernel log (HFW-*), connections, WireGuard
-  (docs/modules/firewall.md, planned)
+  (docs/modules/firewall.md)
 
 ## Run (dev)
 
-    sudo python3 -m core.app
+    sudo python3 -B -m core.app [SCREEN]     # firewall | security | processes | 1-3
+
+`-B`: no root-owned `__pycache__` in the repo.
 
 ## Tests
 
-    python3 -m unittest discover -s tests
+    python3 -I -m unittest discover -s tests -t .
 
 ## Notes
 

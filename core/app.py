@@ -5,7 +5,8 @@ wait for a key (TICK_MS). Error / backoff / stale / slow rules are
 in docs/module-interface.md (Errors). Core is pure logic with an
 injected clock so the rules can be tested without a terminal.
 
-Dev run (from repo root): sudo python3 -m core.app
+Dev run (from repo root): sudo python3 -B -m core.app [SCREEN]
+SCREEN = name or number from core/screens.py, default 1.
 """
 
 import collections
@@ -20,6 +21,8 @@ from core import config as configmod
 from core import registry, render
 from core.module import validate
 from core.sanitize import display
+from core.screens import SCREENS, find, names
+from core.ui import UI
 
 FEED_MAX = 500
 STALE_FACTOR = 3         # last good older than 3 x interval -> unknown
@@ -98,7 +101,7 @@ class Core:
         out = []
         for r in self.runs:
             ld = r.loaded
-            m = {"name": ld.name, "flags": [], "panels": [], "stale": False}
+            m = {"name": ld.name, "flags": [], "panels": [], "stale": False, "waiting": False}
             if not ld.enabled:
                 m.update(status="off", summary="disabled")
             elif ld.error:
@@ -107,6 +110,7 @@ class Core:
                 old = r.good_at is None or now - r.good_at > STALE_FACTOR * r.base
                 m["status"] = "unknown" if old else r.snap["status"]
                 m["summary"] = r.snap["summary"] if r.snap else "waiting"
+                m["waiting"] = r.snap is None and r.error is None
                 if r.error:
                     m["flags"].append("error: " + r.error)
                 if r.interval != r.base:
@@ -122,24 +126,37 @@ class Core:
         return out
 
 
-def _ui(stdscr, core: Core, mask: bool) -> None:
+def _ui(stdscr, core: Core, ui: UI) -> None:
     render.setup(stdscr)
     stdscr.timeout(TICK_MS)
     while True:
         core.tick()
-        render.draw(stdscr, core.view(), list(core.feed), mask)
+        frame = render.draw(stdscr, SCREENS, core.view(), list(core.feed), ui, time.time())
+        ui.boxes = frame.boxes
         key = stdscr.getch()
-        if key in (ord("q"), ord("Q")):
+        if key != -1 and not ui.key(key):
             return
-        if key in (ord("m"), ord("M")):
-            mask = not mask
 
 
 def _term(signum, frame):
     raise Quit
 
 
-def main() -> int:
+USAGE = f"usage: sectop [SCREEN]   SCREEN: {' | '.join(names())} or 1-{len(SCREENS)}"
+
+
+def main(argv: list | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] in (["-h"], ["--help"]):
+        print(USAGE)
+        return 0
+    try:
+        if len(argv) > 1:
+            raise ValueError("one SCREEN at most")
+        start = find(argv[0]) if argv else 0
+    except ValueError as e:
+        print(f"sectop: {display(e)}\n{USAGE}", file=sys.stderr)
+        return 2
     try:
         cfg = configmod.load()
         loaded = registry.load(cfg)
@@ -149,7 +166,8 @@ def main() -> int:
     locale.setlocale(locale.LC_ALL, "")
     signal.signal(signal.SIGTERM, _term)
     try:
-        curses.wrapper(_ui, Core(loaded), cfg.mask_public_ips)
+        curses.wrapper(_ui, Core(loaded), UI(len(SCREENS), screen=start,
+                                             mask=cfg.mask_public_ips))
     except (KeyboardInterrupt, Quit):
         pass
     finally:

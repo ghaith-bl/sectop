@@ -80,10 +80,11 @@ class TestCore(unittest.TestCase):
         c = self.core(loaded(collect=Script(snap("warn", summary="hi"))))
         self.assertEqual(c.view()[0]["summary"], "waiting")
         self.assertEqual(c.view()[0]["status"], "unknown")
+        self.assertTrue(c.view()[0]["waiting"])
         c.tick()
         [m] = c.view()
-        self.assertEqual((m["name"], m["status"], m["summary"], m["flags"], m["stale"]),
-                         ("a", "warn", "hi", [], False))
+        self.assertEqual((m["name"], m["status"], m["summary"], m["flags"], m["stale"],
+                          m["waiting"]), ("a", "warn", "hi", [], False, False))
         self.assertEqual(m["panels"][0]["id"], "p")
 
     def test_events_feed(self):
@@ -105,6 +106,13 @@ class TestCore(unittest.TestCase):
             self.clock.t += 1
         self.assertEqual(len(c.feed), app.FEED_MAX)
         self.assertEqual(c.feed[0]["ts"], 99.0)
+
+    def test_waiting_vs_first_error(self):
+        c = self.core(loaded(collect=Script(RuntimeError("boom"))))
+        c.tick()
+        [m] = c.view()
+        self.assertFalse(m["waiting"])                   # an error is not "waiting"
+        self.assertEqual(m["status"], "unknown")
 
     def test_error_keeps_last_good(self):
         s = Script(snap("crit"), RuntimeError("boom"))
@@ -206,14 +214,53 @@ class TestCore(unittest.TestCase):
 
 
 class TestMain(unittest.TestCase):
+    def run_main(self, argv, cfg=None):
+        cfg = cfg or types.SimpleNamespace(mask_public_ips=True)
+        with mock.patch.object(app.configmod, "load", return_value=cfg), \
+             mock.patch.object(app.registry, "load", return_value=[]), \
+             mock.patch.object(app.registry, "close", return_value=[]), \
+             mock.patch.object(app.locale, "setlocale"), \
+             mock.patch.object(app.signal, "signal"), \
+             mock.patch("sys.stdout") as out, mock.patch("sys.stderr") as err, \
+             mock.patch.object(app.curses, "wrapper") as wrapper:
+            rc = app.main(argv)
+        written = lambda f: "".join(c.args[0] for c in f.write.call_args_list)
+        return rc, wrapper, written(out), written(err)
+
     def test_config_error(self):
         with mock.patch.object(app.configmod, "load", side_effect=ConfigError("bad \x1b")), \
              mock.patch("sys.stderr") as err, \
              mock.patch.object(app.curses, "wrapper") as wrapper:
-            self.assertEqual(app.main(), 2)
+            self.assertEqual(app.main([]), 2)
         wrapper.assert_not_called()
         written = "".join(c.args[0] for c in err.write.call_args_list)
         self.assertIn("sectop: config: bad ?", written)
+
+    def test_start_screen(self):
+        for argv, want in (([], 0), (["firewall"], 0), (["2"], 1), (["processes"], 2)):
+            rc, wrapper, _, _ = self.run_main(argv)
+            self.assertEqual(rc, 0)
+            ui = wrapper.call_args.args[2]
+            self.assertEqual((ui.screen, ui.n_screens, ui.mask), (want, 3, True), argv)
+
+    def test_mask_from_config(self):
+        _, wrapper, _, _ = self.run_main([], types.SimpleNamespace(mask_public_ips=False))
+        self.assertFalse(wrapper.call_args.args[2].mask)
+
+    def test_bad_args(self):
+        for argv in (["nope\x1b"], ["9"], ["1", "2"]):
+            rc, wrapper, _, err = self.run_main(argv)
+            self.assertEqual(rc, 2, argv)
+            wrapper.assert_not_called()
+            self.assertIn(app.USAGE, err)
+            self.assertNotIn("\x1b", err)
+        self.assertIn("unknown screen: 'nope\\x1b'", self.run_main(["nope\x1b"])[3])   # repr
+
+    def test_help(self):
+        rc, wrapper, out, _ = self.run_main(["--help"])
+        self.assertEqual(rc, 0)
+        wrapper.assert_not_called()
+        self.assertIn("SCREEN: firewall | security | processes or 1-3", out)
 
 
 if __name__ == "__main__":
