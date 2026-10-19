@@ -121,7 +121,7 @@ class TestTop(unittest.TestCase):
 
     def test_footer(self):
         lines = lay()
-        self.assertTrue(text(lines[-1]).startswith(" 1-2 screen  tab box"))
+        self.assertTrue(text(lines[-1]).startswith(" 1-2 screen  tab <- -> box"))
 
 
 class TestBoxes(unittest.TestCase):
@@ -176,8 +176,8 @@ class TestBoxes(unittest.TestCase):
     def test_pack_side_by_side(self):
         lines = lay(width=120)
         top = lines[3]
-        self.assertTrue(text(top).startswith("\u250c\u2500[hostfw]"))
-        self.assertIn(" Connections ", text(top))                  # same row as hostfw
+        self.assertTrue(text(top).startswith("\u250c\u2500 hostfw "))
+        self.assertIn("[Connections]", text(top))                  # same row, focused
         self.assertNotIn("out_leak", text(top))                    # spark: own row
         self.assertTrue(find(lines, " out_leak / tick "))
 
@@ -214,32 +214,75 @@ class TestBoxes(unittest.TestCase):
         self.assertEqual(info["firewall/conns"].lines, 30)
         self.assertLess(info["firewall/conns"].page, 30)
         page = info["firewall/conns"].page
-        self.assertTrue(find(f.lines, f" Connections   1-{page}/30 "))
+        self.assertTrue(find(f.lines, f"[Connections]  1-{page}/30 "))
 
-    def test_scroll_header_pinned(self):
+    def rows30(self):
         m = mod()
         m["panels"][1]["rows"] = [{"cells": [f"p{i}", "10.0.0.1"], "sev": "ok"}
                                   for i in range(30)]
-        ui = UI(2, scroll={"firewall/conns": 5})
-        lines = frame([m], ui=ui, height=20).lines
-        self.assertTrue(find(lines, f"{BV} proc  dst"))
-        self.assertFalse(find(lines, "p4 "))
-        self.assertTrue(find(lines, "p5 "))
-        ui = UI(2, scroll={"firewall/conns": 999})                   # clamped
-        f = frame([m], ui=ui, height=20)
+        return m
+
+    def test_cursor_scrolls_header_pinned(self):
+        m = self.rows30()
+        f = frame([m], height=20)
         page = {b.key: b for b in f.boxes}["firewall/conns"].page
-        self.assertTrue(find(f.lines, "p29 "))
+        ui = UI(2, sel={"firewall/conns": 20})
+        f = frame([m], ui=ui, height=20)
+        b = {b.key: b for b in f.boxes}["firewall/conns"]
+        self.assertEqual((b.sel, b.off), (20, 20 - page + 1))
+        self.assertTrue(b.ident.startswith("p20 ") and b.ident.endswith("10.0.0.1"))
+        self.assertTrue(find(f.lines, f"{BV} proc  dst"))          # header stays
+        self.assertFalse(find(f.lines, f"p{20 - page} "))
+        self.assertTrue(find(f.lines, "p20 "))
+        ui = UI(2, sel={"firewall/conns": 999})                     # clamped
+        f = frame([m], ui=ui, height=20)
+        self.assertEqual({b.key: b for b in f.boxes}["firewall/conns"].sel, 29)
         self.assertTrue(find(f.lines, f"{30 - page + 1}-30/30"))
+        ui = UI(2, sel={"firewall/conns": 3}, scroll={"firewall/conns": 2})
+        b = {b.key: b for b in frame([m], ui=ui, height=20).boxes}["firewall/conns"]
+        self.assertEqual((b.sel, b.off), (3, 2))                    # visible: offset kept
+
+    def test_cursor_highlight(self):
+        ui = UI(2, sel={"firewall/conns": 1})
+        lines = lay(ui=ui)
+        [row] = [line for line in lines if "149.112" in text(line)]
+        i = row.index(("x        149.112.x.x", render.SEL + "crit"))
+        self.assertEqual(row[i - 1][1], render.SEL + "plain")             # pad before
+        self.assertEqual(row[i + 1][1], render.SEL + "plain")             # fill after
+        self.assertEqual(row[i + 2], (BV, "dim"))
+        [kv] = [line for line in lines if "enforce" in text(line) and "mode" in text(line)]
+        self.assertFalse(any(s.startswith(render.SEL) for _, s in kv))   # not focused
+
+    def test_cursor_anchor(self):
+        m = self.rows30()
+        ui = UI(2, sel={"firewall/conns": 5})
+        ui.update(frame([m], ui=ui))
+        ident = ui.anchor["firewall/conns"]
+        self.assertTrue(ident.startswith("p5 "))
+        m["panels"][1]["rows"][:0] = [{"cells": ["new", "10.0.0.9"], "sev": "ok"}] * 2
+        b = {b.key: b for b in frame([m], ui=ui).boxes}["firewall/conns"]
+        self.assertEqual((b.sel, b.ident), (7, ident))              # same line, 2 rows down
+        ui = UI(2, sel={"firewall/conns": 0}, anchor={"firewall/conns": ident})
+        b = {b.key: b for b in frame([m], ui=ui).boxes}["firewall/conns"]
+        self.assertEqual(b.sel, 0)                                  # line 0 follows newest
+        ui = UI(2, sel={"firewall/conns": 5}, anchor={"firewall/conns": "gone"})
+        b = {b.key: b for b in frame([m], ui=ui).boxes}["firewall/conns"]
+        self.assertEqual(b.sel, 5)                                  # not found: same index
 
     def test_focus(self):
-        lines = lay()
-        self.assertEqual(part(lines, "[hostfw]"), ("[hostfw]", "focus"))
-        ui = UI(2, focus={0: "firewall/conns"})
-        lines = lay(ui=ui)
-        self.assertEqual(part(lines, "[Connections]")[1], "focus")
-        self.assertEqual(part(lines, " hostfw ")[1], "title")
+        f = frame()
+        self.assertEqual(f.focus, "firewall/conns")                # default: first table
+        self.assertEqual(part(f.lines, "[Connections]"), ("[Connections]", "focus"))
+        ui = UI(2, focus={0: "firewall/mode"})
+        f = frame(ui=ui)
+        self.assertEqual((f.focus, part(f.lines, "[hostfw]")[1]), ("firewall/mode", "focus"))
+        self.assertEqual(part(f.lines, " Connections ")[1], "title")
         ui = UI(2, focus={0: "gone"})
-        self.assertEqual(part(lay(ui=ui), "[hostfw]")[1], "focus")   # gone -> first
+        self.assertEqual(frame(ui=ui).focus, "firewall/conns")      # gone -> default
+        scr = (Screen("one", ("firewall",), focus="firewall/rate"),)
+        f = layout(scr, [mod()], [], UI(1), 100, 40)
+        self.assertEqual(f.focus, "firewall/rate")                  # screen preference
+        self.assertTrue(find(f.lines, "[out_leak / tick]"))
 
     def test_stale(self):
         lines = lay([mod(stale=True)])
@@ -302,7 +345,63 @@ class TestFeedAndScreens(unittest.TestCase):
     def test_help(self):
         f = frame(ui=UI(2, help=True))
         self.assertEqual([b.key for b in f.boxes], ["help"])
-        self.assertTrue(find(f.lines, "q                   quit"))
+        self.assertEqual(f.focus, "help")
+        self.assertFalse(f.boxes[0].cursor)
+        self.assertTrue(find(f.lines, "enter                 detail of the selected line"))
+        self.assertTrue(find(f.lines, "q                     quit"))
+
+    def test_paused(self):
+        line = lay(ui=UI(2, paused=True), now=1.0)[0]
+        self.assertTrue(text(line).endswith("PAUSED  mask on  12:00:00 "))
+        self.assertIn(("PAUSED", "warn"), line)
+        self.assertNotIn("PAUSED", text(lay()[0]))
+
+    def test_detail_table_row(self):
+        m = mod()
+        m["panels"][1]["rows"][1]["detail"] = [{"k": "TTL", "v": "64"},
+                                               {"k": "SRC", "v": "149.112.112.11"}]
+        ui = UI(2, detail="firewall/conns", sel={"firewall/conns": 1})
+        f = frame([m], ui=ui)
+        self.assertEqual([b.key for b in f.boxes], ["detail"])
+        self.assertTrue(find(f.lines, " detail: Connections   Esc close "))
+        body = [text(line) for line in f.lines if text(line).startswith(BV)]
+        self.assertEqual([t[1:].rstrip(BV).rstrip() for t in body[:6]],
+                         [" proc      x", " dst       149.112.x.x", " severity  crit", "",
+                          " TTL       64", " SRC       149.112.x.x"])    # masked
+        f = frame([m], ui=UI(2, detail="firewall/conns", sel={"firewall/conns": 1}, mask=False))
+        self.assertTrue(find(f.lines, "149.112.112.11"))
+
+    def test_detail_other_kinds(self):
+        def body(key, sel=0, feed=()):
+            f = frame(feed=list(feed), ui=UI(2, detail=key, sel={key: sel}))
+            return [text(line)[1:].rstrip(BV).rstrip() for line in f.lines
+                    if text(line).startswith(BV)]
+        self.assertEqual(body("firewall/mode", 1)[:2], [" rollback  -", " severity  warn"])
+        self.assertEqual(body("firewall/rate")[:5],
+                         [" last    3 pkt", " min     0 pkt", " max     3 pkt", " points  4",
+                          " values  0 1 2 3"])
+        self.assertEqual(body("one/events", 0, [ev()])[:5],
+                         [" time      12:00:00", " severity  crit", " source    firewall",
+                          " code      HFW-OUT-LEAK", " message   dst 8.8.x.x n0"])
+        self.assertEqual(body("nope")[0].strip(), "line gone")
+
+    def test_detail_wraps_long_values(self):
+        m = mod()
+        m["panels"][1]["rows"][0]["detail"] = [{"k": "msg", "v": "a" * 150 + "\u4e2d" * 10}]
+        f = frame([m], ui=UI(2, detail="firewall/conns"), width=60)
+        lines = [text(line) for line in f.lines if text(line).startswith(BV)]
+        wrapped = [t for t in lines if "aaa" in t or "\u4e2d" in t]
+        self.assertGreater(len(wrapped), 2)
+        indent = 1 + len("severity") + 2                                  # pad + key column
+        self.assertTrue(wrapped[1].startswith(BV + " " * indent + "a"))   # under the value
+        for t in lines:
+            self.assertEqual(cols(t), 60)
+
+    def test_wrap(self):
+        self.assertEqual(render.wrap("abcde", 2), ["ab", "cd", "e"])
+        self.assertEqual(render.wrap("", 3), [""])
+        self.assertEqual(render.wrap("\u4e2d\u4e2d\u4e2d", 3), ["\u4e2d", "\u4e2d", "\u4e2d"])
+        self.assertEqual(render.wrap("abc", 0), [""])
 
     def test_tiny_screen(self):
         for h in range(0, 9):

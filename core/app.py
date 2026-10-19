@@ -69,10 +69,14 @@ class Core:
         self.runs = [Run(ld, ld.interval, ld.interval) for ld in loaded]
         self.feed = collections.deque(maxlen=FEED_MAX)   # newest first
 
-    def tick(self) -> None:
+    def tick(self) -> bool:
+        """Collect modules that are due. True if any was collected."""
+        done = False
         for r in self.runs:
             if r.loaded.active and self.clock() >= r.due:
                 self._collect(r)
+                done = True
+        return done
 
     def _collect(self, r: Run) -> None:
         start = self.clock()
@@ -126,16 +130,38 @@ class Core:
         return out
 
 
+def source(core: Core, ui: UI, frozen):
+    """What to draw: live view + feed, or the copy taken when pause started.
+    Collecting goes on while paused. -> (view, feed, frozen)."""
+    if not ui.paused:
+        return core.view(), list(core.feed), None
+    if frozen is None:
+        frozen = (core.view(), list(core.feed))
+    return frozen[0], frozen[1], frozen
+
+
 def _ui(stdscr, core: Core, ui: UI) -> None:
+    """Full redraw only after a collect (not while paused) or a key (incl. resize);
+    otherwise just the clock once a second."""
     render.setup(stdscr)
     stdscr.timeout(TICK_MS)
+    frozen, dirty, shown = None, True, None
     while True:
-        core.tick()
-        frame = render.draw(stdscr, SCREENS, core.view(), list(core.feed), ui, time.time())
-        ui.boxes = frame.boxes
+        if core.tick() and not ui.paused:
+            dirty = True
+        now = time.time()
+        if dirty:
+            view, feed, frozen = source(core, ui, frozen)
+            ui.update(render.draw(stdscr, SCREENS, view, feed, ui, now))
+            dirty, shown = False, int(now)
+        elif int(now) != shown:
+            render.draw_top(stdscr, SCREENS, ui, now)
+            shown = int(now)
         key = stdscr.getch()
-        if key != -1 and not ui.key(key):
-            return
+        if key != -1:
+            dirty = True
+            if not ui.key(key):
+                return
 
 
 def _term(signum, frame):

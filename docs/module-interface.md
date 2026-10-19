@@ -89,8 +89,11 @@ table (rows max 200):
 ```json
 {"id": "conns", "title": "Connections", "type": "table",
  "columns": ["proc", "uid", "dst", "port", "iface"],
- "rows": [{"cells": ["firefox", "1000", "10.2.0.1", "53", "proton0"], "sev": "ok"}]}
+ "rows": [{"cells": ["firefox", "1000", "10.2.0.1", "53", "proton0"], "sev": "ok",
+           "detail": [{"k": "TTL", "v": "64"}]}]}
 ```
+
+Row `detail` optional: extra k / v pairs shown on `enter` under the cells (max 40).
 
 spark (values max 120, numbers):
 
@@ -129,10 +132,10 @@ spark (values max 120, numbers):
 ## Screen (`core/render.py`, `core/screens.py`, `core/ui.py`)
 
 - Screens are static in `core/screens.py`: name, modules (box order), events box yes / no,
-  note while empty. Each screen uses the whole terminal.
+  note while empty, box focused at start. Each screen uses the whole terminal.
 - Start screen: `sectop [SCREEN]`, name or number, default 1. Unknown -> usage, rc 2.
 - Lines, top to bottom:
-  - tabs, mask state, clock
+  - tabs, PAUSED, mask state, clock
   - alert bar: modules on any screen with status crit, warn or unknown, worst first.
     Not while waiting for the first collect. (Phase 2: alert engine.)
   - one header per module on this screen: `[STATUS] name  summary  | flags`
@@ -147,11 +150,23 @@ spark (values max 120, numbers):
     A row that cannot get one line is not drawn.
   - Table header stays, rows scroll. Cut box: title shows `first-last/total`.
   - Stale module: `(stale)` in each box title.
-- Focus: `tab` / `shift-tab`, focused title `[title]` in reverse. Gone -> first box.
-  Scroll keys act on the focused box, clamped to its content. Focus and scroll kept
-  per screen / box while sectop runs.
-- Keys: `1-9` screen, `tab` / `shift-tab` box, `j` `k` / arrows line, `space` `PgDn` /
-  `PgUp` page, `g` `G` / `Home` `End` top / bottom, `m` mask, `?` help (`Esc` closes), `q` quit.
+- Focus: focused title `[title]` in reverse. Start: screen `focus`, else first table /
+  events box, else first box. Gone -> same rule.
+- Cursor: each box has a selected line, shown in reverse in the focused box; the box
+  scrolls to keep it visible. Line 0 follows the newest line. Below line 0 the cursor
+  stays on the same text when new lines arrive above it (same text found nearest to the
+  old index; not found -> same index, clamped).
+- `enter`: detail of the selected line in one overlay box: table row = column / cell pairs,
+  severity, row `detail`; kv item, spark values, event fields. Long values wrap.
+  Opening it pauses; closing resumes (unless paused before).
+- Pause (`p`): the screen keeps the view from the moment of pausing, collecting goes on.
+  Resume shows the current view.
+- Keys: `1-9` screen; `tab` / right / `l` next box, `shift-tab` / left / `h` previous box;
+  down / up / `j` `k` line; `space` `PgDn` / `PgUp` page; `g` `G` / `Home` `End` first / last;
+  `enter` detail; `p` pause; `m` mask; `?` help; `q` quit. In help / detail: `Esc` `q`
+  `enter` `?` close, line keys scroll. Esc delay 25 ms.
+- Redraw: full after a collect (not while paused) or a key (incl. resize); between those
+  only the clock line, once a second.
 - Every string goes through `display()`. Width counted in terminal cells (wide chars = 2).
 - Color only for problems: ok values plain; info, warn, crit, unknown colored.
 - Box lines: Unicode box drawing (U+2500 block), written as escapes in the source.

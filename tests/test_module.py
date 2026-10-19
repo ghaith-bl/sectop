@@ -143,6 +143,23 @@ class TestValidate(unittest.TestCase):
         self.assertEqual(len(vals), m.MAX_SPARK)
         self.assertEqual(vals[-1], 499)
 
+    def test_row_detail(self):
+        s = snap()
+        s["panels"][1]["rows"][0]["detail"] = [{"k": "TTL", "v": "64", "x": 1},
+                                               {"k": "msg", "v": "v" * 1000}]
+        s["panels"][1]["rows"].append({"cells": ["a", "b"], "detail": []})
+        rows = validate(s)["panels"][1]["rows"]
+        self.assertEqual(rows[0]["detail"][0], {"k": "TTL", "v": "64"})   # unknown key dropped
+        self.assertEqual(len(rows[0]["detail"][1]["v"]), m.MAX_STR)
+        self.assertEqual(rows[1]["detail"], [])
+        self.assertNotIn("detail", validate(snap())["panels"][1]["rows"][0])   # optional
+        s["panels"][1]["rows"][0]["detail"] = [{"k": str(i), "v": ""} for i in range(100)]
+        self.assertEqual(len(validate(s)["panels"][1]["rows"][0]["detail"]), m.MAX_DETAIL)
+        for bad in ("x", [1], [{"k": "a"}], [{"k": 1, "v": "b"}], None):
+            s2 = snap()
+            s2["panels"][1]["rows"][0]["detail"] = bad
+            self.assertInvalid(s2)
+
     def test_rows_cut(self):
         s = snap()
         s["panels"][1]["rows"] = [{"cells": ["a", "b"]}] * 1000

@@ -1,17 +1,22 @@
 """Draw core's view in the terminal.
 
-layout() is pure: screens + view + feed + UI state -> Frame (lines and
-the boxes shown). draw() only paints a Frame with curses.
-Every string passes sanitize.display() (in _line() and _title()), so
-nothing reaches the terminal without clean -> mask. Width is counted in
-terminal cells (wide chars = 2, combining marks = 0).
+layout() is pure: screens + view + feed + UI state -> Frame (lines, the
+boxes shown, the focused box). draw() only paints a Frame with curses.
+Every string passes sanitize.display() (in _line(), _title() and
+_detail()), so nothing reaches the terminal without clean -> mask.
+Width is counted in terminal cells (wide chars = 2, combining marks = 0).
 
 Screen, top to bottom:
-    tabs, mask, clock
+    tabs, pause, mask, clock
     alert bar (problems from all screens)
     one header per module on this screen
-    box grid: one box per panel, packed left to right, then events
+    box grid (panels packed left to right, then events), or one overlay
+    box (help, detail of the selected line)
     key help
+
+Cursor: every box has a selected body line; the focused box shows it in
+reverse. While the cursor is not on the first line, it stays on the same
+text when new lines arrive above it (anchor).
 """
 
 import curses
@@ -25,13 +30,14 @@ TAGS = {"ok": "OK", "info": "INFO", "warn": "WARN", "crit": "CRIT",
         "unknown": "??", "off": "OFF"}
 TAG_W = 6                                    # "[CRIT]"
 SPARK = "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588"
-KEY_MAX = 24                                 # kv key column
+KEY_MAX = 24                                 # kv / detail key column
 COL_MAX = 40                                 # table column
 KV_MIN, KV_MAX = 24, 56                      # kv content width
 TABLE_MIN = 24                               # table content width
 SPARK_W = 40                                 # spark content width
 GRID_MIN = 4                                 # narrower: no boxes
 ALERT_RANK = {"crit": 0, "warn": 1, "unknown": 2}
+SEL = "sel "                                 # style prefix: reverse video
 
 # box drawing, U+2500 block
 BH, BV = "\u2500", "\u2502"
@@ -40,14 +46,19 @@ TD, TU, LT, RT, CROSS = "\u252c", "\u2534", "\u251c", "\u2524", "\u253c"
 
 HELP = (
     ("1-9", "screen"),
-    ("tab / shift-tab", "next / previous box"),
-    ("j k / down up", "scroll one line"),
-    ("space PgDn / PgUp", "scroll one page"),
-    ("g G / Home End", "top / bottom"),
+    ("tab  right  l", "next box"),
+    ("shift-tab  left  h", "previous box"),
+    ("down up  j k", "select line"),
+    ("space PgDn / PgUp", "one page"),
+    ("g G  Home End", "first / last line"),
+    ("enter", "detail of the selected line (pauses while open)"),
+    ("p", "pause / resume the screen (data is still collected)"),
     ("m", "mask public IPs on / off"),
-    ("? / Esc", "close help"),
+    ("Esc  q  enter", "close help / detail"),
     ("q", "quit"),
 )
+FOOTER = ("1-{n} screen  tab <- -> box  up down j k select  enter detail  "
+          "p pause  m mask  ? help  q quit")
 
 _ATTR = {}                                   # style -> curses attr, set in setup()
 
@@ -55,14 +66,19 @@ _ATTR = {}                                   # style -> curses attr, set in setu
 @dataclass(frozen=True)
 class BoxInfo:
     key: str
-    lines: int          # body lines (scrollable)
+    lines: int          # body lines
     page: int           # body lines visible
+    sel: int = 0        # selected body line
+    off: int = 0        # first visible body line
+    ident: str | None = None   # text of the selected line (anchor)
+    cursor: bool = True        # False: overlay text, keys scroll it
 
 
 @dataclass(frozen=True)
 class Frame:
     lines: list         # each: list of (text, style)
     boxes: tuple        # BoxInfo, in screen order
+    focus: str | None = None
 
 
 # --- cells ----------------------------------------------------------------
@@ -74,7 +90,9 @@ def _cw(ch: str) -> int:
 
 
 def cols(s: str) -> int:
-    """Terminal cells used by s."""
+    """Terminal cells used by s. ASCII (after clean(): printable) = 1 cell each."""
+    if s.isascii():
+        return len(s)
     return sum(_cw(ch) for ch in s)
 
 
@@ -84,6 +102,8 @@ def fit(s: str, width: int) -> str:
         return ""
     if cols(s) <= width:
         return s
+    if s.isascii():
+        return s[:width - 1] + TRUNC
     out, used = [], 0
     for ch in s:
         w = _cw(ch)
@@ -97,6 +117,22 @@ def fit(s: str, width: int) -> str:
 def pad(s: str, width: int) -> str:
     s = fit(s, width)
     return s + " " * (width - cols(s))
+
+
+def wrap(s: str, width: int) -> list:
+    """Split s into pieces of at most width cells (no word logic)."""
+    if width <= 0:
+        return [""]
+    out, cur, used = [], [], 0
+    for ch in s:
+        w = _cw(ch)
+        if cur and used + w > width:
+            out.append("".join(cur))
+            cur, used = [], 0
+        cur.append(ch)
+        used += w
+    out.append("".join(cur))
+    return out
 
 
 def _line(width: int, mask: bool, *parts) -> list:
@@ -116,13 +152,17 @@ def _len(line: list) -> int:
     return sum(cols(t) for t, _ in line)
 
 
-def _right(width: int, mask: bool, parts: list, right: tuple) -> list:
-    """Left parts, then `right` flush right if it fits."""
+def _text(line: list) -> str:
+    return "".join(t for t, _ in line)
+
+
+def _right(width: int, mask: bool, parts: list, right: list) -> list:
+    """Left parts, then the `right` parts flush right if they fit."""
     left = _line(width, mask, *parts)
-    text = display(right[0], mask)
-    gap = width - _len(left) - cols(text)
+    rp = [(display(t, mask), s) for t, s in right]
+    gap = width - _len(left) - _len(rp)
     if gap >= 1:
-        left = left + [(" " * gap, "plain"), (text, right[1])]
+        left = left + [(" " * gap, "plain")] + rp
     return left
 
 
@@ -141,16 +181,17 @@ def _ts(ts: float) -> str:
 
 # --- top lines ------------------------------------------------------------
 
-def _tabs(screens, cur: int, mask: bool, width: int, now, tsfmt) -> list:
+def _tabs(screens, ui, width: int, now, tsfmt) -> list:
     parts = []
     for i, s in enumerate(screens):
         label = f"{i + 1} {s.name}"
         parts.append(("  " if i else " ", "plain"))
-        parts.append((f"[{label}]", "focus") if i == cur else (label, "dim"))
-    right = f"mask {'on' if mask else 'off'}"
+        parts.append((f"[{label}]", "focus") if i == ui.screen else (label, "dim"))
+    right = [("PAUSED", "warn"), ("  ", "plain")] if ui.paused else []
+    tail = f"mask {'on' if ui.mask else 'off'}"
     if now is not None:
-        right += f"  {tsfmt(now)}"
-    return _right(width, mask, parts, (right + " ", "dim"))
+        tail += f"  {tsfmt(now)}"
+    return _right(width, ui.mask, parts, right + [(tail + " ", "dim")])
 
 
 def _alerts(view: list, mask: bool, width: int) -> list:
@@ -165,7 +206,7 @@ def _alerts(view: list, mask: bool, width: int) -> list:
         parts += [("    " if i else " ", "plain"), (TAGS[m["status"]], m["status"]),
                   (f" {m['name']}", "plain")]
     n = len(items)
-    return _right(width, mask, parts, (f"{n} alert{'s' if n != 1 else ''} ", "dim"))
+    return _right(width, mask, parts, [(f"{n} alert{'s' if n != 1 else ''} ", "dim")])
 
 
 def _header(m: dict, width: int, mask: bool) -> list:
@@ -178,20 +219,20 @@ def _header(m: dict, width: int, mask: bool) -> list:
 
 
 def _footer(n_screens: int, width: int) -> list:
-    keys = f" 1-{n_screens} screen  tab box  j/k scroll  PgDn/PgUp page  m mask  ? help  q quit"
-    return _line(width, False, (keys, "dim"))
+    return _line(width, False, (" " + FOOTER.format(n=n_screens), "dim"))
 
 
 # --- boxes ----------------------------------------------------------------
 
 class _Box:
-    """One box: a panel, the events list or a note. Measured, then drawn."""
+    """One box: a panel, the events list, a note or a detail list."""
 
     def __init__(self, key, title, sev, kind, data, stale=False):
         self.key, self.title, self.sev, self.kind = key, title, sev, kind
         self.data, self.stale = data, stale
-        self.full = kind in ("feed", "note")
-        self.grow = kind in ("table", "feed", "note")
+        self.full = kind in ("feed", "note", "detail")
+        self.grow = kind in ("table", "feed", "note", "detail")
+        self.cursor = kind not in ("note", "detail")
         self.prep = None
         self.w = self.h = 0                  # natural content width, lines
 
@@ -214,7 +255,7 @@ class _Box:
             self.h = 1 + max(1, len(rows))
         elif self.kind == "spark":
             self.w, self.h = SPARK_W, 1
-        else:                                # feed, note
+        else:                                # feed, note, detail
             self.w, self.h = 0, max(1, len(d))
 
     def content(self, w: int, mask: bool, tsfmt) -> tuple:
@@ -239,7 +280,49 @@ class _Box:
             return [], [_spark(d, w, mask)]
         if self.kind == "feed":
             return [], [_event(e, w, mask, tsfmt) for e in d] or dash
+        if self.kind == "detail":
+            return [], _detail(d, w, mask) or dash
         return [], [_line(w, mask, (t, "dim")) for t in d] or dash
+
+    def pairs(self, i: int, tsfmt) -> list:
+        """(key, value) pairs for the detail of body line i. [] = nothing."""
+        d = self.data
+        if self.kind == "kv" and i < len(d["items"]):
+            it = d["items"][i]
+            return [(it["k"], it["v"]), ("severity", it["sev"])]
+        if self.kind == "table" and i < len(d["rows"]):
+            r = d["rows"][i]
+            out = list(zip(d["columns"], r["cells"])) + [("severity", r["sev"])]
+            if r.get("detail"):
+                out += [("", "")] + [(it["k"], it["v"]) for it in r["detail"]]
+            return out
+        if self.kind == "spark" and d["values"]:
+            v = d["values"]
+            unit = f" {d['unit']}" if d["unit"] else ""
+            return [("last", _num(v[-1]) + unit), ("min", _num(min(v)) + unit),
+                    ("max", _num(max(v)) + unit), ("points", str(len(v))),
+                    ("values", " ".join(_num(x) for x in v))]
+        if self.kind == "feed" and i < len(d):
+            e = d[i]
+            return [("time", tsfmt(e["ts"])), ("severity", e["sev"]), ("source", e["src"]),
+                    ("code", e["code"]), ("message", e["msg"])]
+        return []
+
+
+def _detail(pairs: list, w: int, mask: bool) -> list:
+    """key  value lines, long values wrapped under the value column."""
+    keys = [display(k, mask) for k, _ in pairs]
+    kw = min(KEY_MAX, max((cols(k) for k in keys), default=0))
+    out = []
+    for k, (_, v) in zip(keys, pairs):
+        if not k and not v:
+            out.append([])
+            continue
+        pieces = wrap(display(v, mask), max(1, w - kw - 2))
+        for j, piece in enumerate(pieces):
+            key = pad(k, kw) + "  " if j == 0 else " " * (kw + 2)
+            out.append(_line(w, mask, (key, "dim"), (piece, "plain")))
+    return out
 
 
 def _spark(p: dict, w: int, mask: bool) -> list:
@@ -262,10 +345,7 @@ def _event(e: dict, width: int, mask: bool, tsfmt) -> list:
                  (f"{e['src']} {e['code']} ", "dim"), (e["msg"], "plain"))
 
 
-def _boxes(screen, mods: list, feed: list, help_on: bool) -> list:
-    if help_on:
-        lines = [f"{k:<20}{v}" for k, v in HELP]
-        return [_Box("help", "keys", "ok", "note", lines)]
+def _boxes(screen, mods: list, feed: list) -> list:
     out = []
     for m in mods:
         for p in m["panels"]:
@@ -279,6 +359,22 @@ def _boxes(screen, mods: list, feed: list, help_on: bool) -> list:
         note = screen.note if not mods else "no data yet"
         out.append(_Box(f"{screen.name}/note", screen.name, "ok", "note", [note or "-"]))
     return out
+
+
+def _overlay(boxes: list, ui, mask: bool, tsfmt):
+    """Help or detail box instead of the grid, or None."""
+    if ui.help:
+        return _Box("help", "keys", "ok", "note", [f"{k:<22}{v}" for k, v in HELP])
+    if ui.detail is None:
+        return None
+    b = next((b for b in boxes if b.key == ui.detail), None)
+    pairs = []
+    if b is not None:
+        b.measure(mask)
+        pairs = b.pairs(ui.sel.get(b.key, 0), tsfmt)
+    title = f"detail: {b.title}" if b is not None else "detail"
+    return _Box("detail", title + "   Esc close", "ok", "detail",
+                pairs or [("", "line gone")])
 
 
 # --- grid -----------------------------------------------------------------
@@ -351,7 +447,7 @@ def _title(b, focused: bool, mask: bool, suffix: str) -> list:
 
 def _border(width: int, above, below, titles: list) -> list:
     """Line between rows. above / below: bar x positions or None.
-    titles: (x, parts) written after the corner at x."""
+    titles: (x, parts, room) written after the corner at x."""
     a, b = set(above or ()), set(below or ())
     cells = []
     for x in range(width):
@@ -389,16 +485,47 @@ def _border(width: int, above, below, titles: list) -> list:
     return [(t, s) for t, s in out if t]
 
 
-def _grid(boxes: list, ui, width: int, room: int, mask: bool, tsfmt) -> tuple:
+def _select(ui, key: str, texts: list, vis: int) -> tuple:
+    """-> (sel, off) for a box: anchored cursor, kept inside the visible part."""
+    n = len(texts)
+    sel = ui.sel.get(key, 0)
+    ident = ui.anchor.get(key)
+    if sel > 0 and ident is not None:           # line 0 = follow the newest line
+        hits = [i for i, t in enumerate(texts) if t == ident]
+        if hits:
+            sel = min(hits, key=lambda i: abs(i - sel))
+    sel = min(max(sel, 0), max(0, n - 1))
+    off = ui.scroll.get(key, 0)
+    if vis > 0:
+        if sel < off:
+            off = sel
+        elif sel >= off + vis:
+            off = sel - vis + 1
+    off = min(max(off, 0), max(0, n - vis))
+    return sel, off
+
+
+def _pick_focus(want, pref, boxes: list):
+    keys = [b.key for b in boxes]
+    if want in keys:
+        return want
+    if pref in keys:
+        return pref
+    tables = [b.key for b in boxes if b.kind in ("table", "feed")]
+    return tables[0] if tables else (keys[0] if keys else None)
+
+
+def _grid(boxes: list, ui, width: int, room: int, mask: bool, tsfmt, pref) -> tuple:
     if width < GRID_MIN or room < 3:
-        return [], ()
+        return [], (), None
     for b in boxes:
         b.measure(mask)
     rows = _pack(boxes, width)
     hs = _heights(rows, room)
     rows = rows[:len(hs)]
-    shown = [b.key for row in rows for b, _ in row]
-    focus = _pick(ui.focus.get(ui.screen), shown)
+    shown = [b for row in rows for b, _ in row]
+    focus = _pick_focus(None if len(shown) == 1 and not shown[0].cursor
+                        else ui.focus.get(ui.screen), pref, shown)
 
     lines, infos, above = [], [], None
     for row, hr in zip(rows, hs):
@@ -408,32 +535,38 @@ def _grid(boxes: list, ui, width: int, room: int, mask: bool, tsfmt) -> tuple:
             inner = max(0, cw - 2)
             head, body = b.content(inner, mask, tsfmt)
             vis = max(0, hr - len(head))
-            off = min(max(ui.scroll.get(b.key, 0), 0), max(0, len(body) - vis))
-            infos.append(BoxInfo(b.key, len(body), vis))
+            texts = [_text(line) for line in body]
+            sel, off = _select(ui, b.key, texts, vis)
+            infos.append(BoxInfo(b.key, len(body), vis, sel, off,
+                                 texts[sel] if texts else None, b.cursor))
             suffix = ""
             if len(body) > vis > 0:
                 suffix = f"  {off + 1}-{min(off + vis, len(body))}/{len(body)}"
-            titles.append((x, _title(b, b.key == focus, mask, suffix), max(0, cw - 3)))
-            cells.append((cw, inner, (head + body[off:off + vis])[:hr]))
+            on = b.key == focus
+            titles.append((x, _title(b, on and b.cursor, mask, suffix), max(0, cw - 3)))
+            shown_body = [_hi(line) if on and b.cursor and off + i == sel else line
+                          for i, line in enumerate(body[off:off + vis])]
+            cells.append((cw, (head + shown_body)[:hr],
+                          len(head) + sel - off if on and b.cursor else -1))
         lines.append(_border(width, above, xs, titles))
         for i in range(hr):
             parts = [(BV, "dim")]
-            for cw, inner, content in cells:
+            for cw, content, hi in cells:
                 line = content[i] if i < len(content) else []
                 fill = cw - min(cw, 1) - _len(line)
-                parts += ([(" ", "plain")] if cw else []) + line
-                parts += [(" " * fill, "plain"), (BV, "dim")]
+                style = SEL + "plain" if i == hi else "plain"
+                parts += ([(" ", style)] if cw else []) + line
+                parts += [(" " * fill, style), (BV, "dim")]
             lines.append([(t, s) for t, s in parts if t])
         above = xs
     if rows:
         lines.append(_border(width, above, None, []))
-    return lines, tuple(infos)
+    return lines, tuple(infos), focus
 
 
-def _pick(want, keys):
-    if want in keys:
-        return want
-    return keys[0] if keys else None
+def _hi(line: list) -> list:
+    """Selected line: same colors, reverse video."""
+    return [(t, SEL + s) for t, s in line] or [(" ", SEL + "plain")]
 
 
 # --- layout ---------------------------------------------------------------
@@ -448,15 +581,20 @@ def layout(screens, view: list, feed: list, ui, width: int, height: int,
     by_name = {m["name"]: m for m in view}
     mods = [by_name[n] for n in scr.modules if n in by_name]
 
-    top = [_tabs(screens, ui.screen, mask, width, now, tsfmt), _alerts(view, mask, width)]
+    top = [_tabs(screens, ui, width, now, tsfmt), _alerts(view, mask, width)]
     top += [_header(m, width, mask) for m in mods]
     if len(top) >= height:
         return Frame(top[:height], ())
     room = height - len(top)
     footer = [_footer(len(screens), width)] if room >= 4 else []
     room -= len(footer)
-    grid, infos = _grid(_boxes(scr, mods, feed, ui.help), ui, width, room, mask, tsfmt)
-    return Frame(top + grid + footer, infos)
+    boxes = _boxes(scr, mods, feed)
+    over = _overlay(boxes, ui, mask, tsfmt)
+    if over is not None:
+        boxes = [over]
+    grid, infos, focus = _grid(boxes, ui, width, room, mask, tsfmt,
+                               getattr(scr, "focus", None))
+    return Frame(top + grid + footer, infos, focus)
 
 
 # --- curses ---------------------------------------------------------------
@@ -465,6 +603,10 @@ def setup(stdscr) -> None:
     try:
         curses.curs_set(0)
     except curses.error:
+        pass
+    try:
+        curses.set_escdelay(25)              # Esc closes at once, not after 1 s
+    except (AttributeError, curses.error):
         pass
     plain = curses.A_NORMAL
     _ATTR.update(plain=plain, title=curses.A_BOLD, dim=curses.A_DIM, off=curses.A_DIM,
@@ -489,18 +631,39 @@ def setup(stdscr) -> None:
     _ATTR["crit"] |= curses.A_BOLD
 
 
+def attr(style: str) -> int:
+    if style.startswith(SEL):
+        return _ATTR.get(style[len(SEL):], curses.A_NORMAL) | curses.A_REVERSE
+    return _ATTR.get(style, curses.A_NORMAL)
+
+
+def _paint(stdscr, y: int, line: list) -> None:
+    x = 0
+    for text, style in line:
+        try:
+            stdscr.addstr(y, x, text, attr(style))
+        except curses.error:
+            pass
+        x += cols(text)
+
+
+def draw_top(stdscr, screens, ui, now: float) -> None:
+    """Only the tabs line (clock), between full redraws."""
+    h, w = stdscr.getmaxyx()
+    if h < 1 or w < 2:
+        return
+    stdscr.move(0, 0)
+    stdscr.clrtoeol()
+    _paint(stdscr, 0, _tabs(screens, ui, w - 1, now, _ts))
+    stdscr.refresh()
+
+
 def draw(stdscr, screens, view: list, feed: list, ui, now: float | None = None) -> Frame:
     h, w = stdscr.getmaxyx()
     # w - 1: writing the last cell of a line can raise in curses.
     frame = layout(screens, view, feed, ui, w - 1, h, now)
     stdscr.erase()
     for y, line in enumerate(frame.lines):
-        x = 0
-        for text, style in line:
-            try:
-                stdscr.addstr(y, x, text, _ATTR.get(style, curses.A_NORMAL))
-            except curses.error:
-                pass
-            x += cols(text)
+        _paint(stdscr, y, line)
     stdscr.refresh()
     return frame

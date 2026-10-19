@@ -67,13 +67,13 @@ class TestCore(unittest.TestCase):
     def test_schedule(self):
         s = Script(snap())
         c = self.core(loaded(collect=s))
-        c.tick()
+        self.assertTrue(c.tick())                         # collected
         self.assertEqual(s.calls, [{"st": "a"}])
         self.clock.t += 1.9
-        c.tick()
+        self.assertFalse(c.tick())                        # nothing due: no redraw needed
         self.assertEqual(len(s.calls), 1)
         self.clock.t += 0.1
-        c.tick()
+        self.assertTrue(c.tick())
         self.assertEqual(len(s.calls), 2)
 
     def test_view_ok(self):
@@ -211,6 +211,27 @@ class TestCore(unittest.TestCase):
         self.assertEqual((b["status"], b["summary"], b["flags"]),
                          ("unknown", "not loaded", ["failed: init: OSError: nope"]))
         self.assertEqual(never.calls, [])
+
+
+class TestSource(unittest.TestCase):
+    def test_pause_freezes_view_not_collect(self):
+        clock = Clock()
+        s = Script(snap(summary="one", events=[ev(1)]), snap(summary="two", events=[ev(2)]))
+        core = Core([loaded(collect=s)], clock=clock)
+        ui = types.SimpleNamespace(paused=False)
+        core.tick()
+        view, feed, frozen = app.source(core, ui, None)
+        self.assertEqual((view[0]["summary"], len(feed), frozen), ("one", 1, None))
+        ui.paused = True
+        view, feed, frozen = app.source(core, ui, frozen)
+        clock.t += 2
+        core.tick()                                      # still collects while paused
+        self.assertEqual(len(s.calls), 2)
+        view, feed, frozen = app.source(core, ui, frozen)
+        self.assertEqual((view[0]["summary"], len(feed)), ("one", 1))
+        ui.paused = False
+        view, feed, frozen = app.source(core, ui, frozen)
+        self.assertEqual((view[0]["summary"], len(feed), frozen), ("two", 2, None))
 
 
 class TestMain(unittest.TestCase):

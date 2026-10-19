@@ -14,10 +14,11 @@ class Screen:
     modules: tuple = ()         # module NAMEs, in box order
     feed: bool = False          # events box for these modules
     note: str = ""              # shown while the screen has no modules
+    focus: str = ""             # box focused at start (<module>/<panel id>)
 
 
 SCREENS = (
-    Screen("firewall", ("firewall",)),          # audit box instead of events
+    Screen("firewall", ("firewall",), focus="firewall/audit"),   # audit box instead of events
     Screen("security", (), feed=True,
            note="logs + posture: not built yet (phase 3)"),
     Screen("processes", (),

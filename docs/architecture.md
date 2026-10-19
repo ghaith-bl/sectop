@@ -34,8 +34,9 @@ can decide from what is on screen. Read-only until the privilege split.
 - Events box per screen: raw events of that screen's modules. Firewall: the audit box
   replaces it.
 
-Keys now: `1-3` screen, `tab` box, `j/k` scroll, `PgDn/PgUp` page, `m` mask, `?` help,
-`q` quit. Planned: `enter` detail, `/` filter, `a` ack alert, `p` pause.
+Keys now: `1-3` screen, `tab` / arrows box, `j/k` / arrows select line, `PgDn/PgUp` page,
+`enter` detail, `p` pause, `m` mask, `?` help, `q` quit. Planned: `/` filter, `a` ack alert,
+`t` capture (from detail).
 
 ## Firewall audit
 
@@ -49,7 +50,8 @@ Who talks to what, both ways, on the firewall screen.
   - now: matched with `ss` (same 5-tuple) while the flow is still open
   - later: Linux audit (`connect` syscall: pid + exe), also for blocked flows.
     Needs a filter (volume); check auditctl docs first
-- Later, from the detail view (`enter`): short `tcpdump` on that host, bounded
+- Detail (`enter`): all fields of the log line, rule, verdict meaning.
+- Later, from the detail view: short `tcpdump` on that host, bounded
   (`-n -c 50 -s 128 -Z tcpdump` + run timeout). Fits "no long-lived children".
 - Actions phase: block key = destination into a hostfw block set with timeout
   (hostfw can only tighten).

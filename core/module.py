@@ -22,6 +22,7 @@ MAX_PANELS = 8
 MAX_ITEMS = 50
 MAX_COLUMNS = 12
 MAX_ROWS = 200
+MAX_DETAIL = 40          # k / v pairs per table row, shown on enter
 MAX_SPARK = 120
 MAX_EVENTS = 100
 MIN_INTERVAL = 1.0
@@ -114,9 +115,21 @@ def _table(p: dict, w: str) -> dict:
         cells = _list(r, "cells", wr)
         if len(cells) != len(cols) or not all(isinstance(c, str) for c in cells):
             raise InvalidSnapshot(f"{wr}.cells: {len(cols)} str required")
-        rows.append({"cells": [truncate(c, MAX_STR) for c in cells],
-                     "sev": _choice(r, "sev", SEVS, wr, "ok")})
+        row = {"cells": [truncate(c, MAX_STR) for c in cells],
+               "sev": _choice(r, "sev", SEVS, wr, "ok")}
+        if "detail" in r:
+            row["detail"] = _detail(r, wr)
+        rows.append(row)
     return {"columns": [truncate(c, MAX_STR) for c in cols], "rows": rows}
+
+
+def _detail(r: dict, w: str) -> list:
+    out = []
+    for i, it in enumerate(_list(r, "detail", w)[:MAX_DETAIL]):
+        wi = f"{w}.detail[{i}]"
+        it = _dict(it, wi)
+        out.append({"k": _str(it, "k", wi), "v": _str(it, "v", wi)})
+    return out
 
 
 def _spark(p: dict, w: str) -> dict:
