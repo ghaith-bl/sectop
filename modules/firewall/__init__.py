@@ -9,6 +9,7 @@ See docs/modules/firewall.md.
 """
 
 import collections
+import ipaddress
 import os
 import re
 import stat
@@ -26,7 +27,8 @@ BOOT_TIMEOUT = 5.0       # boot journal scan, once in init()
 HS_STALE = 180           # WireGuard rejects keys after 180 s
 HOLD = 60.0              # seconds a new blocked packet keeps its severity in status
 SPARK = 120
-MAX_CONNS = 50
+MAX_PEERS = 200          # remote addresses kept, least recently seen out first
+MAX_SOCKS = 10           # open sockets listed in a peer's detail
 MAX_EVENTS = 100
 MAX_AUDIT = 200          # audit flows (grouped repeats) kept, newest first
 MAX_PORTS = 10           # varying ports kept per flow, shown in its detail
@@ -62,6 +64,9 @@ KS_KINDS = {"out_ks", "fwd_vm_ks"}              # always dropped by hostfw
 LOG_ONLY = {"in_noise", "in_lan", "in_vpn"}     # hostfw logs, firewalld zone decides
 AUDIT_COLUMNS = ["last", "n", "dir", "verdict", "proto", "uid", "prog", "src", "dst", "iface"]
 LEAK_COLUMNS = ["time", "uid", "proto", "dst", "iface", "context"]
+PEER_COLUMNS = ["peer", "open", "new", "drop", "prog", "last"]
+CGNAT = ipaddress.ip_network("100.64.0.0/10")
+ULA = ipaddress.ip_network("fc00::/7")
 CONTEXT_NOTE = {
     "pre-connect": "before the first flow via the tunnel this boot "
                    "(expected: DoH fallback before Proton connects)",
@@ -154,6 +159,7 @@ class State:
         self.held = {}                 # kind -> mono time until its sev is held
         self.blocked = collections.deque(maxlen=SPARK)
         self.flows = {}                # audit flow key -> Flow, oldest first
+        self.peers = {}                # remote address -> Peer, least recently seen first
         self.lines = 0                 # audit lines since start (all flows)
         self.leaks = collections.deque(maxlen=MAX_LEAKS)   # (Entry, context), newest first
         self.recent = {}               # counter name -> deque of (ts, summary), newest first
@@ -687,22 +693,125 @@ def _audit_detail(st: State, e, verdict: str) -> list:
 
 
 def _conns(st: State, checks: list) -> tuple:
-    """-> (panel, parsed connections)."""
+    """-> (open sockets, error or '')."""
     res = st.cmd("ss", "-tunapH", "state", "established")
     if res.rc != 0:
         checks.append(("warn", "ss error"))
-        return _conns_error(_fail(res)), []
-    cs = sorted(conns.parse(res.out), key=lambda c: (",".join(c.procs), c.peer))
-    rows = [{"cells": [c.proto, c.peer, ",".join(c.procs) or "-", c.local]}
-            for c in cs[:MAX_CONNS]]
-    title = f"connections {len(cs)}" + (f" (first {MAX_CONNS})" if len(cs) > MAX_CONNS else "")
-    return {"id": "conns", "title": title, "type": "table",
-            "columns": ["proto", "peer", "proc", "local"], "rows": rows}, cs
+        return [], _fail(res)
+    return conns.parse(res.out), ""
 
 
-def _conns_error(msg: str) -> dict:
-    return {"id": "conns", "title": f"connections: {msg}", "type": "table",
-            "columns": ["proto", "peer", "proc", "local"], "rows": [], "sev": "warn"}
+class Peer:
+    """One remote address: logged lines (audit) + open sockets (ss)."""
+
+    def __init__(self, ts):
+        self.first = self.last = ts
+        self.new = self.drop = 0
+        self.verdicts = collections.Counter()
+        self.progs, self.uids, self.ports, self.ifaces = [], [], [], []
+
+
+def _addr(text: str):
+    """Remote address worth listing, or None (loopback, multicast, broadcast, junk)."""
+    try:
+        a = ipaddress.ip_address(text)
+    except ValueError:
+        return None
+    if a.is_loopback or a.is_multicast or a.is_unspecified or str(a) == "255.255.255.255":
+        return None
+    return a
+
+
+def _scope(a) -> str:
+    if a.is_global:
+        return "public"
+    if a.version == 4 and a in CGNAT:
+        return "shared (CGNAT)"
+    if a.is_link_local:
+        return "link-local"
+    if a.version == 6 and a in ULA:
+        return "unique local (ULA)"
+    return "private" if a.is_private else "special"
+
+
+def _add(lst: list, value: str, limit: int = MAX_SOCKS) -> None:
+    if value and value not in lst and len(lst) < limit:
+        lst.append(value)
+
+
+def _peer(st: State, ip: str, ts: float) -> Peer:
+    p = st.peers.pop(ip, None) or Peer(ts)
+    st.peers[ip] = p                                        # most recent at the end
+    p.last = max(p.last, ts)
+    return p
+
+
+def _peers(st: State, entries: list, cs: list, err: str, live: str, wall: float) -> dict:
+    """peers box: one row per remote address, from log lines and open sockets."""
+    idx = conns.index(cs)
+    for e in entries:
+        if e.kind in SEV and SEV[e.kind] is None:
+            continue
+        f = e.fields
+        inbound = e.dir == "in"
+        a = _addr(f.get("SRC" if inbound else "DST", ""))
+        if a is None:
+            continue
+        p = _peer(st, str(a), e.ts)
+        verdict = _verdict(e.kind, live)
+        p.verdicts[verdict] += 1
+        if verdict == "allow":
+            p.new += 1
+        else:
+            p.drop += 1
+        prog, iface = _prog(e, idx)
+        for name in prog.split(","):
+            if name not in ("?", "-", ""):
+                _add(p.progs, name)
+        _add(p.uids, f.get("UID", ""))
+        _add(p.ports, f.get("SPT" if inbound else "DPT", ""))
+        _add(p.ifaces, iface)
+    socks = collections.defaultdict(list)
+    for c in cs:
+        host, port = conns.split(c.peer)
+        a = _addr(host)
+        if a is None:
+            continue
+        socks[str(a)].append(c)
+        p = _peer(st, str(a), wall)
+        for name in c.procs:
+            _add(p.progs, name)
+        _add(p.ports, port)
+    while len(st.peers) > MAX_PEERS:
+        del st.peers[next(iter(st.peers))]                  # least recently seen out
+    order = sorted(sorted(st.peers.items()), reverse=True,     # open first, then newest
+                   key=lambda kv: (len(socks[kv[0]]) > 0, kv[1].last, len(socks[kv[0]])))
+    rows = [_peer_row(st, ip, p, socks[ip]) for ip, p in order]
+    n_open = sum(len(v) for v in socks.values())
+    title = f"peers {len(rows)}  {n_open} open" + (f"  (ss: {err})" if err else "")
+    return {"id": "peers", "title": title, "type": "table", "columns": list(PEER_COLUMNS),
+            "rows": rows, "sev": "warn" if err else "ok"}
+
+
+def _peer_row(st: State, ip: str, p: Peer, socks: list) -> dict:
+    progs = p.progs[:MAX_PROGS]
+    prog = ",".join(progs) + ("+" if len(p.progs) > MAX_PROGS else "") if progs else "?"
+    if p.drop and not (p.new or socks):
+        tone = "red"                                        # only dropped / blocked
+    else:
+        tone = "blue" if p.new or socks else "plain"
+    detail = [("scope", _scope(ipaddress.ip_address(ip))),
+              ("open now", f"{len(socks)} socket{'s' if len(socks) != 1 else ''}")]
+    for c in socks[:MAX_SOCKS]:
+        detail.append(("socket", f"{c.proto} {c.local} -> {c.peer}  "
+                                 f"{','.join(c.procs) or '-'}"))
+    detail += [("logged", f"{p.new} new flows, {p.drop} dropped / blocked lines"),
+               ("verdicts", ", ".join(f"{v} {n}" for v, n in p.verdicts.most_common()) or "-"),
+               ("first seen", st.stamp(p.first)), ("last seen", st.stamp(p.last)),
+               ("programs", ", ".join(p.progs) or "-"), ("uids", ", ".join(p.uids) or "-"),
+               ("ports", ", ".join(p.ports) or "-"), ("ifaces", ", ".join(p.ifaces) or "-")]
+    return {"cells": [ip, str(len(socks)), str(p.new), str(p.drop), prog, st.hms(p.last)],
+            "tone": tone, "id": ip, "detail": [{"k": k, "v": v} for k, v in detail]}
 
 
 def _note(items: list, key: str, err: str, value):
@@ -790,12 +899,13 @@ def collect(st: State) -> dict:
     panels.append({"id": "blocked", "title": "blocked / tick", "type": "spark",
                    "values": list(st.blocked), "unit": "pkt",
                    "sev": "warn" if blocked else "ok"})
-    conns_panel, cs = _safe(lambda: _conns(st, checks), "ss", checks,
-                            lambda e: (_conns_error(e), []))
+    cs, ss_err = _safe(lambda: _conns(st, checks), "ss", checks, lambda e: ([], e))
     panels.append(_safe(lambda: _audit(st, entries, cs, live), "audit", checks,
                         lambda e: {"id": "audit", "title": f"audit: {e}", "type": "table",
                                    "columns": list(AUDIT_COLUMNS), "rows": [], "sev": "warn"}))
-    panels.append(conns_panel)
+    panels.append(_safe(lambda: _peers(st, entries, cs, ss_err, live, wall), "peers", checks,
+                        lambda e: {"id": "peers", "title": f"peers: {e}", "type": "table",
+                                   "columns": list(PEER_COLUMNS), "rows": [], "sev": "warn"}))
 
     status = worst(*(s for s, _ in checks))
     leak = totals.get("out_leak")

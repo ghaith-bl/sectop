@@ -326,7 +326,7 @@ class TestCollect(Base):
         self.assertEqual(v["default v6"], ("none", "ok"))
         self.assertEqual(v["recv / sent"], ("19.5MB / 3.1MB", "ok"))
         self.assertEqual([p["id"] for p in s["panels"]],
-                         ["hostfw", "vpn", "counters", "leak", "blocked", "audit", "conns"])
+                         ["hostfw", "vpn", "counters", "leak", "blocked", "audit", "peers"])
         counters = next(p for p in s["panels"] if p["id"] == "counters")
         self.assertEqual(counters["title"], "hostfw counters  (9 zero hidden)")
 
@@ -718,15 +718,81 @@ class TestCollect(Base):
         self.assertEqual(v["tunnel"], ("ValueError: wg: no peer in latest-handshakes", "warn"))
         self.assertTrue(v["routes"][0].startswith("JSONDecodeError"))
         self.assertEqual(self.items(s, "hostfw")["mode"], ("enforce", "ok"))
-        self.assertEqual(next(p for p in s["panels"] if p["id"] == "conns")["title"],
-                         "connections 5")
+        self.assertEqual(self.panel(s, "peers")["title"], "peers 3  5 open")
 
-    def test_conns(self):
+    def test_peers_from_sockets(self):
+        self.st.hms = lambda ts: f"t{int(ts) % 100}"
         s = self.collect()
-        p = next(p for p in s["panels"] if p["id"] == "conns")
-        self.assertEqual(p["title"], "connections 5")
-        self.assertEqual(p["rows"][0]["cells"],
-                         ["udp", "192.168.8.1:67", "NetworkManager", "192.168.8.102%wlo1:68"])
+        p = self.panel(s, "peers")
+        self.assertEqual(p["columns"], ["peer", "open", "new", "drop", "prog", "last"])
+        self.assertEqual(p["title"], "peers 3  5 open")
+        self.assertEqual([r["cells"] for r in p["rows"]], [
+            ["203.0.113.10", "3", "0", "0", "brave", "t45"],
+            ["192.168.8.1", "1", "0", "0", "NetworkManager", "t45"],      # tie: by address
+            ["198.51.100.20", "1", "0", "0", "brave", "t45"]])
+        self.assertEqual([r["tone"] for r in p["rows"]], ["blue"] * 3)
+        self.assertEqual(p["rows"][0]["id"], "203.0.113.10")
+        d = [(it["k"], it["v"]) for it in p["rows"][0]["detail"]]
+        self.assertEqual(d[:5], [
+            ("scope", "private"), ("open now", "3 sockets"),
+            ("socket", "udp 10.2.0.2:37436 -> 203.0.113.10:443  brave"),
+            ("socket", "tcp 10.2.0.2:54294 -> 203.0.113.10:443  brave"),
+            ("socket", "tcp 10.2.0.2:54308 -> 203.0.113.10:443  brave")])
+        self.assertEqual(dict(d)["ports"], "443")
+
+    def test_peers_from_log(self):
+        self.st.hms = lambda ts: f"t{int(ts) % 100}"
+        self.st.stamp = lambda ts: f"T{int(ts)}"
+        self.host.set("ss", ok(""))
+        self.host.set("journalctl", ok(fix("journal-audit.json")))
+        p = self.panel(self.collect(), "peers")
+        cells = {r["cells"][0]: r["cells"] for r in p["rows"]}
+        self.assertEqual(cells["198.51.100.20"], ["198.51.100.20", "0", "1", "0", "?", "t51"])
+        self.assertEqual(cells["203.0.113.11"][2:4], ["0", "1"])     # the leak: blocked
+        self.assertEqual(cells["192.168.8.50"][2:4], ["1", "1"])     # lan allow out + in_lan in
+        self.assertNotIn("ff02::1:ff00:1", cells)                    # multicast skipped
+        self.assertNotIn("192.168.8.227", cells)                     # in_noise hidden
+        rows = {r["cells"][0]: r for r in p["rows"]}
+        self.assertEqual(rows["203.0.113.11"]["tone"], "red")        # only blocked
+        d = {it["k"]: it["v"] for it in rows["192.168.8.50"]["detail"]}
+        self.assertEqual(d["verdicts"], "zone 1, allow 1")         # most first, then seen first
+        self.assertEqual((d["first seen"], d["last seen"]), ("T1792410755", "T1792410759"))
+        self.assertEqual((d["ports"], d["ifaces"], d["uids"]), ("51544, 22", "wlo1", "1000"))
+        self.assertEqual(p["rows"][0]["cells"][0], "192.168.8.50")   # most recent first
+
+    @mock.patch.object(fw, "MAX_PEERS", 20)
+    def test_peers_order_and_limit(self):
+        self.host.set("ss", ok(""))
+        for i in range(fw.MAX_PEERS + 3):
+            self.host.set("journalctl", ok(jline(f"c{i}", 1792410000 + i,
+                                                 f"HFW-OUT-NEW: OUT=proton0 SRC=10.2.0.2 "
+                                                 f"DST=198.51.{i // 256}.{i % 256} PROTO=TCP "
+                                                 f"SPT=40000 DPT=443 UID=1000 ")))
+            self.collect()
+        self.host.set("journalctl", ok(""))
+        self.host.set("ss", ok(fix("ss.txt")))
+        p = self.panel(self.collect(), "peers")
+        self.assertEqual(len(p["rows"]), fw.MAX_PEERS)
+        self.assertEqual(p["rows"][0]["cells"][1], "3")               # open sockets first
+        ips = [r["cells"][0] for r in p["rows"]]
+        self.assertNotIn("198.51.0.5", ips)                          # least recently seen out
+        self.assertIn("198.51.0.6", ips)
+        self.assertEqual(ips[3], f"198.51.0.{fw.MAX_PEERS + 2}")     # then newest log line
+
+    def test_peers_ss_error(self):
+        self.host.set("ss", fail("ss: boom"))
+        p = self.panel(self.collect(), "peers")
+        self.assertEqual((p["title"], p["sev"]), ("peers 0  0 open  (ss: ss: boom)", "warn"))
+
+    def test_scope(self):
+        import ipaddress
+        for ip, want in (("8.8.8.8", "public"), ("10.2.0.1", "private"),
+                         ("100.85.0.1", "shared (CGNAT)"), ("fe80::1", "link-local"),
+                         ("fdeb:446c:912d:8da::2", "unique local (ULA)"),
+                         ("2607:6bc0::10", "public")):
+            self.assertEqual(fw._scope(ipaddress.ip_address(ip)), want, ip)
+        for bad in ("127.0.0.53", "::1", "ff02::1", "255.255.255.255", "0.0.0.0", "x"):
+            self.assertIsNone(fw._addr(bad), bad)
 
     def test_commands(self):
         self.collect()

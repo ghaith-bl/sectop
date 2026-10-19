@@ -24,7 +24,7 @@ can decide from what is on screen. Read-only until the privilege split.
 
 | key | screen | content |
 |---|---|---|
-| 1 | firewall | hostfw, vpn, counters (non-zero only), sparks, audit (in + out, allowed + blocked), connections |
+| 1 | firewall | hostfw, vpn, counters (non-zero only), out_leak, spark, audit (in + out, allowed + blocked, grouped), peers (remote IPs) |
 | 2 | security | grouped warnings / errors / security events; posture checks |
 | 3 | processes | cpu, memory, disk, io, temperatures, top processes, services |
 

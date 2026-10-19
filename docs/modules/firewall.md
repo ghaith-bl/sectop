@@ -16,7 +16,7 @@ All via `core.run.run()`, timeout 1.0 s each, binaries from `/usr/bin` (fallback
 | log lines | `journalctl _TRANSPORT=kernel -o json --output-fields=MESSAGE -q --no-pager --after-cursor=<c>` |
 | tunnel | `wg show proton0 latest-handshakes`, `transfer`, `endpoints`, `fwmark` |
 | routes | `ip -j -4 route show default`, `ip -j -6 route show default` |
-| connections | `ss -tunapH state established` |
+| open sockets (peers, prog) | `ss -tunapH state established` |
 
 Once in `init()` (boot scan, timeout 5 s each, see out_leak box):
 
@@ -81,7 +81,7 @@ failure. Keys are rejected after 180 s, so age > 180 s with traffic going out = 
 
 hostfw (kv), vpn (kv), hostfw counters (table: pkts, new this tick, bytes; zero counters
 hidden, count in the title), out_leak (table, see below), blocked / tick (spark, deny
-kinds except hidden), audit (table, see below), connections (table, max 50).
+kinds except hidden), audit (table, see below), peers (table, see below).
 
 - Colors (`tone`): audit, out_leak and counter rows by verdict: allow blue, drop (kill
   switch) red, block yellow, zone / pass / deny plain. Healthy kv values green (table
@@ -91,6 +91,31 @@ kinds except hidden), audit (table, see below), connections (table, max 50).
   System journal view: security screen (phase 3).
 - vpn `recv / sent` = bytes received / sent through the tunnel since it came up
   (`wg show transfer`, summed over peers, 1000-based units). Reset on every reconnect.
+
+## Peers box
+
+One row per remote address the host talks to (replaces the connections box): from
+audit lines (dst for out / fwd, src for in; hidden kinds skipped) and open sockets
+(`ss` peer). Loopback, multicast, broadcast, unspecified left out. 200 kept, least
+recently seen out first. Order: with open sockets first, then newest, ties by address.
+Title: `peers <addresses>  <sockets> open`, `(ss: <error>)` if ss failed.
+
+| column | value |
+|---|---|
+| peer | address |
+| open | open sockets now (`ss` established) |
+| new | logged allowed new flows (`*-NEW`, exceptions) since sectop started |
+| drop | logged drop / block / zone lines (samples, rate limit) |
+| prog | programs from `ss` and matched log lines, max 3 then `+`, else `?` |
+| last | last log line or now while a socket is open |
+
+- Tone: blue = open or allowed flows, red = only dropped / blocked lines.
+- Row detail: scope (public, private, shared (CGNAT), link-local, unique local (ULA)),
+  open sockets (proto local -> peer program, max 10), logged counts, verdict counts,
+  first / last seen, programs, uids, ports (remote side), ifaces.
+- Counts are log lines, not packets: hostfw logs the first packets of a flow and
+  samples blocked ones. Exact packets per address would need a counter per address in
+  hostfw (dynamic set with counters), not done.
 
 ## Counter detail
 
