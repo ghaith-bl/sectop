@@ -111,14 +111,27 @@ spark (values max 120, numbers):
 - `msg`: one line.
 - Core adds `src` = module NAME. Shared feed, last 500, newest first.
 
-## Errors
+## Errors (`core/app.py`)
 
-- `collect` raises or returns an invalid Snapshot -> module state error.
+- `collect` raises (incl. `SystemExit`) or returns an invalid Snapshot -> module state error.
   Header shows exception type + message. Last good panels kept, marked stale.
-  Other modules unaffected.
-- 3 errors in a row -> interval x2, max 60 s. Reset on first success.
-- Last good Snapshot older than 3 x INTERVAL -> status unknown.
-- `collect` slower than INTERVAL -> marked slow. Keep `run()` timeouts below INTERVAL.
+  Other modules unaffected. `KeyboardInterrupt` and SIGTERM stop sectop.
+- 3 errors in a row -> interval x2, each further error x2 again, max 60 s
+  (never below the configured interval). Reset on first success.
+- Last good Snapshot older than 3 x interval (configured, not backed off) -> status unknown.
+- `collect` slower than interval -> marked slow, next run a full interval after it ended.
+  Keep `run()` timeouts below interval.
+- Module not loaded (registry error) -> status unknown, header shows the error.
+  Disabled -> shown as OFF.
+
+## Screen (`core/render.py`)
+
+- Top line, then per module: header `[STATUS] name  summary  | flags`, then its panels.
+  Shared event feed at the bottom, newest first.
+- Every string goes through `display()`. Width counted in terminal cells (wide chars = 2).
+- Color only for problems: ok values plain; info, warn, crit, unknown colored.
+- Short screen: feed keeps at least 6 lines, module lines cut with `... N more lines`.
+- Keys: `m` toggle public IP mask, `q` quit.
 
 ## Validation (`core/module.py`)
 
