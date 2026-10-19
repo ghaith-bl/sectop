@@ -181,6 +181,60 @@ class TestBoxes(unittest.TestCase):
         self.assertNotIn("out_leak", text(top))                    # spark: own row
         self.assertTrue(find(lines, " out_leak / tick "))
 
+    def wide_tables(self):
+        m = mod()
+        m["panels"] = [
+            {"id": "audit", "title": "audit", "type": "table", "sev": "ok",
+             "columns": ["time", "src", "dst"],
+             "rows": [{"cells": ["12:00:00", "[fdeb:446c:912d:8da::2]:51814", "10.0.0.1:443"],
+                       "sev": "ok"}] * 3},
+            {"id": "conns", "title": "conns", "type": "table", "sev": "ok",
+             "columns": ["peer", "proc"],
+             "rows": [{"cells": ["10.2.0.1:53", "systemd-resolve"], "sev": "ok"}]}]
+        return m
+
+    def test_shrink(self):
+        self.assertEqual(render.shrink([10, 30, 8], [4, 6, 3], 40), [10, 22, 8])   # widest first
+        self.assertEqual(render.shrink([10, 12], [4, 6], 10), [4, 6])              # floors hold
+        self.assertEqual(render.shrink([5, 5], [3, 3], 20), [5, 5])                # fits: kept
+        self.assertEqual(render.shrink([9, 9], [3, 3], 14), [7, 7])                # ties share
+
+    def test_tables_shrink_side_by_side(self):
+        # natural: audit 8+29+12+4 = 53, conns 15+11+2 = 28 -> 85 cells; screen 70
+        f = frame([self.wide_tables()], width=70, height=20)
+        top = next(text(line) for line in f.lines if "audit" in text(line))
+        self.assertIn(" conns ", top)                               # same row
+        self.assertTrue(find(f.lines, f"{BV} peer         proc "))
+        [row] = find(f.lines, "12:00:00")[:1]
+        self.assertIn("~", row)                                     # widest column cut
+        self.assertIn("10.0.0.1:443", row)                          # others kept whole
+        self.assertIn("systemd-resolve", row)
+        for line in f.lines:
+            self.assertLessEqual(cols(text(line)), 70)
+
+    def test_tables_stack_below_least(self):
+        f = frame([self.wide_tables()], width=50, height=20)
+        tops = [text(line) for line in f.lines if text(line)[:1] in "\u250c\u251c"]
+        self.assertEqual(len(tops), 3)                              # audit, conns, events rows
+        top = next(text(line) for line in f.lines if "audit" in text(line))
+        self.assertNotIn("conns", top)                              # conns on its own row
+
+    def test_kv_shrinks_next_to_table(self):
+        m = mod()
+        m["panels"][0]["items"][1]["v"] = "armed, 2m 05s left -> /usr/sbin/nft flush chain x"
+        m["panels"][1]["rows"][0]["cells"][1] = "d" * 60
+        f = frame([m], width=100, height=20)
+        top = next(text(line) for line in f.lines if " hostfw " in text(line))
+        self.assertIn("Connections", top)                           # kv gave cells back
+        self.assertTrue(find(f.lines, "rollback  armed, 2m"))
+        self.assertTrue(any("~" in t for t in find(f.lines, "rollback")))
+
+    def test_title_fits_natural_width(self):
+        m = mod()
+        m["panels"][0]["title"] = "hostfw counters  (11 zero hidden)"
+        f = frame([m], width=120)
+        self.assertTrue(find(f.lines, " hostfw counters  (11 zero hidden) "))
+
     def test_narrow_stacks(self):
         lines = lay(width=30)
         tops = [text(line) for line in lines if text(line)[:1] in "\u250c\u251c"]

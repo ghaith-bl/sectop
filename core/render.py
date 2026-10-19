@@ -32,6 +32,7 @@ TAG_W = 6                                    # "[CRIT]"
 SPARK = "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588"
 KEY_MAX = 24                                 # kv / detail key column
 COL_MAX = 40                                 # table column
+COL_MIN = 6                                  # table column after shrinking (or its header)
 KV_MIN, KV_MAX = 24, 56                      # kv content width
 TABLE_MIN = 24                               # table content width
 SPARK_W = 40                                 # spark content width
@@ -135,6 +136,20 @@ def wrap(s: str, width: int) -> list:
     return out
 
 
+def shrink(widths: list, floors: list, room: int) -> list:
+    """Column widths that fit room cells: the widest column loses a cell first,
+    none below its floor. Cut cells end in TRUNC; detail shows them whole."""
+    out = list(widths)
+    over = sum(out) - room
+    while over > 0:
+        i = max(range(len(out)), key=lambda j: (out[j] - floors[j] > 0, out[j], -j))
+        if out[i] <= floors[i]:
+            break                            # at the floors: the line gets cut
+        out[i] -= 1
+        over -= 1
+    return out
+
+
 def _line(width: int, mask: bool, *parts) -> list:
     """parts: (text, style). Sanitized, cut to width cells in total."""
     out, left = [], width
@@ -235,8 +250,15 @@ class _Box:
         self.cursor = kind not in ("note", "detail")
         self.prep = None
         self.w = self.h = 0                  # natural content width, lines
+        self.least = 0                       # content width it can shrink to
 
     def measure(self, mask: bool) -> None:
+        d = self.data
+        self._measure(mask)
+        if self.kind in ("kv", "table"):     # natural width also fits the title
+            self.w = max(self.w, cols(display(self.title, mask)) + 3)
+
+    def _measure(self, mask: bool) -> None:
         d = self.data
         if self.kind == "kv":
             keys = [display(it["k"], mask) for it in d["items"]]
@@ -245,16 +267,21 @@ class _Box:
             self.prep = (keys, kw)
             vw = max((cols(v) for v in vals), default=1)
             self.w = min(KV_MAX, max(KV_MIN, kw + 2 + vw))
+            self.least = KV_MIN
             self.h = max(1, len(keys))
         elif self.kind == "table":
             head = [display(c, mask) for c in d["columns"]]
             rows = [[display(c, mask) for c in r["cells"]] for r in d["rows"]]
             widths = [min(COL_MAX, max(cols(c) for c in col)) for col in zip(head, *rows)]
-            self.prep = (head, rows, widths)
-            self.w = max(TABLE_MIN, sum(widths) + 2 * (len(widths) - 1))
+            floors = [min(w, max(COL_MIN, cols(h))) for w, h in zip(widths, head)]
+            self.prep = (head, rows, widths, floors)
+            gaps = 2 * (len(widths) - 1)
+            self.w = max(TABLE_MIN, sum(widths) + gaps)
+            self.least = min(self.w, max(TABLE_MIN, sum(floors) + gaps))
             self.h = 1 + max(1, len(rows))
         elif self.kind == "spark":
             self.w, self.h = SPARK_W, 1
+            self.least = SPARK_W
         else:                                # feed, note, detail
             self.w, self.h = 0, max(1, len(d))
 
@@ -268,7 +295,8 @@ class _Box:
                     for k, it in zip(keys, d["items"])]
             return [], body or dash
         if self.kind == "table":
-            head, rows, widths = self.prep
+            head, rows, widths, floors = self.prep
+            widths = shrink(widths, floors, w - 2 * (len(widths) - 1))
 
             def row(cells):
                 return "  ".join(pad(c, cw) for c, cw in zip(cells, widths)).rstrip()
@@ -381,29 +409,39 @@ def _overlay(boxes: list, ui, mask: bool, tsfmt):
 
 def _pack(boxes: list, width: int) -> list:
     """Rows of [box, cell width]. Cell = content + 1 space each side.
-    Boxes join the row while they fit; extra width is shared in the row."""
+    A box joins the row while its shrunk width (b.least) fits. A row wider
+    than the screen gives cells back from the box with the most room above
+    its least width; extra width is shared in the row."""
     rows, cur, used = [], [], 1
     for b in boxes:
         cw = width - 2 if b.full else min(b.w + 2, width - 2)
+        least = cw if b.full else min(b.least + 2, cw)
         # sparks (1 line) share a row only with sparks: no tall empty box
         mixed = cur and (b.kind == "spark") != (cur[0][0].kind == "spark")
-        if cur and (b.full or mixed or used + cw + 1 > width):
+        if cur and (b.full or mixed or used + least + 1 > width):
             rows.append(cur)
             cur, used = [], 1
-        cur.append([b, cw])
-        used += cw + 1
+        cur.append([b, cw, least])
+        used += least + 1
         if b.full:
             rows.append(cur)
             cur, used = [], 1
     if cur:
         rows.append(cur)
-    for row in rows:                         # share leftover width in the row
-        extra = width - 1 - sum(cw + 1 for _, cw in row)
+    for row in rows:
+        over = sum(c[1] + 1 for c in row) + 1 - width
+        while over > 0:                      # too wide: shrink the box with most slack
+            cell = max(row, key=lambda c: c[1] - c[2])
+            if cell[1] <= cell[2]:
+                break
+            cell[1] -= 1
+            over -= 1
+        extra = -over                        # share leftover width in the row
         if extra > 0:
             each, rest = divmod(extra, len(row))
             for i, cell in enumerate(row):
                 cell[1] += each + (rest if i == len(row) - 1 else 0)
-    return rows
+    return [[[b, cw] for b, cw, _ in row] for row in rows]
 
 
 def _heights(rows: list, room: int) -> list:

@@ -142,9 +142,14 @@ spark (values max 120, numbers):
   - box grid
   - key help
 - Box grid: one box per panel, in module order, then the events box.
-  - Width: boxes join a row while they fit, extra width shared in the row.
+  - Width: a box joins the row while its least width fits, extra width shared in the row.
     Natural content width: kv = key + value (24..56 cells), table = its columns (min 24),
-    spark 40, events / note = full row. Sparks share a row only with sparks.
+    kv / table at least the title, spark 40, events / note = full row.
+    Sparks share a row only with sparks.
+  - Least width: kv 24, table = column floors (each column: its header, at least 6 cells,
+    never more than natural), spark 40. A row wider than the screen takes cells from the
+    box with the most room above its least width. In a shrunk table the widest column
+    loses a cell first; cut cells end in `~`, `enter` shows them whole.
   - Height: each row gets its content height. Leftover lines go to the last row with a
     table, events or note. Too few lines: the tallest row shrinks first (lower row on a tie).
     A row that cannot get one line is not drawn.
