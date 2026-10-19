@@ -109,9 +109,15 @@ spark (values max 120, numbers):
 
 ## Validation (`core/module.py`)
 
-- Missing required key or wrong type -> invalid Snapshot.
-- Unknown keys ignored.
-- Strings cut to 512 chars, lists cut to the limits above.
+- `validate()` returns a new Snapshot: known keys only, defaults filled
+  (`sev` ok, `unit` ""). Input not changed.
+- Missing required key or wrong type -> `InvalidSnapshot`. Also: duplicate panel id,
+  table row cell count != columns, non-finite numbers, `v` not int 1.
+- Strings cut to 512 chars (last char `~`).
+- Lists cut: panels 8, kv items 50, columns 12 (more = invalid), rows 200 (first kept),
+  spark values 120 and events 100 (newest kept).
+- `check_module()`: NAME, INTERVAL (number >= 1.0), init / collect callable,
+  close callable if present. Else `ValueError`, module not loaded.
 
 ## Running commands (`core/run.py`)
 
