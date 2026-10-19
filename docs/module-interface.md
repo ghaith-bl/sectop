@@ -153,9 +153,15 @@ run(argv: list[str], timeout: float = 1.5) -> Result
 
 ## Config
 
-`/etc/sectop/config.toml`, read with `tomllib`.
-Must be owned by root and not group/other writable, else refuse to start.
-Missing file -> defaults.
+`/etc/sectop/config.toml`, read with `tomllib` (`core/config.py`).
+
+- File and its directory: owned by root, not group/other writable. File opened with
+  `O_NOFOLLOW`, must be a regular file, max 64 KiB. Directory must not be a symlink.
+  Else `ConfigError`, refuse to start.
+- Missing file or directory -> defaults.
+- Strict: unknown tables or `[core]` keys -> error (catches typos).
+- `[modules.<name>]`: `enabled` (bool, default true), `interval` (number >= 1.0,
+  default module INTERVAL). Other keys are passed to the module `init()` as `cfg`.
 
 ```toml
 [core]
