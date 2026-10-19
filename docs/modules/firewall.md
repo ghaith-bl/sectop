@@ -128,24 +128,34 @@ Screen: firewall (`core/screens.py`), no events box: the audit box shows the sam
 
 ## Audit
 
-One row per HFW log line, newest first, last 200 kept (in state). Hidden kinds (in_noise)
-skipped. Row severity = kind severity, allowed = ok.
+One row per flow, repeats grouped, newest flow first, last 200 flows kept (in state).
+Hidden kinds (in_noise) skipped. Row severity = kind severity, allowed = ok.
 out_new / fwd_vm_new (every new flow) go to the audit box only, not to events.
+Title: `audit <flows> flows  (<lines> lines)`, lines = all since sectop started.
+
+- Flow = same kind, dir, proto, uid, src, dst, iface. src / dst leave out the larger of
+  the two ports: it is the ephemeral one (out: src port; inbound to a service: src port;
+  late reply from :443: dst port). Equal ports or no ports: both kept.
+- A new line of a flow moves it to the top. Row `id` = the flow key, so the cursor stays
+  on the flow.
 
 | column | value |
 |---|---|
-| time | local HH:MM:SS of the journal entry |
+| last | local HH:MM:SS of the newest line |
+| n | lines of this flow |
 | dir | out, in, fwd (from the prefix) |
 | verdict | allow (allowed kinds), drop (out_ks, fwd_vm_ks), zone (in_*: hostfw logs, firewalld zone decides), block / pass (deny kinds, live mode enforce / observe) |
 | proto | PROTO, lower case |
 | uid | UID (OUT rules with `skuid`), else `-` |
-| prog | out: process from `ss` with the same proto + src + dst (open flows only), else `?`; fwd_vm_*: `vm`; in: `-` |
-| src, dst | address:port, IPv6 compressed (`[v6]:port`) |
+| prog | out: every process seen with `ss` for a line of the flow (same proto + src + dst, open flows only), max 3 then `+`, else `?`; fwd_vm_*: `vm`; in: `-` |
+| src, dst | address[:port], IPv6 compressed (`[v6]:port`) |
 | iface | out: OUT, in: IN, fwd: IN>OUT |
 
-- Row detail (`enter`): rule (kind + hostfw counter comment), verdict meaning, full local
-  time, log prefix, every non-empty log field in log order (IN, OUT, MAC, SRC, DST, LEN, TTL,
-  PROTO, ports, UID ...), flags (DF, SYN ...).
+- Row detail (`enter`): count + first line time, the left-out ports (last 10, newest
+  first), all programs, then the newest line:
+  rule (kind + hostfw counter comment), verdict meaning, full local time, log prefix,
+  every non-empty log field in log order (IN, OUT, MAC, SRC, DST, LEN, TTL, PROTO, ports,
+  UID ...), flags (DF, SYN ...).
 - Blocked lines are samples (hostfw rate limit 10/min per rule), allowed new flows
   5/s burst 50. Counters stay exact.
 - Program for blocked flows: mostly `?` (rejected connect closes before the next poll).

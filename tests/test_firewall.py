@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 import modules.firewall as fw
 from core.module import check_module, validate
@@ -166,6 +167,26 @@ class TestConns(unittest.TestCase):
         self.assertEqual(cs[0].procs, ("my app", 'b\\"q'))
         self.assertEqual(cs[1].procs, ())
         self.assertEqual(len(cs), 2)
+
+
+class TestFlow(unittest.TestCase):
+    def flow(self, **f):
+        return journal.flow(journal.Entry(0, "HFW-OUT-NEW", "out_new", f, ()))
+
+    def test_larger_port_left_out(self):
+        self.assertEqual(self.flow(SRC="10.2.0.2", DST="1.2.3.4", SPT="51000", DPT="443"),
+                         ("10.2.0.2", "1.2.3.4:443", "src", "51000"))
+        self.assertEqual(self.flow(SRC="1.2.3.4", DST="10.2.0.2", SPT="443", DPT="38780"),
+                         ("1.2.3.4:443", "10.2.0.2", "dst", "38780"))    # late reply from :443
+        self.assertEqual(self.flow(SRC="fdeb:446c:912d:08da:0:0:0:2", DST="2001:db8::1",
+                                   SPT="51814", DPT="443"),
+                         ("fdeb:446c:912d:8da::2", "[2001:db8::1]:443", "src", "51814"))
+
+    def test_kept(self):
+        self.assertEqual(self.flow(SRC="a", DST="b", SPT="123", DPT="123"),
+                         ("a:123", "b:123", "", ""))
+        self.assertEqual(self.flow(SRC="fe80::1", DST="ff02::1"), ("fe80::1", "ff02::1", "", ""))
+        self.assertEqual(self.flow(SRC="a", DST="b", SPT="x", DPT="1"), ("a:x", "b:1", "", ""))
 
 
 class TestConnsKey(unittest.TestCase):
@@ -460,29 +481,31 @@ class TestCollect(Base):
 
     def test_audit(self):
         p, rows, sevs = self.audit()
-        self.assertEqual(p["columns"], ["time", "dir", "verdict", "proto", "uid", "prog",
+        self.assertEqual(p["columns"], ["last", "n", "dir", "verdict", "proto", "uid", "prog",
                                         "src", "dst", "iface"])
-        self.assertEqual(p["title"], "audit 8")                     # IN-NOISE hidden
+        self.assertEqual(p["title"], "audit 8 flows  (8 lines)")    # IN-NOISE hidden
         self.assertEqual(rows, [                                    # newest first
-            ["t59", "out", "allow", "tcp", "1000", "?", "192.168.8.102:40100", "192.168.8.50:22",
-             "wlo1"],
-            ["t58", "out", "drop", "icmpv6", "-", "?", "fe80::1", "ff02::1:ff00:1",
+            ["t59", "1", "out", "allow", "tcp", "1000", "?", "192.168.8.102", "192.168.8.50:22",
+             "wlo1"],                                               # ephemeral port left out
+            ["t58", "1", "out", "drop", "icmpv6", "-", "?", "fe80::1", "ff02::1:ff00:1",
              "pvpnksintrf0"],
-            ["t57", "fwd", "drop", "udp", "-", "vm", "192.168.122.10:123", "203.0.113.5:123",
-             "virbr0>pvpnksintrf0"],
-            ["t55", "in", "zone", "tcp", "-", "-", "192.168.8.50:51544", "192.168.8.102:22",
+            ["t57", "1", "fwd", "drop", "udp", "-", "vm", "192.168.122.10:123",
+             "203.0.113.5:123", "virbr0>pvpnksintrf0"],             # equal ports: both kept
+            ["t55", "1", "in", "zone", "tcp", "-", "-", "192.168.8.50", "192.168.8.102:22",
+             "wlo1"],                                               # inbound: service port kept
+            ["t54", "1", "out", "block", "tcp", "1000", "?", "192.168.8.102", "203.0.113.11:443",
              "wlo1"],
-            ["t54", "out", "block", "tcp", "1000", "?", "192.168.8.102:46900", "203.0.113.11:443",
-             "wlo1"],
-            ["t53", "fwd", "allow", "tcp", "-", "vm", "192.168.122.10:40000", "198.51.100.22:443",
+            ["t53", "1", "fwd", "allow", "tcp", "-", "vm", "192.168.122.10", "198.51.100.22:443",
              "virbr0>proton0"],
-            ["t52", "out", "allow", "udp", "1000", "?", "10.2.0.2:50000", "203.0.113.50:443",
+            ["t52", "1", "out", "allow", "udp", "1000", "?", "10.2.0.2", "203.0.113.50:443",
              "proton0"],
-            ["t51", "out", "allow", "tcp", "1000", "brave", "10.2.0.2:33146", "198.51.100.20:443",
+            ["t51", "1", "out", "allow", "tcp", "1000", "brave", "10.2.0.2", "198.51.100.20:443",
              "proton0"],                                            # program from ss
         ])
         self.assertEqual(sevs, ["ok", "info", "info", "warn", "crit", "ok", "ok", "ok"])
         detail = {d["k"]: d["v"] for d in p["rows"][4]["detail"]}     # the OUT-LEAK row
+        self.assertEqual(detail["count"], "1 line, first T1792410754.000")
+        self.assertEqual(detail["src ports"], "46900")
         self.assertEqual(detail["rule"], "out_leak  host to internet outside the tunnel")
         self.assertEqual(detail["verdict"], "block  rejected by hostfw (enforce mode)")
         self.assertEqual(detail["time"], "T1792410754.000")
@@ -490,7 +513,11 @@ class TestCollect(Base):
         self.assertEqual((detail["TTL"], detail["UID"], detail["flags"]), ("64", "1000", "DF SYN"))
         self.assertNotIn("IN", detail)                               # empty field skipped
         keys = [d["k"] for d in p["rows"][4]["detail"]]
-        self.assertEqual(keys[:6], ["rule", "verdict", "time", "prefix", "OUT", "SRC"])
+        self.assertEqual(keys[:7], ["count", "src ports", "last line", "rule", "verdict", "time",
+                                    "prefix"])
+        self.assertEqual(p["rows"][4]["id"],
+                         "out_leak|out|tcp|1000|192.168.8.102|203.0.113.11:443|wlo1")
+        self.assertEqual({d["k"]: d["v"] for d in p["rows"][3]["detail"]}["src ports"], "51544")
         inbound = {d["k"]: d["v"] for d in p["rows"][3]["detail"]}
         self.assertTrue(inbound["verdict"].startswith("zone  hostfw only logs"))
         self.assertEqual(inbound["MAC"], "02:00:00:00:00:02:02:00:00:00:00:03:08:00")
@@ -500,7 +527,7 @@ class TestCollect(Base):
 
     def test_tones(self):
         p, rows, _ = self.audit()
-        self.assertEqual([(r[2], t) for r, t in zip(rows, [r["tone"] for r in p["rows"]])], [
+        self.assertEqual([(r[3], t) for r, t in zip(rows, [r["tone"] for r in p["rows"]])], [
             ("allow", "blue"), ("drop", "red"), ("drop", "red"), ("zone", "plain"),
             ("block", "yellow"), ("allow", "blue"), ("allow", "blue"), ("allow", "blue")])
         s = self.collect()
@@ -570,20 +597,62 @@ class TestCollect(Base):
 
     def test_audit_observe(self):
         _, rows, _ = self.audit("nft-observe.json")
-        self.assertEqual(rows[4][2], "pass")                        # logged, not blocked
+        self.assertEqual(rows[4][3], "pass")                        # logged, not blocked
 
+    def ks_lines(self, start, n, dst="2607:6bc0::10", spt=51800, uid="1000"):
+        return "".join(jline(f"k{start + i}", 1792410000 + start + i,
+                             f"HFW-OUT-KS: IN= OUT=pvpnksintrf0 SRC=fdeb:446c:912d:8da::2 "
+                             f"DST={dst} PROTO=TCP SPT={spt + i} DPT=443 SYN UID={uid} ")
+                       for i in range(n))
+
+    def test_audit_groups_repeats(self):
+        self.st.hms = lambda ts: f"t{int(ts) % 100}"
+        self.host.set("journalctl", ok(self.ks_lines(0, 3) + self.ks_lines(10, 1, uid="994")))
+        p = self.panel(self.collect(), "audit")
+        self.assertEqual(p["title"], "audit 2 flows  (4 lines)")
+        self.assertEqual([r["cells"][:2] + r["cells"][5:] for r in p["rows"]], [
+            ["t10", "1", "994", "?", "fdeb:446c:912d:8da::2", "[2607:6bc0::10]:443",
+             "pvpnksintrf0"],
+            ["t2", "3", "1000", "?", "fdeb:446c:912d:8da::2", "[2607:6bc0::10]:443",
+             "pvpnksintrf0"]])
+        d = {it["k"]: it["v"] for it in p["rows"][1]["detail"]}
+        self.assertEqual(d["src ports"], "51802 51801 51800  (newest first)")
+        self.assertEqual(d["SPT"], "51802")                          # fields of the last line
+        old_id = p["rows"][1]["id"]
+        self.tick()
+        self.host.set("journalctl", ok(self.ks_lines(20, 1)))
+        p = self.panel(self.collect(), "audit")
+        self.assertEqual([r["cells"][:2] for r in p["rows"]], [["t20", "4"], ["t10", "1"]])
+        self.assertEqual(p["rows"][0]["id"], old_id)                 # same flow moved to top
+        self.assertEqual(p["title"], "audit 2 flows  (5 lines)")
+
+    def test_audit_programs(self):
+        ss = ("tcp 0 0 10.2.0.2:33146 198.51.100.20:443 users:((\"brave\",pid=1,fd=1))\n"
+              "tcp 0 0 10.2.0.2:33147 198.51.100.20:443 users:((\"curl\",pid=2,fd=1))\n")
+        self.host.set("ss", ok(ss))
+        line = ("HFW-OUT-NEW: IN= OUT=proton0 SRC=10.2.0.2 DST=198.51.100.20 PROTO=TCP "
+                "SPT={} DPT=443 SYN UID=1000 ")
+        self.host.set("journalctl", ok("".join(jline(f"c{i}", 1792410000 + i, line.format(p))
+                                               for i, p in enumerate((33146, 40000, 33147)))))
+        row = self.panel(self.collect(), "audit")["rows"][0]
+        self.assertEqual(row["cells"][6], "brave,curl")             # '?' line adds nothing
+        self.assertEqual({it["k"]: it["v"] for it in row["detail"]}["programs"], "brave, curl")
+
+    @mock.patch.object(fw, "MAX_AUDIT", 20)
     def test_audit_keeps_newest(self):
-        for _ in range(30):                                         # 8 rows per tick
-            p, rows, _ = self.audit()
+        for i in range(fw.MAX_AUDIT + 5):                           # one new flow per tick
+            self.host.set("journalctl", ok(self.ks_lines(i, 1, dst=f"2001:db8::{i:x}")))
+            self.collect()
             self.tick()
-        self.assertEqual(len(rows), fw.MAX_AUDIT)
-        self.assertEqual(p["title"], f"audit {fw.MAX_AUDIT}")
-        self.assertEqual(rows[0][0], "t59")
+        p = self.panel(self.collect(), "audit")
+        self.assertEqual(len(p["rows"]), fw.MAX_AUDIT)
+        self.assertTrue(p["rows"][0]["cells"][8].startswith(f"[2001:db8::{fw.MAX_AUDIT + 4:x}]"))
+        self.assertTrue(p["rows"][-1]["cells"][8].startswith("[2001:db8::5]"))   # oldest out
 
     def test_audit_without_ss(self):
         self.host.set("ss", fail("ss: boom"))
         _, rows, _ = self.audit()
-        self.assertEqual(rows[-1][5], "?")                          # no program, still shown
+        self.assertEqual(rows[-1][6], "?")                          # no program, still shown
         self.assertEqual(len(rows), 8)
 
     def test_mode_file_untrusted(self):

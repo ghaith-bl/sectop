@@ -28,7 +28,9 @@ HOLD = 60.0              # seconds a new blocked packet keeps its severity in st
 SPARK = 120
 MAX_CONNS = 50
 MAX_EVENTS = 100
-MAX_AUDIT = 200
+MAX_AUDIT = 200          # audit flows (grouped repeats) kept, newest first
+MAX_PORTS = 10           # varying ports kept per flow, shown in its detail
+MAX_PROGS = 3
 MAX_LEAKS = 100          # leak lines kept (boot scan + live), newest first
 RECENT = 10              # log lines kept per counter, shown in its detail
 LEAK_ROWS = 8            # shown in the out_leak box
@@ -58,7 +60,7 @@ ALLOWED = {"out_dns_vpn", "out_wg", "out_probe", "out_router_admin", "out_lan_al
 AUDIT_ONLY = {"out_new", "fwd_vm_new"}          # every new flow: audit box, no event
 KS_KINDS = {"out_ks", "fwd_vm_ks"}              # always dropped by hostfw
 LOG_ONLY = {"in_noise", "in_lan", "in_vpn"}     # hostfw logs, firewalld zone decides
-AUDIT_COLUMNS = ["time", "dir", "verdict", "proto", "uid", "prog", "src", "dst", "iface"]
+AUDIT_COLUMNS = ["last", "n", "dir", "verdict", "proto", "uid", "prog", "src", "dst", "iface"]
 LEAK_COLUMNS = ["time", "uid", "proto", "dst", "iface", "context"]
 CONTEXT_NOTE = {
     "pre-connect": "before the first flow via the tunnel this boot "
@@ -151,7 +153,8 @@ class State:
         self.prev_tx = None
         self.held = {}                 # kind -> mono time until its sev is held
         self.blocked = collections.deque(maxlen=SPARK)
-        self.audit = collections.deque(maxlen=MAX_AUDIT)   # rows, newest first
+        self.flows = {}                # audit flow key -> Flow, oldest first
+        self.lines = 0                 # audit lines since start (all flows)
         self.leaks = collections.deque(maxlen=MAX_LEAKS)   # (Entry, context), newest first
         self.recent = {}               # counter name -> deque of (ts, summary), newest first
         self.leak_seen = set()         # cursors from the boot scan (live reader skips them)
@@ -426,32 +429,81 @@ def _verdict(kind: str, live: str) -> str:
     return {"enforce": "block", "observe": "pass"}.get(live, "deny")
 
 
+class Flow:
+    """Repeats of one flow in the audit box: same kind, dir, proto, uid, src, dst
+    (without the varying port) and iface."""
+
+    def __init__(self, e, src, dst, side):
+        self.first = self.last = e.ts
+        self.n = 0
+        self.src, self.dst, self.side = src, dst, side
+        self.progs = []                # program names seen, first seen first
+        self.ports = collections.deque(maxlen=MAX_PORTS)   # varying ports, newest first
+        self.entry, self.verdict = e, ""
+
+
+def _prog(e, idx: dict) -> tuple:
+    """-> (program or '?' / 'vm' / '-', iface) of one log line."""
+    f = e.fields
+    proto = f.get("PROTO", "-").lower()
+    if e.dir == "out":
+        prog = "?"
+        if proto in ("tcp", "udp"):
+            key = (proto, *conns.split(journal.src(e)), *conns.split(journal.dst(e)))
+            prog = ",".join(idx.get(key, ())) or "?"
+        return prog, f.get("OUT") or "-"
+    if e.dir == "fwd":
+        return ("vm" if e.kind.startswith("fwd_vm") else "-"), \
+            f"{f.get('IN') or '-'}>{f.get('OUT') or '-'}"
+    return "-", f.get("IN") or "-"
+
+
 def _audit(st: State, entries: list, cs: list, live: str) -> dict:
-    """Add one row per HFW line (hidden kinds skipped), newest first."""
+    """Group HFW lines (hidden kinds skipped) by flow, newest flow first."""
     idx = conns.index(cs)
     for e in entries:
         if e.kind in SEV and SEV[e.kind] is None:
             continue
         f = e.fields
-        proto = f.get("PROTO", "-").lower()
-        if e.dir == "out":
-            prog, iface = "?", f.get("OUT") or "-"
-            if proto in ("tcp", "udp"):
-                key = (proto, *conns.split(journal.src(e)), *conns.split(journal.dst(e)))
-                prog = ",".join(idx.get(key, ())) or "?"
-        elif e.dir == "fwd":
-            prog = "vm" if e.kind.startswith("fwd_vm") else "-"
-            iface = f"{f.get('IN') or '-'}>{f.get('OUT') or '-'}"
-        else:
-            prog, iface = "-", f.get("IN") or "-"
-        verdict = _verdict(e.kind, live)
-        st.audit.appendleft({
-            "cells": [st.hms(e.ts), e.dir, verdict, proto, f.get("UID") or "-",
-                      prog, journal.src(e), journal.dst(e), iface],
-            "sev": kind_sev(e.kind) or "ok", "tone": _tone(verdict),
-            "detail": _audit_detail(st, e, verdict)})
-    return {"id": "audit", "title": f"audit {len(st.audit)}", "type": "table",
-            "columns": list(AUDIT_COLUMNS), "rows": list(st.audit)}
+        src, dst, side, port = journal.flow(e)
+        prog, iface = _prog(e, idx)
+        key = (e.kind, e.dir, f.get("PROTO", "-").lower(), f.get("UID") or "-", src, dst, iface)
+        fl = st.flows.pop(key, None) or Flow(e, src, dst, side)
+        st.flows[key] = fl                                     # newest at the end
+        fl.n += 1
+        fl.last, fl.entry, fl.verdict = e.ts, e, _verdict(e.kind, live)
+        for name in prog.split(","):
+            if name not in ("?", "-", "vm", "") and name not in fl.progs:
+                fl.progs.append(name)
+        if port and port not in fl.ports:
+            fl.ports.appendleft(port)
+        st.lines += 1
+    while len(st.flows) > MAX_AUDIT:
+        del st.flows[next(iter(st.flows))]                    # oldest flow out
+    rows = [_flow_row(st, key, fl) for key, fl in reversed(st.flows.items())]
+    return {"id": "audit", "title": f"audit {len(rows)} flows  ({st.lines} lines)",
+            "type": "table", "columns": list(AUDIT_COLUMNS), "rows": rows}
+
+
+def _flow_row(st: State, key: tuple, fl: Flow) -> dict:
+    kind, d, proto, uid, _src, _dst, iface = key
+    if fl.progs:
+        prog = ",".join(fl.progs[:MAX_PROGS]) + ("+" if len(fl.progs) > MAX_PROGS else "")
+    else:
+        prog = {"fwd": "vm" if kind.startswith("fwd_vm") else "-", "in": "-"}.get(d, "?")
+    detail = [("count", f"{fl.n} line{'s' if fl.n != 1 else ''}, first {st.stamp(fl.first)}")]
+    if fl.ports:
+        detail.append((f"{fl.side} ports", " ".join(fl.ports) + ("  (newest first)"
+                                                                 if len(fl.ports) > 1 else "")))
+    if len(fl.progs) > 1:
+        detail.append(("programs", ", ".join(fl.progs)))
+    detail.append(("last line", "fields below"))
+    return {"cells": [st.hms(fl.last), str(fl.n), d, fl.verdict, proto, uid, prog,
+                      fl.src, fl.dst, iface],
+            "sev": kind_sev(kind) or "ok", "tone": _tone(fl.verdict),
+            "id": "|".join(key),
+            "detail": [{"k": k, "v": v} for k, v in detail]
+                      + _audit_detail(st, fl.entry, fl.verdict)}
 
 
 def _vpn(st: State, checks: list, wall: float) -> tuple:

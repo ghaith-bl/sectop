@@ -112,6 +112,22 @@ def dst(e: Entry) -> str:
     return _hostport(e.fields.get("DST", "?"), e.fields.get("DPT"))
 
 
+def flow(e: Entry) -> tuple:
+    """-> (src, dst, varying side, varying port) for grouping repeats.
+
+    The larger port of a flow is the ephemeral one (new on every connect,
+    out: src port, inbound to a service: src port, late reply from :443:
+    dst port), so src / dst leave it out. Equal ports or no ports: both kept.
+    """
+    f = e.fields
+    s, d, sp, dp = f.get("SRC", "?"), f.get("DST", "?"), f.get("SPT"), f.get("DPT")
+    if sp and dp and sp.isdigit() and dp.isdigit() and int(sp) != int(dp):
+        if int(sp) > int(dp):
+            return _hostport(s, None), _hostport(d, dp), "src", sp
+        return _hostport(s, sp), _hostport(d, None), "dst", dp
+    return _hostport(s, sp), _hostport(d, dp), "", ""
+
+
 def summary(e: Entry) -> str:
     """One line: uid 1000 tcp 192.168.8.102:46866 -> 1.2.3.4:443 wlo1"""
     f = e.fields
