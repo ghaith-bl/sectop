@@ -18,17 +18,26 @@ All via `core.run.run()`, timeout 1.0 s each, binaries from `/usr/bin` (fallback
 | routes | `ip -j -4 route show default`, `ip -j -6 route show default` |
 | connections | `ss -tunapH state established` |
 
+Once in `init()` (boot scan, timeout 5 s each, see out_leak box):
+
+| what | argv |
+|---|---|
+| first tunnel flow | `journalctl -b 0 _TRANSPORT=kernel -o json --output-fields=MESSAGE -q --no-pager --grep=^HFW-OUT-NEW: -n +1` |
+| leak lines | `journalctl -b 0 _TRANSPORT=kernel -o json --output-fields=MESSAGE -q --no-pager --grep=^HFW-OUT-LEAK:` |
+
 Files (root-owned, not g/o writable, `O_NOFOLLOW`, max 4 KiB):
 `/etc/hostfw/mode` (boot mode), `/run/hostfw/rollback` (rollback deadline, see below).
+`/proc/uptime`: boot time for the leak context.
 
 - No `wg show ... dump`: first line is the private key. Per-field subcommands never print it.
-- No `journalctl -g`: HFW lines are filtered in `journal.py`, so the cursor moves past
-  every kernel entry. With `-g` a poll with no match returns no cursor and the next poll
-  scans the same entries again.
+- No `journalctl -g` in the live reader: HFW lines are filtered in `journal.py`, so the
+  cursor moves past every kernel entry. With `-g` a poll with no match returns no cursor
+  and the next poll scans the same entries again. The boot scan runs once, keeps no
+  cursor, so it uses `-g`. `-n +1` = oldest match. rc 1 with no output = no match.
 - Journal start: `init()` takes the cursor of the newest kernel entry (`-n 1`), so old
   lines are not replayed. No entry -> `--since=@<start time>`.
 - Output cut (timeout / 1 MiB): only complete lines used, cursor = last complete entry,
-  next tick continues from there. Shown as `journal: behind`.
+  next tick continues from there. Shown as `log reader: behind`.
 - MESSAGE as byte array (non-UTF-8 / control chars) decoded with `errors="replace"`.
   Null MESSAGE (too large) skipped, cursor still moves.
 
@@ -62,7 +71,7 @@ Checks:
 | mode observe / unknown | warn |
 | tunnel down | warn |
 | lowest-metric default route not kill switch or tunnel | warn |
-| journal / ss / ip error, parse error, mode file unreadable | warn |
+| log reader / ss / ip error, parse error, mode file unreadable | warn |
 | rollback armed (deadline in the future) | info |
 
 Handshake: WireGuard does not handshake on an idle tunnel, so age alone is not a
@@ -71,8 +80,37 @@ failure. Keys are rejected after 180 s, so age > 180 s with traffic going out = 
 ## Panels
 
 hostfw (kv), vpn (kv), hostfw counters (table: pkts, new this tick, bytes; zero counters
-hidden, count in the title), blocked / tick (spark, deny kinds except hidden),
-out_leak / tick (spark), audit (table, see below), connections (table, max 50).
+hidden, count in the title), out_leak (table, see below), blocked / tick (spark, deny
+kinds except hidden), audit (table, see below), connections (table, max 50).
+
+- hostfw `log reader` = sectop's own kernel log reader (ok / behind / error), not a log view.
+  System journal view: security screen (phase 3).
+- vpn `recv / sent` = bytes received / sent through the tunnel since it came up
+  (`wg show transfer`, summed over peers, 1000-based units). Reset on every reconnect.
+
+## out_leak box
+
+Leak lines of this boot, newest first, last 8 shown (100 kept). Title: `out_leak <counter>`,
+`(newest 8 of N lines)` when more, `(boot scan: ...)` on a scan problem.
+
+- Boot scan in `init()`: the live reader starts at the newest entry, so lines from before
+  sectop started (the pre-connect window) need one look back. Cursors from the scan are
+  skipped by the live reader (no double rows).
+- First tunnel flow = first `HFW-OUT-NEW` line of the boot (scan), else the first one the
+  live reader sees.
+- Columns: time, uid, proto, dst, iface, context.
+
+| context | when | sev |
+|---|---|---|
+| pre-connect | before the first tunnel flow (scan), or tunnel down and no flow yet (live) | info (expected: DoH fallback before Proton connects) |
+| tunnel up | live, tunnel up at that tick | crit |
+| tunnel down | live, tunnel down after the first flow (reconnect window) | crit |
+| after connect | scan, after the first flow (tunnel state then unknown) | crit |
+| unknown | first-flow query failed | crit |
+
+- Row detail: meaning of the context, time after boot, then the audit detail of the line.
+- Limit: hostfw reloaded mid-boot -> `HFW-OUT-NEW` starts later, older leaks may show
+  `pre-connect`. Status still comes from counter deltas (Severity).
 
 Screen: firewall (`core/screens.py`), no events box: the audit box shows the same lines.
 

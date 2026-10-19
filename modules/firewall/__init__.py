@@ -2,7 +2,8 @@
 
 Sources (fixed argv, via core.run.run): nft counters / enforce chain /
 wg_fwmark set, kernel journal (HFW- lines, cursor), ss, wg per-field
-subcommands, ip default routes. Files: /etc/hostfw/mode, /run/hostfw/rollback.
+subcommands, ip default routes. Files: /etc/hostfw/mode, /run/hostfw/rollback,
+/proc/uptime. At start: one boot journal scan (leak lines, first tunnel flow).
 Audit box: every HFW line (allowed + blocked, in + out), program from ss.
 See docs/modules/firewall.md.
 """
@@ -21,17 +22,21 @@ NAME = "firewall"
 INTERVAL = 2.0
 
 TIMEOUT = 1.0            # per command, keeps a full tick below INTERVAL
+BOOT_TIMEOUT = 5.0       # boot journal scan, once in init()
 HS_STALE = 180           # WireGuard rejects keys after 180 s
 HOLD = 60.0              # seconds a new blocked packet keeps its severity in status
 SPARK = 120
 MAX_CONNS = 50
 MAX_EVENTS = 100
 MAX_AUDIT = 200
+MAX_LEAKS = 100          # leak lines kept (boot scan + live), newest first
+LEAK_ROWS = 8            # shown in the out_leak box
 FILE_MAX = 4096
 
 TABLE = ("inet", "hostfw")
 MODE_FILE = "/etc/hostfw/mode"
 ROLLBACK_FILE = "/run/hostfw/rollback"
+UPTIME_FILE = "/proc/uptime"
 DEFAULT_TUNNEL = "proton0"
 DEFAULT_KS = ("pvpnksintrf0", "pvpnksintrf1")
 OPTIONS = {"tunnel", "ks_ifaces", "hold"}
@@ -53,6 +58,16 @@ AUDIT_ONLY = {"out_new", "fwd_vm_new"}          # every new flow: audit box, no 
 KS_KINDS = {"out_ks", "fwd_vm_ks"}              # always dropped by hostfw
 LOG_ONLY = {"in_noise", "in_lan", "in_vpn"}     # hostfw logs, firewalld zone decides
 AUDIT_COLUMNS = ["time", "dir", "verdict", "proto", "uid", "prog", "src", "dst", "iface"]
+LEAK_COLUMNS = ["time", "uid", "proto", "dst", "iface", "context"]
+CONTEXT_NOTE = {
+    "pre-connect": "before the first flow via the tunnel this boot "
+                   "(expected: DoH fallback before Proton connects)",
+    "tunnel up": "the tunnel was up: a program sent around it",
+    "tunnel down": "the tunnel was down after it had been up (reconnect window)",
+    "after connect": "after the first flow via the tunnel this boot, before sectop "
+                     "started: tunnel state at that time unknown",
+    "unknown": "first tunnel flow unknown (boot scan failed)",
+}
 VERDICT_NOTE = {
     "allow": "allowed by hostfw (logged new flow or exception)",
     "drop": "kill switch: always dropped",
@@ -89,10 +104,12 @@ def _bin(name: str) -> str:
 class State:
     def __init__(self, tunnel=DEFAULT_TUNNEL, ks=DEFAULT_KS, hold=HOLD, run=_run,
                  mono=time.monotonic, wall=time.time, owner=0,
-                 mode_file=MODE_FILE, rollback_file=ROLLBACK_FILE, hms=_hms, stamp=_stamp):
+                 mode_file=MODE_FILE, rollback_file=ROLLBACK_FILE, hms=_hms, stamp=_stamp,
+                 uptime_file=UPTIME_FILE):
         self.tunnel, self.ks, self.hold = tunnel, tuple(ks), hold
         self.run, self.mono, self.wall, self.owner = run, mono, wall, owner
         self.mode_file, self.rollback_file = mode_file, rollback_file
+        self.uptime_file = uptime_file
         self.hms = hms                 # epoch -> "HH:MM:SS" for audit rows
         self.stamp = stamp             # epoch -> full local time for audit detail
         self.comments = {}             # counter name -> hostfw rule comment
@@ -103,11 +120,15 @@ class State:
         self.prev_tx = None
         self.held = {}                 # kind -> mono time until its sev is held
         self.blocked = collections.deque(maxlen=SPARK)
-        self.leak = collections.deque(maxlen=SPARK)
         self.audit = collections.deque(maxlen=MAX_AUDIT)   # rows, newest first
+        self.leaks = collections.deque(maxlen=MAX_LEAKS)   # (Entry, context), newest first
+        self.leak_seen = set()         # cursors from the boot scan (live reader skips them)
+        self.tunnel_first = None       # epoch of the first HFW-OUT-NEW line this boot
+        self.boot = None               # boot time, epoch (from /proc/uptime)
+        self.boot_note = ""            # boot scan problem, shown in the out_leak title
 
-    def cmd(self, *argv):
-        return self.run([self.bins[argv[0]], *argv[1:]], timeout=TIMEOUT)
+    def cmd(self, *argv, timeout=TIMEOUT):
+        return self.run([self.bins[argv[0]], *argv[1:]], timeout=timeout)
 
 
 # --- helpers --------------------------------------------------------------
@@ -164,6 +185,18 @@ def _age(sec: float) -> str:
     if sec < 7200:
         return f"{sec // 60}m"
     return f"{sec // 3600}h"
+
+
+def _since(sec: float) -> str:
+    """Offset from boot: 12s, 3m 05s, 2h 10m."""
+    if sec < 0:
+        return "?"
+    sec = int(sec)
+    if sec < 120:
+        return f"{sec}s"
+    if sec < 3600:
+        return f"{sec // 60}m {sec % 60:02d}s"
+    return f"{sec // 3600}h {sec % 3600 // 60:02d}m"
 
 
 def _item(k: str, v: str, sev: str = "ok") -> dict:
@@ -283,8 +316,8 @@ def _events(st: State, checks: list, items: list) -> tuple:
     res = st.cmd(*argv)
     cut = res.timed_out or res.truncated
     if res.rc != 0 and not cut:
-        checks.append(("warn", "journal error"))
-        items.append(_item("journal", _fail(res), "warn"))
+        checks.append(("warn", "log reader error"))
+        items.append(_item("log reader", _fail(res), "warn"))
         return [], []
     entries, cursor, bad = journal.parse(res.out)
     if cursor:
@@ -294,7 +327,7 @@ def _events(st: State, checks: list, items: list) -> tuple:
         state = "behind (output cut, catching up)"
     if bad:
         state = f"{bad} bad line(s)"
-    items.append(_item("journal", state, "ok" if state == "ok" else "info"))
+    items.append(_item("log reader", state, "ok" if state == "ok" else "info"))
 
     out = []
     for e in entries:
@@ -378,8 +411,8 @@ def _vpn(st: State, checks: list, wall: float) -> tuple:
         else:
             items.append(_item("handshake", f"{_age(age)} ago"))
         hs_text = f"hs {_age(age)}"
-    if rx is not None:
-        items.append(_item("rx / tx", f"{_human(rx)} / {_human(tx)}"))
+    if rx is not None:                 # since the tunnel came up: received / sent
+        items.append(_item("recv / sent", f"{_human(rx)}B / {_human(tx)}B"))
 
     res = st.cmd("wg", "show", t, "fwmark")
     mark = vpn.fwmark(res.out) if res.rc == 0 else None
@@ -426,6 +459,90 @@ def _routes(st: State, checks: list) -> list:
             items.append(_item(key, f"{dev} via {gw or '-'} metric {metric}", "warn"))
             checks.append(("warn", f"{key} not kill switch"))
     return items
+
+
+def _uptime(st: State) -> float | None:
+    try:
+        with open(st.uptime_file, "rb") as f:
+            return float(f.read(64).split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _scan(st: State, *args) -> tuple:
+    """Boot journal query with -g. -> (entries, problem or '')."""
+    res = st.cmd("journalctl", "-b", "0", "_TRANSPORT=kernel", "-o", "json",
+                 "--output-fields=MESSAGE", "-q", "--no-pager", *args, timeout=BOOT_TIMEOUT)
+    cut = res.timed_out or res.truncated
+    if res.rc != 0 and not cut and (res.out.strip() or res.err.strip()):
+        return [], _fail(res)                          # rc 1, no output: no match
+    entries, _cursor, _bad = journal.parse(res.out)
+    return entries, ("cut" if cut else "")
+
+
+def _boot_scan(st: State) -> None:
+    """Once at start: leak lines and the first tunnel flow of this boot.
+
+    The live reader starts at the newest entry, so leaks from before sectop
+    started (pre-connect window) would never reach the out_leak box.
+    """
+    up = _uptime(st)
+    st.boot = st.wall() - up if up is not None else None
+    try:
+        first, err1 = _scan(st, "--grep=^HFW-OUT-NEW:", "-n", "+1")
+        leaks, err2 = _scan(st, "--grep=^HFW-OUT-LEAK:")
+    except (ValueError, KeyError, TypeError) as e:
+        st.boot_note = f"boot scan: {type(e).__name__}"
+        return
+    known = not err1
+    st.tunnel_first = first[0].ts if first else None
+    for e in leaks:
+        if e.kind != "out_leak":
+            continue
+        st.leak_seen.add(e.cursor)
+        if not known:
+            ctx = "unknown"
+        elif st.tunnel_first is None or e.ts < st.tunnel_first:
+            ctx = "pre-connect"
+        else:
+            ctx = "after connect"
+        st.leaks.appendleft((e, ctx))
+    problems = [f"{what} {err}" for what, err in (("first flow", err1), ("leaks", err2)) if err]
+    st.boot_note = "boot scan: " + ", ".join(problems) if problems else ""
+
+
+def _leak_box(st: State, entries: list, up: bool, total, live: str) -> dict:
+    """out_leak box: boot scan + live leak lines, newest first, with context."""
+    for e in entries:
+        if e.kind == "out_new" and st.tunnel_first is None:
+            st.tunnel_first = e.ts
+        if e.kind != "out_leak" or e.cursor in st.leak_seen:
+            continue
+        if up:
+            ctx = "tunnel up"
+        else:
+            ctx = "pre-connect" if st.tunnel_first is None else "tunnel down"
+        st.leaks.appendleft((e, ctx))
+    rows = []
+    for e, ctx in list(st.leaks)[:LEAK_ROWS]:
+        f = e.fields
+        detail = [("meaning", CONTEXT_NOTE[ctx])]
+        if st.boot is not None:
+            detail.append(("after boot", _since(e.ts - st.boot)))
+        rows.append({
+            "cells": [st.hms(e.ts), f.get("UID") or "-", f.get("PROTO", "-").lower(),
+                      journal.dst(e), f.get("OUT") or "-", ctx],
+            "sev": "info" if ctx == "pre-connect" else "crit",
+            "detail": [{"k": k, "v": v} for k, v in detail]
+                      + _audit_detail(st, e, _verdict(e.kind, live))})
+    title = f"out_leak {total if total is not None else '?'}"
+    if len(st.leaks) > LEAK_ROWS:
+        title += f"  (newest {LEAK_ROWS} of {len(st.leaks)} lines)"
+    if st.boot_note:
+        title += f"  ({st.boot_note})"
+    sev = "crit" if any(r["sev"] == "crit" for r in rows) else "ok"
+    return {"id": "leak", "title": title, "type": "table", "columns": list(LEAK_COLUMNS),
+            "rows": rows, "sev": sev}
 
 
 def _audit_detail(st: State, e, verdict: str) -> list:
@@ -490,6 +607,7 @@ def init(cfg: dict) -> State:
         raise ValueError("hold: seconds 0..3600 required")
     st = State(tunnel=tunnel, ks=ks, hold=float(hold))
     _start_cursor(st)
+    _boot_scan(st)
     return st
 
 
@@ -512,7 +630,7 @@ def collect(st: State) -> dict:
                                   lambda e: (None, {}, {}))
     _held_checks(st, now, checks)
     events, entries = _safe(lambda: _events(st, checks, fw_items), "journal", checks,
-                            lambda e: _note(fw_items, "journal", e, ([], [])))
+                            lambda e: _note(fw_items, "log reader", e, ([], [])))
 
     vpn_items, vpn_text, mark, up = _safe(
         lambda: _vpn(st, checks, wall), "wg", checks,
@@ -527,7 +645,6 @@ def collect(st: State) -> dict:
     blocked = sum(d for n, d in deltas.items() if kind_sev(n))
     if deltas:
         st.blocked.append(blocked)
-        st.leak.append(deltas.get("out_leak", 0))
 
     panels.append({"id": "hostfw", "title": "hostfw", "type": "kv", "items": fw_items,
                    "sev": worst(*(i["sev"] for i in fw_items))})
@@ -535,12 +652,13 @@ def collect(st: State) -> dict:
                    "sev": worst(*(i["sev"] for i in vpn_items))})
     if table:
         panels.append(table)
+    panels.append(_safe(lambda: _leak_box(st, entries, up, totals.get("out_leak"), live),
+                        "leak", checks,
+                        lambda e: {"id": "leak", "title": f"out_leak: {e}", "type": "table",
+                                   "columns": list(LEAK_COLUMNS), "rows": [], "sev": "warn"}))
     panels.append({"id": "blocked", "title": "blocked / tick", "type": "spark",
                    "values": list(st.blocked), "unit": "pkt",
                    "sev": "warn" if blocked else "ok"})
-    panels.append({"id": "leak", "title": "out_leak / tick", "type": "spark",
-                   "values": list(st.leak), "unit": "pkt",
-                   "sev": "crit" if deltas.get("out_leak") else "ok"})
     conns_panel, cs = _safe(lambda: _conns(st, checks), "ss", checks,
                             lambda e: (_conns_error(e), []))
     panels.append(_safe(lambda: _audit(st, entries, cs, live), "audit", checks,

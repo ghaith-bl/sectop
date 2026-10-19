@@ -63,8 +63,9 @@ Alert = state, not event.
 - Open while its condition is true, closed when false. No repeat every tick.
 - Key = module + rule + subject. Same key again -> count + last seen, no new alert.
 - Cooldown after close: a flapping condition does not reopen at once.
-- Context decides severity. Example: out_leak in the first 30 s after boot, before the
-  tunnel is up = expected (pre-connect DoH fallback); after connect = crit.
+- Context decides severity. Example: out_leak before the first tunnel flow this boot =
+  expected (pre-connect DoH fallback); after connect = crit. The out_leak box already
+  shows this context (docs/modules/firewall.md); status follows in phase 2.
 - Noise list: `/etc/sectop/noise.toml` (root-owned, same file checks as config). Each entry:
   match, reason, expires. Expired entries stop matching. Examples: ACPI BIOS errors,
   NVRM lines from akmod-nvidia.

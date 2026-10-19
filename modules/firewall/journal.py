@@ -2,7 +2,8 @@
 
 Filtering is done here, not with `journalctl -g`: the cursor must move
 past every kernel entry, also when no HFW line matched. Otherwise each
-poll would scan the same non-matching entries again.
+poll would scan the same non-matching entries again. (The one-shot boot
+scan at start has no cursor to keep, so it uses `-g`.)
 """
 
 import ipaddress
@@ -24,6 +25,7 @@ class Entry:
     kind: str          # out_leak (= hostfw counter name)
     fields: dict       # KEY=VALUE pairs, first occurrence wins
     flags: tuple       # words without '=' (SYN, ACK, ...)
+    cursor: str = ""   # journal cursor of this entry
 
     @property
     def dir(self) -> str:
@@ -84,7 +86,7 @@ def parse(text: str) -> tuple:
         code = m.group(1)
         fields, flags = parse_fields(m.group(2))
         kind = code[4:].lower().replace("-", "_")
-        entries.append(Entry(ts, code, KIND_ALIAS.get(kind, kind), fields, flags))
+        entries.append(Entry(ts, code, KIND_ALIAS.get(kind, kind), fields, flags, cur))
     return entries, cursor, bad
 
 

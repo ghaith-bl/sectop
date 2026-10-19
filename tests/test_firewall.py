@@ -228,7 +228,8 @@ class Host:
         self.answers[key] = res
 
     def __call__(self, argv, timeout):
-        assert os.path.isabs(argv[0]) and timeout < fw.INTERVAL, argv
+        assert os.path.isabs(argv[0]), argv
+        assert timeout < fw.INTERVAL or (timeout == fw.BOOT_TIMEOUT and "-b" in argv), argv
         self.calls.append(argv)
         words = [os.path.basename(argv[0])] + argv[1:]
         for key, res in sorted(self.answers.items(), key=lambda kv: -len(kv[0])):
@@ -238,7 +239,7 @@ class Host:
         raise AssertionError(f"unexpected argv {argv}")
 
 
-class TestCollect(unittest.TestCase):
+class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -282,6 +283,8 @@ class TestCollect(unittest.TestCase):
     def panel(self, snap, pid):
         return next(p for p in snap["panels"] if p["id"] == pid)
 
+
+class TestCollect(Base):
     def test_module_api(self):
         check_module(fw)
 
@@ -292,7 +295,7 @@ class TestCollect(unittest.TestCase):
         self.assertEqual(self.items(s, "hostfw"),
                          {"table": ("loaded", "ok"), "mode": ("enforce", "ok"),
                           "boot mode": ("enforce", "ok"), "rollback": ("-", "ok"),
-                          "journal": ("ok", "ok")})
+                          "log reader": ("ok", "ok")})
         v = self.items(s, "vpn")
         self.assertEqual(v["tunnel"], ("proton0 up", "ok"))
         self.assertEqual(v["endpoint"], ("203.0.113.83:443", "ok"))
@@ -300,9 +303,9 @@ class TestCollect(unittest.TestCase):
         self.assertEqual(v["fwmark"], ("0xea13b2c (in set)", "ok"))
         self.assertEqual(v["default v4"], ("pvpnksintrf0 (kill switch)", "ok"))
         self.assertEqual(v["default v6"], ("none", "ok"))
-        self.assertEqual(v["rx / tx"], ("19.5M / 3.1M", "ok"))
+        self.assertEqual(v["recv / sent"], ("19.5MB / 3.1MB", "ok"))
         self.assertEqual([p["id"] for p in s["panels"]],
-                         ["hostfw", "vpn", "counters", "blocked", "leak", "audit", "conns"])
+                         ["hostfw", "vpn", "counters", "leak", "blocked", "audit", "conns"])
         counters = next(p for p in s["panels"] if p["id"] == "counters")
         self.assertEqual(counters["title"], "hostfw counters  (9 zero hidden)")
 
@@ -322,8 +325,7 @@ class TestCollect(unittest.TestCase):
         rows = next(p for p in s["panels"] if p["id"] == "counters")["rows"]
         leak = next(r for r in rows if r["cells"][0] == "out_leak")
         self.assertEqual((leak["cells"][2], leak["sev"]), ("+2", "crit"))
-        leak_spark = next(p for p in s["panels"] if p["id"] == "leak")
-        self.assertEqual((leak_spark["values"], leak_spark["sev"]), ([0, 2], "crit"))
+        self.assertEqual(self.panel(s, "leak")["title"], "out_leak 6")    # counter total
         self.tick(30)
         self.assertEqual(self.collect()["status"], "crit")   # still held
         self.tick(31)
@@ -385,14 +387,15 @@ class TestCollect(unittest.TestCase):
         text = fix("journal.json")
         self.host.set("journalctl", Result(-9, text[:-20], "", False, True))
         s = self.collect()
-        self.assertEqual(self.items(s, "hostfw")["journal"][0], "behind (output cut, catching up)")
+        self.assertEqual(self.items(s, "hostfw")["log reader"][0],
+                         "behind (output cut, catching up)")
         self.assertEqual(self.st.cursor, "s=0;i=6;b=0;m=0;t=0;x=0")
         self.assertEqual(len(s["events"]), 4)
 
     def test_journal_error(self):
         self.host.set("journalctl", fail("Failed to open journal"))
         s = self.collect()
-        self.assertEqual(self.items(s, "hostfw")["journal"], ("Failed to open journal", "warn"))
+        self.assertEqual(self.items(s, "hostfw")["log reader"], ("Failed to open journal", "warn"))
         self.assertEqual(s["status"], "warn")
 
     def test_table_missing(self):
@@ -604,6 +607,129 @@ class TestCollect(unittest.TestCase):
             "ss -tunapH state established",
         ])
         self.assertFalse(any("dump" in a for a in argvs))           # never prints private key
+
+
+def jline(cur, ts, msg):
+    return json.dumps({"__CURSOR": cur, "__REALTIME_TIMESTAMP": str(int(ts * 1e6)),
+                       "MESSAGE": msg}) + "\n"
+
+
+LEAK = ("HFW-OUT-LEAK: IN= OUT=wlo1 SRC=192.168.8.102 DST=203.0.113.11 LEN=60 PROTO=TCP "
+        "SPT={spt} DPT=443 SYN UID=1000 GID=1000 ")
+NEW = ("HFW-OUT-NEW: IN= OUT=proton0 SRC=10.2.0.2 DST=198.51.100.20 LEN=60 PROTO=TCP "
+       "SPT=33146 DPT=443 SYN UID=1000 GID=1000 ")
+
+
+class TestLeakBox(Base):
+    BOOT = 1792410000.0                                  # wall 1792410745 - uptime 745
+
+    def setUp(self):
+        super().setUp()
+        self.uptime = os.path.join(self.tmp.name, "uptime")
+        with open(self.uptime, "w") as f:
+            f.write("745.00 2900.10\n")
+        self.st.uptime_file = self.uptime
+        self.st.hms = lambda ts: f"t{int(ts - self.BOOT)}"
+
+    def boot(self, first=None, leaks=()):
+        self.host.set("journalctl --grep=^HFW-OUT-NEW:",
+                      ok(jline("n1", first, NEW)) if first is not None else fail(""))
+        self.host.set("journalctl --grep=^HFW-OUT-LEAK:",
+                      ok("".join(jline(c, ts, LEAK.format(spt=40000 + i))
+                                 for i, (c, ts) in enumerate(leaks))))
+        fw._boot_scan(self.st)
+
+    def rows(self, snap):
+        return [(r["cells"], r["sev"]) for r in self.panel(snap, "leak")["rows"]]
+
+    def test_boot_scan_context(self):
+        self.boot(first=self.BOOT + 40, leaks=[("b1", self.BOOT + 12), ("b2", self.BOOT + 300)])
+        self.assertEqual(self.st.boot, self.BOOT)
+        s = self.collect()
+        self.assertEqual(self.rows(s), [
+            (["t300", "1000", "tcp", "203.0.113.11:443", "wlo1", "after connect"], "crit"),
+            (["t12", "1000", "tcp", "203.0.113.11:443", "wlo1", "pre-connect"], "info")])
+        p = self.panel(s, "leak")
+        self.assertEqual((p["title"], p["sev"]), ("out_leak 4", "crit"))
+        self.assertEqual(p["columns"], ["time", "uid", "proto", "dst", "iface", "context"])
+        d = {it["k"]: it["v"] for it in p["rows"][1]["detail"]}
+        self.assertTrue(d["meaning"].startswith("before the first flow via the tunnel"))
+        self.assertEqual(d["after boot"], "12s")
+        self.assertEqual(d["rule"], "out_leak  host to internet outside the tunnel")
+        self.assertEqual(d["verdict"], "block  rejected by hostfw (enforce mode)")
+        self.assertEqual(d["SPT"], "40000")
+        d = {it["k"]: it["v"] for it in p["rows"][0]["detail"]}
+        self.assertEqual(d["after boot"], "5m 00s")
+
+    def test_boot_scan_argv(self):
+        self.boot()
+        argvs = [c for c in self.host.calls if c[0].endswith("journalctl")]
+        self.assertEqual([a[1:] for a in argvs], [
+            ["-b", "0", "_TRANSPORT=kernel", "-o", "json", "--output-fields=MESSAGE", "-q",
+             "--no-pager", "--grep=^HFW-OUT-NEW:", "-n", "+1"],
+            ["-b", "0", "_TRANSPORT=kernel", "-o", "json", "--output-fields=MESSAGE", "-q",
+             "--no-pager", "--grep=^HFW-OUT-LEAK:"]])
+        self.assertEqual(self.st.boot_note, "")              # rc 1, no output: no match
+
+    def test_no_tunnel_flow_this_boot(self):
+        self.boot(first=None, leaks=[("b1", self.BOOT + 900)])
+        self.assertEqual(self.rows(self.collect())[0][0][-1], "pre-connect")
+
+    def test_live_dedupe_and_tunnel_up(self):
+        self.boot(first=self.BOOT + 40, leaks=[("b1", self.BOOT + 12)])
+        self.host.set("journalctl", ok(jline("b1", self.BOOT + 12, LEAK.format(spt=1)) +
+                                       jline("l2", self.BOOT + 700, LEAK.format(spt=2))))
+        s = self.collect()                                   # b1 again (after the start cursor)
+        self.assertEqual([r[0][-1] for r in self.rows(s)], ["tunnel up", "pre-connect"])
+        self.assertEqual(self.rows(s)[0][1], "crit")
+
+    def test_live_tunnel_down(self):
+        for key in ("wg latest-handshakes", "wg transfer", "wg endpoints", "wg fwmark"):
+            self.host.set(key, NO_DEV)
+        self.boot()
+        self.host.set("journalctl", ok(jline("l1", self.BOOT + 20, LEAK.format(spt=1))))
+        self.assertEqual(self.rows(self.collect())[0][0][-1], "pre-connect")
+        self.host.set("journalctl", ok(jline("n9", self.BOOT + 30, NEW) +
+                                       jline("l2", self.BOOT + 31, LEAK.format(spt=2))))
+        self.assertEqual(self.rows(self.collect())[0][0][-1], "tunnel down")
+        self.assertEqual(self.st.tunnel_first, self.BOOT + 30)
+
+    def test_boot_scan_error(self):
+        self.host.set("journalctl --grep=^HFW-OUT-NEW:", fail("Failed to open journal"))
+        self.host.set("journalctl --grep=^HFW-OUT-LEAK:",
+                      ok(jline("b1", self.BOOT + 12, LEAK.format(spt=1))))
+        fw._boot_scan(self.st)
+        p = self.panel(self.collect(), "leak")
+        self.assertEqual(p["title"], "out_leak 4  (boot scan: first flow Failed to open journal)")
+        self.assertEqual([r["cells"][-1] for r in p["rows"]], ["unknown"])
+
+    def test_boot_scan_cut_and_bad_json(self):
+        text = jline("b1", self.BOOT + 12, LEAK.format(spt=1))
+        self.host.set("journalctl --grep=^HFW-OUT-NEW:", fail(""))
+        self.host.set("journalctl --grep=^HFW-OUT-LEAK:",
+                      Result(-9, text + text[:30], "", True, False))
+        fw._boot_scan(self.st)
+        p = self.panel(self.collect(), "leak")
+        self.assertEqual(len(p["rows"]), 1)                  # complete lines kept
+        self.assertIn("(boot scan: leaks cut)", p["title"])
+
+    def test_rows_capped_newest_first(self):
+        self.boot(leaks=[(f"b{i}", self.BOOT + i) for i in range(12)])
+        p = self.panel(self.collect(), "leak")
+        self.assertEqual([r["cells"][0] for r in p["rows"]], [f"t{i}" for i in range(11, 3, -1)])
+        self.assertEqual(p["title"], "out_leak 4  (newest 8 of 12 lines)")
+        self.assertEqual(p["sev"], "ok")                     # pre-connect only
+
+    def test_no_uptime(self):
+        self.st.uptime_file = os.path.join(self.tmp.name, "missing")
+        self.boot(leaks=[("b1", self.BOOT + 12)])
+        d = [it["k"] for it in self.panel(self.collect(), "leak")["rows"][0]["detail"]]
+        self.assertNotIn("after boot", d)
+        self.assertEqual(d[:2], ["meaning", "rule"])
+
+    def test_since(self):
+        self.assertEqual([fw._since(x) for x in (-1, 0, 119, 120, 3599, 3600, 90061)],
+                         ["?", "0s", "119s", "2m 00s", "59m 59s", "1h 00m", "25h 01m"])
 
 
 class TestInit(unittest.TestCase):
