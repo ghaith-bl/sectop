@@ -17,7 +17,7 @@ class Screen:
 
 
 SCREENS = (
-    Screen("firewall", ("firewall",), feed=True),
+    Screen("firewall", ("firewall",)),          # audit box instead of events
     Screen("security", (), feed=True,
            note="logs + posture: not built yet (phase 3)"),
     Screen("processes", (),

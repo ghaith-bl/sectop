@@ -1,5 +1,6 @@
 """Parse `ss -tunapH state established`. Pure functions."""
 
+import ipaddress
 import re
 from dataclasses import dataclass
 
@@ -34,3 +35,28 @@ def parse(text: str) -> list:
         out.append(Conn(parts[0], parts[3], parts[4],
                         _procs(parts[5]) if len(parts) == 6 else ()))
     return out
+
+
+def split(addr: str) -> tuple:
+    """'10.2.0.2:443', '[::1]:631', '192.168.8.102%wlo1:68' -> (host, port).
+
+    Zone id dropped, IPv6 compressed, so it compares with log fields.
+    No port -> (addr, '').
+    """
+    if addr.startswith("["):
+        host, sep, port = addr[1:].partition("]:")
+    else:
+        host, sep, port = addr.rpartition(":")
+    if not sep:
+        return addr, ""
+    host = host.split("%", 1)[0]
+    try:
+        host = str(ipaddress.ip_address(host))
+    except ValueError:
+        pass
+    return host, port
+
+
+def index(conns: list) -> dict:
+    """(proto, local host, local port, peer host, peer port) -> process names."""
+    return {(c.proto, *split(c.local), *split(c.peer)): c.procs for c in conns}

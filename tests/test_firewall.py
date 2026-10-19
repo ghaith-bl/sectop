@@ -114,6 +114,32 @@ class TestJournal(unittest.TestCase):
     def test_empty(self):
         self.assertEqual(journal.parse(""), ([], None, 0))
 
+    def test_multi_dash_prefixes(self):
+        entries, cursor, bad = journal.parse(fix("journal-audit.json"))
+        self.assertEqual([(e.code, e.kind, e.dir) for e in entries], [
+            ("HFW-OUT-NEW", "out_new", "out"), ("HFW-OUT-NEW", "out_new", "out"),
+            ("HFW-FWD-VM-NEW", "fwd_vm_new", "fwd"), ("HFW-OUT-LEAK", "out_leak", "out"),
+            ("HFW-IN-LAN", "in_lan", "in"), ("HFW-IN-NOISE", "in_noise", "in"),
+            ("HFW-FWD-VM-KS", "fwd_vm_ks", "fwd"), ("HFW-OUT-KS", "out_ks", "out"),
+            ("HFW-OUT-LAN-ALLOW", "out_lan_allow", "out")])
+        self.assertEqual((cursor, bad), ("s=1;i=9;b=0;m=0;t=0;x=0", 0))
+
+    def test_old_and_other_prefixes(self):
+        text = "".join(json.dumps({"__CURSOR": str(i), "__REALTIME_TIMESTAMP": "1",
+                                   "MESSAGE": f"{code}: OUT=x"}) + "\n"
+                       for i, code in enumerate(("HFW-FWD-KS", "HFW-OUT-ROUTER-ADMIN",
+                                                 "HFW-FWD-VM-LAN", "HFW-OUT", "HFW--X")))
+        entries, _, _ = journal.parse(text)
+        self.assertEqual([e.kind for e in entries],
+                         ["fwd_vm_ks", "out_router_admin", "fwd_vm_lan"])   # old prefix alias
+
+    def test_src_dst(self):
+        entries, _, _ = journal.parse(fix("journal-audit.json"))
+        self.assertEqual((journal.src(entries[0]), journal.dst(entries[0])),
+                         ("10.2.0.2:33146", "198.51.100.20:443"))
+        self.assertEqual((journal.src(entries[7]), journal.dst(entries[7])),
+                         ("fe80::1", "ff02::1:ff00:1"))                     # icmp: no port
+
 
 class TestConns(unittest.TestCase):
     def test_fixture(self):
@@ -134,6 +160,22 @@ class TestConns(unittest.TestCase):
         self.assertEqual(cs[0].procs, ("my app", 'b\\"q'))
         self.assertEqual(cs[1].procs, ())
         self.assertEqual(len(cs), 2)
+
+
+class TestConnsKey(unittest.TestCase):
+    def test_split(self):
+        for addr, want in (("10.2.0.2:443", ("10.2.0.2", "443")),
+                           ("192.168.8.102%wlo1:68", ("192.168.8.102", "68")),
+                           ("[::1]:631", ("::1", "631")),
+                           ("[fe80:0:0:0:0:0:0:1%wlo1]:546", ("fe80::1", "546")),
+                           ("*:*", ("*", "*")), ("noport", ("noport", ""))):
+            self.assertEqual(conns.split(addr), want, addr)
+
+    def test_index(self):
+        idx = conns.index(conns.parse(fix("ss.txt")))
+        self.assertEqual(idx[("tcp", "10.2.0.2", "33146", "198.51.100.20", "443")], ("brave",))
+        self.assertEqual(idx[("udp", "192.168.8.102", "68", "192.168.8.1", "67")],
+                         ("NetworkManager",))
 
 
 class TestVpn(unittest.TestCase):
@@ -224,6 +266,16 @@ class TestCollect(unittest.TestCase):
                 c["packets"] += by
         self.host.set("nft list counters", ok(json.dumps(doc)))
 
+    def add_counters(self, *names):
+        doc = json.loads(self.host.answers["nft list counters"].out)
+        for n in names:
+            doc["nftables"].append({"counter": {"family": "inet", "name": n, "table": "hostfw",
+                                                "handle": 900, "packets": 0, "bytes": 0}})
+        self.host.set("nft list counters", ok(json.dumps(doc)))
+
+    def panel(self, snap, pid):
+        return next(p for p in snap["panels"] if p["id"] == pid)
+
     def test_module_api(self):
         check_module(fw)
 
@@ -244,7 +296,9 @@ class TestCollect(unittest.TestCase):
         self.assertEqual(v["default v6"], ("none", "ok"))
         self.assertEqual(v["rx / tx"], ("19.5M / 3.1M", "ok"))
         self.assertEqual([p["id"] for p in s["panels"]],
-                         ["hostfw", "vpn", "counters", "blocked", "leak", "conns"])
+                         ["hostfw", "vpn", "counters", "blocked", "leak", "audit", "conns"])
+        counters = next(p for p in s["panels"] if p["id"] == "counters")
+        self.assertEqual(counters["title"], "hostfw counters  (9 zero hidden)")
 
     def test_counters_first_tick_no_alarm(self):
         s = self.collect()
@@ -271,18 +325,21 @@ class TestCollect(unittest.TestCase):
 
     def test_severity_kinds(self):
         for name, sev in (("out_dns", "warn"), ("in_vpn", "warn"), ("out_ks", "info"),
-                          ("in_noise", "ok"), ("out_wg", "ok"), ("out_probe", "ok")):
+                          ("in_noise", "ok"), ("out_wg", "ok"), ("out_probe", "ok"),
+                          ("out_new", "ok"), ("fwd_vm_new", "ok")):
             with self.subTest(name=name):
                 self.setUp()
+                self.add_counters("out_new", "fwd_vm_new")
                 self.collect()
                 self.tick()
                 self.bump(name, 1)
                 self.assertEqual(self.collect()["status"], sev)
 
     def test_blocked_spark(self):
+        self.add_counters("out_new")
         self.collect()
         self.tick()
-        for name in ("out_ks", "in_noise", "out_wg", "out_dns"):
+        for name in ("out_ks", "in_noise", "out_wg", "out_dns", "out_new"):
             self.bump(name, 3)
         s = self.collect()
         self.assertEqual(next(p for p in s["panels"] if p["id"] == "blocked")["values"], [0, 6])
@@ -362,10 +419,80 @@ class TestCollect(unittest.TestCase):
                           "info"))
         self.assertEqual(self.collect()["status"], "info")
         self.assertEqual(self.rollback(f"{deadline}\n"), ("armed, 2m 05s left", "info"))
-        self.assertEqual(self.rollback(f"{int(self.wall) - 10}\nx\n"),
-                         ("armed, 0m 00s left -> x", "info"))         # past deadline
-        for text in ("something else\n", "", "12\n"):
+        for text in ("something else\n", "", "12\n", "\u0661\u0662\u0663\n"):
             self.assertEqual(self.rollback(text), ("armed", "info"), repr(text))
+
+    def test_rollback_deadline_passed(self):
+        # the timer fired; hostfw.sh keeps the file until confirm / observe / apply
+        self.assertEqual(self.rollback(f"{int(self.wall) - 190}\nx\n"),
+                         ("deadline passed 3m ago -> x", "info"))
+        self.assertEqual(self.collect()["status"], "ok")          # not armed any more
+        self.assertEqual(self.rollback(f"{int(self.wall)}\n"), ("deadline passed 0s ago", "info"))
+
+    def test_zero_counters_hidden(self):
+        s = self.collect()
+        names = [r["cells"][0] for r in self.panel(s, "counters")["rows"]]
+        self.assertEqual(names, ["out_dns_vpn", "out_wg", "out_probe", "out_dns", "out_ks",
+                                 "out_leak", "in_noise", "in_vpn"])
+        self.tick()
+        self.bump("out_lan", 1)
+        s = self.collect()
+        self.assertEqual(self.panel(s, "counters")["title"], "hostfw counters  (8 zero hidden)")
+        row = next(r for r in self.panel(s, "counters")["rows"] if r["cells"][0] == "out_lan")
+        self.assertEqual((row["cells"][1:3], row["sev"]), (["1", "+1"], "info"))
+
+    def audit(self, chain="nft-enforce.json"):
+        self.host.set("nft list chain", ok(fix(chain)))
+        self.host.set("journalctl", ok(fix("journal-audit.json")))
+        self.st.hms = lambda ts: f"t{int(ts) % 100}"
+        p = self.panel(self.collect(), "audit")
+        return p, [r["cells"] for r in p["rows"]], [r["sev"] for r in p["rows"]]
+
+    def test_audit(self):
+        p, rows, sevs = self.audit()
+        self.assertEqual(p["columns"], ["time", "dir", "verdict", "proto", "uid", "prog",
+                                        "src", "dst", "iface"])
+        self.assertEqual(p["title"], "audit 8")                     # IN-NOISE hidden
+        self.assertEqual(rows, [                                    # newest first
+            ["t59", "out", "allow", "tcp", "1000", "?", "192.168.8.102:40100", "192.168.8.50:22",
+             "wlo1"],
+            ["t58", "out", "drop", "icmpv6", "-", "?", "fe80::1", "ff02::1:ff00:1",
+             "pvpnksintrf0"],
+            ["t57", "fwd", "drop", "udp", "-", "vm", "192.168.122.10:123", "203.0.113.5:123",
+             "virbr0>pvpnksintrf0"],
+            ["t55", "in", "zone", "tcp", "-", "-", "192.168.8.50:51544", "192.168.8.102:22",
+             "wlo1"],
+            ["t54", "out", "block", "tcp", "1000", "?", "192.168.8.102:46900", "203.0.113.11:443",
+             "wlo1"],
+            ["t53", "fwd", "allow", "tcp", "-", "vm", "192.168.122.10:40000", "198.51.100.22:443",
+             "virbr0>proton0"],
+            ["t52", "out", "allow", "udp", "1000", "?", "10.2.0.2:50000", "203.0.113.50:443",
+             "proton0"],
+            ["t51", "out", "allow", "tcp", "1000", "brave", "10.2.0.2:33146", "198.51.100.20:443",
+             "proton0"],                                            # program from ss
+        ])
+        self.assertEqual(sevs, ["ok", "info", "info", "warn", "crit", "ok", "ok", "ok"])
+        events = [e["code"] for e in fw.collect(self.st)["events"]]
+        self.assertEqual(events, ["HFW-OUT-LEAK", "HFW-IN-LAN", "HFW-FWD-VM-KS", "HFW-OUT-KS",
+                                  "HFW-OUT-LAN-ALLOW"])     # no *-NEW, no IN-NOISE events
+
+    def test_audit_observe(self):
+        _, rows, _ = self.audit("nft-observe.json")
+        self.assertEqual(rows[4][2], "pass")                        # logged, not blocked
+
+    def test_audit_keeps_newest(self):
+        for _ in range(30):                                         # 8 rows per tick
+            p, rows, _ = self.audit()
+            self.tick()
+        self.assertEqual(len(rows), fw.MAX_AUDIT)
+        self.assertEqual(p["title"], f"audit {fw.MAX_AUDIT}")
+        self.assertEqual(rows[0][0], "t59")
+
+    def test_audit_without_ss(self):
+        self.host.set("ss", fail("ss: boom"))
+        _, rows, _ = self.audit()
+        self.assertEqual(rows[-1][5], "?")                          # no program, still shown
+        self.assertEqual(len(rows), 8)
 
     def test_mode_file_untrusted(self):
         os.chmod(self.mode_file, 0o666)

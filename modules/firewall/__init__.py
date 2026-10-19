@@ -3,6 +3,7 @@
 Sources (fixed argv, via core.run.run): nft counters / enforce chain /
 wg_fwmark set, kernel journal (HFW- lines, cursor), ss, wg per-field
 subcommands, ip default routes. Files: /etc/hostfw/mode, /run/hostfw/rollback.
+Audit box: every HFW line (allowed + blocked, in + out), program from ss.
 See docs/modules/firewall.md.
 """
 
@@ -25,6 +26,7 @@ HOLD = 60.0              # seconds a new blocked packet keeps its severity in st
 SPARK = 120
 MAX_CONNS = 50
 MAX_EVENTS = 100
+MAX_AUDIT = 200
 FILE_MAX = 4096
 
 TABLE = ("inet", "hostfw")
@@ -45,7 +47,12 @@ SEV = {
     "in_noise": None,
 }
 # allowed traffic: counted, never raises status
-ALLOWED = {"out_dns_vpn", "out_wg", "out_probe", "out_router_admin", "out_lan_allow"}
+ALLOWED = {"out_dns_vpn", "out_wg", "out_probe", "out_router_admin", "out_lan_allow",
+           "out_new", "fwd_vm_new"}
+AUDIT_ONLY = {"out_new", "fwd_vm_new"}          # every new flow: audit box, no event
+KS_KINDS = {"out_ks", "fwd_vm_ks"}              # always dropped by hostfw
+LOG_ONLY = {"in_noise", "in_lan", "in_vpn"}     # hostfw logs, firewalld zone decides
+AUDIT_COLUMNS = ["time", "dir", "verdict", "proto", "uid", "prog", "src", "dst", "iface"]
 
 
 def kind_sev(name: str) -> str | None:
@@ -53,6 +60,10 @@ def kind_sev(name: str) -> str | None:
     if name in ALLOWED:
         return None
     return SEV.get(name, "info")
+
+
+def _hms(ts: float) -> str:
+    return time.strftime("%H:%M:%S", time.localtime(ts))
 
 
 def _bin(name: str) -> str:
@@ -66,10 +77,11 @@ def _bin(name: str) -> str:
 class State:
     def __init__(self, tunnel=DEFAULT_TUNNEL, ks=DEFAULT_KS, hold=HOLD, run=_run,
                  mono=time.monotonic, wall=time.time, owner=0,
-                 mode_file=MODE_FILE, rollback_file=ROLLBACK_FILE):
+                 mode_file=MODE_FILE, rollback_file=ROLLBACK_FILE, hms=_hms):
         self.tunnel, self.ks, self.hold = tunnel, tuple(ks), hold
         self.run, self.mono, self.wall, self.owner = run, mono, wall, owner
         self.mode_file, self.rollback_file = mode_file, rollback_file
+        self.hms = hms                 # epoch -> "HH:MM:SS" for audit rows
         self.bins = {n: _bin(n) for n in ("nft", "journalctl", "ss", "wg", "ip")}
         self.cursor = None
         self.since = int(wall())
@@ -78,6 +90,7 @@ class State:
         self.held = {}                 # kind -> mono time until its sev is held
         self.blocked = collections.deque(maxlen=SPARK)
         self.leak = collections.deque(maxlen=SPARK)
+        self.audit = collections.deque(maxlen=MAX_AUDIT)   # rows, newest first
 
     def cmd(self, *argv):
         return self.run([self.bins[argv[0]], *argv[1:]], timeout=TIMEOUT)
@@ -181,24 +194,31 @@ def _hostfw(st: State, checks: list) -> tuple:
         if rb is None:
             items.append(_item("rollback", "-"))
         else:
-            checks.append(("info", "rollback armed"))
-            items.append(_item("rollback", _rollback_left(rb, st.wall()), "info"))
+            text, armed = _rollback_state(rb, st.wall())
+            if armed:
+                checks.append(("info", "rollback armed"))
+            items.append(_item("rollback", text, "info"))
     return items, counters, live
 
 
-def _rollback_left(text: str, now: float) -> str:
+def _rollback_state(text: str, now: float) -> tuple:
     """hostfw deadline file: line 1 epoch deadline, line 2 rollback command.
 
-    Anything else -> just 'armed' (the file existing is what matters).
+    -> (text, armed). The file stays after the timer fired (hostfw.sh
+    removes it only on confirm / observe / apply / remove), so a deadline
+    in the past = no longer armed. Other content -> ('armed', True).
     """
     lines = text.splitlines()
     first = lines[0].strip() if lines else ""
-    if not (first.isdigit() and int(first) > 1_000_000_000):
-        return "armed"
-    left = max(0, int(first) - int(now))
-    out = f"armed, {left // 60}m {left % 60:02d}s left"
+    if not (first.isascii() and first.isdigit() and int(first) > 1_000_000_000):
+        return "armed", True
+    left = int(first) - int(now)
     action = lines[1].strip() if len(lines) > 1 else ""
-    return f"{out} -> {action}" if action else out
+    if left > 0:
+        out, armed = f"armed, {left // 60}m {left % 60:02d}s left", True
+    else:
+        out, armed = f"deadline passed {_age(-left)} ago", False
+    return (f"{out} -> {action}" if action else out), armed
 
 
 def _counters(st: State, counters: dict | None, now: float) -> tuple:
@@ -217,10 +237,14 @@ def _counters(st: State, counters: dict | None, now: float) -> tuple:
 
     rows = []
     for name, (pkts, nbytes) in counters.items():
+        if pkts == 0:
+            continue                                          # zero counters hidden
         sev = kind_sev(name) if st.held.get(name, 0) > now else None
         rows.append({"cells": [name, str(pkts), f"+{deltas[name]}" if deltas[name] else "",
                                _human(nbytes)], "sev": sev or "ok"})
-    panel = {"id": "counters", "title": "hostfw counters", "type": "table",
+    zero = len(counters) - len(rows)
+    title = "hostfw counters" + (f"  ({zero} zero hidden)" if zero else "")
+    panel = {"id": "counters", "title": title, "type": "table",
              "columns": ["counter", "pkts", "new", "bytes"], "rows": rows}
     return panel, {n: c[0] for n, c in counters.items()}, deltas
 
@@ -233,7 +257,8 @@ def _held_checks(st: State, now: float, checks: list) -> None:
         checks.append((kind_sev(name), f"new {name}"))
 
 
-def _events(st: State, checks: list, items: list) -> list:
+def _events(st: State, checks: list, items: list) -> tuple:
+    """-> (events, HFW entries)."""
     if st.cursor:
         argv = ("journalctl", "_TRANSPORT=kernel", "-o", "json", "--output-fields=MESSAGE",
                 "-q", "--no-pager", f"--after-cursor={st.cursor}")
@@ -245,7 +270,7 @@ def _events(st: State, checks: list, items: list) -> list:
     if res.rc != 0 and not cut:
         checks.append(("warn", "journal error"))
         items.append(_item("journal", _fail(res), "warn"))
-        return []
+        return [], []
     entries, cursor, bad = journal.parse(res.out)
     if cursor:
         st.cursor = cursor
@@ -258,11 +283,47 @@ def _events(st: State, checks: list, items: list) -> list:
 
     out = []
     for e in entries:
-        if e.kind in SEV and SEV[e.kind] is None:
-            continue                                   # hidden kind
+        if (e.kind in SEV and SEV[e.kind] is None) or e.kind in AUDIT_ONLY:
+            continue                                   # hidden kind / audit only
         sev = kind_sev(e.kind) or "info"               # allowed kinds: info
         out.append({"ts": e.ts, "sev": sev, "code": e.code, "msg": journal.summary(e)})
-    return out[-MAX_EVENTS:]
+    return out[-MAX_EVENTS:], entries
+
+
+def _verdict(kind: str, live: str) -> str:
+    if kind in ALLOWED:
+        return "allow"
+    if kind in KS_KINDS:
+        return "drop"
+    if kind in LOG_ONLY:
+        return "zone"
+    return {"enforce": "block", "observe": "pass"}.get(live, "deny")
+
+
+def _audit(st: State, entries: list, cs: list, live: str) -> dict:
+    """Add one row per HFW line (hidden kinds skipped), newest first."""
+    idx = conns.index(cs)
+    for e in entries:
+        if e.kind in SEV and SEV[e.kind] is None:
+            continue
+        f = e.fields
+        proto = f.get("PROTO", "-").lower()
+        if e.dir == "out":
+            prog, iface = "?", f.get("OUT") or "-"
+            if proto in ("tcp", "udp"):
+                key = (proto, *conns.split(journal.src(e)), *conns.split(journal.dst(e)))
+                prog = ",".join(idx.get(key, ())) or "?"
+        elif e.dir == "fwd":
+            prog = "vm" if e.kind.startswith("fwd_vm") else "-"
+            iface = f"{f.get('IN') or '-'}>{f.get('OUT') or '-'}"
+        else:
+            prog, iface = "-", f.get("IN") or "-"
+        st.audit.appendleft({
+            "cells": [st.hms(e.ts), e.dir, _verdict(e.kind, live), proto, f.get("UID") or "-",
+                      prog, journal.src(e), journal.dst(e), iface],
+            "sev": kind_sev(e.kind) or "ok"})
+    return {"id": "audit", "title": f"audit {len(st.audit)}", "type": "table",
+            "columns": list(AUDIT_COLUMNS), "rows": list(st.audit)}
 
 
 def _vpn(st: State, checks: list, wall: float) -> tuple:
@@ -350,18 +411,23 @@ def _routes(st: State, checks: list) -> list:
     return items
 
 
-def _conns(st: State, checks: list) -> dict:
+def _conns(st: State, checks: list) -> tuple:
+    """-> (panel, parsed connections)."""
     res = st.cmd("ss", "-tunapH", "state", "established")
     if res.rc != 0:
         checks.append(("warn", "ss error"))
-        return {"id": "conns", "title": f"connections: {_fail(res)}", "type": "table",
-                "columns": ["proto", "peer", "proc", "local"], "rows": [], "sev": "warn"}
+        return _conns_error(_fail(res)), []
     cs = sorted(conns.parse(res.out), key=lambda c: (",".join(c.procs), c.peer))
     rows = [{"cells": [c.proto, c.peer, ",".join(c.procs) or "-", c.local]}
             for c in cs[:MAX_CONNS]]
     title = f"connections {len(cs)}" + (f" (first {MAX_CONNS})" if len(cs) > MAX_CONNS else "")
     return {"id": "conns", "title": title, "type": "table",
-            "columns": ["proto", "peer", "proc", "local"], "rows": rows}
+            "columns": ["proto", "peer", "proc", "local"], "rows": rows}, cs
+
+
+def _conns_error(msg: str) -> dict:
+    return {"id": "conns", "title": f"connections: {msg}", "type": "table",
+            "columns": ["proto", "peer", "proc", "local"], "rows": [], "sev": "warn"}
 
 
 def _note(items: list, key: str, err: str, value):
@@ -417,8 +483,8 @@ def collect(st: State) -> dict:
     table, totals, deltas = _safe(lambda: _counters(st, counters, now), "counters", checks,
                                   lambda e: (None, {}, {}))
     _held_checks(st, now, checks)
-    events = _safe(lambda: _events(st, checks, fw_items), "journal", checks,
-                   lambda e: _note(fw_items, "journal", e, []))
+    events, entries = _safe(lambda: _events(st, checks, fw_items), "journal", checks,
+                            lambda e: _note(fw_items, "journal", e, ([], [])))
 
     vpn_items, vpn_text, mark, up = _safe(
         lambda: _vpn(st, checks, wall), "wg", checks,
@@ -447,10 +513,12 @@ def collect(st: State) -> dict:
     panels.append({"id": "leak", "title": "out_leak / tick", "type": "spark",
                    "values": list(st.leak), "unit": "pkt",
                    "sev": "crit" if deltas.get("out_leak") else "ok"})
-    panels.append(_safe(lambda: _conns(st, checks), "ss", checks,
-                        lambda e: {"id": "conns", "title": f"connections: {e}", "type": "table",
-                                   "columns": ["proto", "peer", "proc", "local"], "rows": [],
-                                   "sev": "warn"}))
+    conns_panel, cs = _safe(lambda: _conns(st, checks), "ss", checks,
+                            lambda e: (_conns_error(e), []))
+    panels.append(_safe(lambda: _audit(st, entries, cs, live), "audit", checks,
+                        lambda e: {"id": "audit", "title": f"audit: {e}", "type": "table",
+                                   "columns": list(AUDIT_COLUMNS), "rows": [], "sev": "warn"}))
+    panels.append(conns_panel)
 
     status = worst(*(s for s, _ in checks))
     leak = totals.get("out_leak")

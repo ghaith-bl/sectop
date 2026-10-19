@@ -19,7 +19,7 @@ All via `core.run.run()`, timeout 1.0 s each, binaries from `/usr/bin` (fallback
 | connections | `ss -tunapH state established` |
 
 Files (root-owned, not g/o writable, `O_NOFOLLOW`, max 4 KiB):
-`/etc/hostfw/mode` (boot mode), `/run/hostfw/rollback` (exists = rollback armed).
+`/etc/hostfw/mode` (boot mode), `/run/hostfw/rollback` (rollback deadline, see below).
 
 - No `wg show ... dump`: first line is the private key. Per-field subcommands never print it.
 - No `journalctl -g`: HFW lines are filtered in `journal.py`, so the cursor moves past
@@ -34,15 +34,16 @@ Files (root-owned, not g/o writable, `O_NOFOLLOW`, max 4 KiB):
 
 ## Severity
 
-Log kind = counter name: `HFW-OUT-LEAK` -> `out_leak`.
+Log kind = counter name: `HFW-OUT-LEAK` -> `out_leak`, `HFW-FWD-VM-LAN` -> `fwd_vm_lan`
+(name part may have dashes). Old prefix `HFW-FWD-KS` (hostfw before 2026-10-19) -> `fwd_vm_ks`.
 
 | sev | kinds |
 |---|---|
 | crit | out_leak |
 | warn | out_dns, in_lan, in_vpn, fwd_vm_lan, fwd_in |
 | info | out_ks, out_disco, out_share, out_lan, fwd_vm_ks, unknown kinds |
-| hidden | in_noise (counter only, no event) |
-| ok | out_dns_vpn, out_wg, out_probe, out_router_admin, out_lan_allow (allowed) |
+| hidden | in_noise (counter only, no event, no audit row) |
+| ok | out_dns_vpn, out_wg, out_probe, out_router_admin, out_lan_allow, out_new, fwd_vm_new (allowed) |
 
 - Status comes from counter deltas, not totals: totals since boot include the
   pre-connect window. First tick never alarms.
@@ -62,16 +63,41 @@ Checks:
 | tunnel down | warn |
 | lowest-metric default route not kill switch or tunnel | warn |
 | journal / ss / ip error, parse error, mode file unreadable | warn |
-| rollback armed | info |
+| rollback armed (deadline in the future) | info |
 
 Handshake: WireGuard does not handshake on an idle tunnel, so age alone is not a
 failure. Keys are rejected after 180 s, so age > 180 s with traffic going out = broken.
 
 ## Panels
 
-hostfw (kv), vpn (kv), hostfw counters (table: pkts, new this tick, bytes),
-blocked / tick (spark, deny kinds except hidden), out_leak / tick (spark),
-connections (table, max 50).
+hostfw (kv), vpn (kv), hostfw counters (table: pkts, new this tick, bytes; zero counters
+hidden, count in the title), blocked / tick (spark, deny kinds except hidden),
+out_leak / tick (spark), audit (table, see below), connections (table, max 50).
+
+Screen: firewall (`core/screens.py`), no events box: the audit box shows the same lines.
+
+## Audit
+
+One row per HFW log line, newest first, last 200 kept (in state). Hidden kinds (in_noise)
+skipped. Row severity = kind severity, allowed = ok.
+out_new / fwd_vm_new (every new flow) go to the audit box only, not to events.
+
+| column | value |
+|---|---|
+| time | local HH:MM:SS of the journal entry |
+| dir | out, in, fwd (from the prefix) |
+| verdict | allow (allowed kinds), drop (out_ks, fwd_vm_ks), zone (in_*: hostfw logs, firewalld zone decides), block / pass (deny kinds, live mode enforce / observe) |
+| proto | PROTO, lower case |
+| uid | UID (OUT rules with `skuid`), else `-` |
+| prog | out: process from `ss` with the same proto + src + dst (open flows only), else `?`; fwd_vm_*: `vm`; in: `-` |
+| src, dst | address:port, IPv6 compressed (`[v6]:port`) |
+| iface | out: OUT, in: IN, fwd: IN>OUT |
+
+- Blocked lines are samples (hostfw rate limit 10/min per rule), allowed new flows
+  5/s burst 50. Counters stay exact.
+- Program for blocked flows: mostly `?` (rejected connect closes before the next poll).
+  Planned: Linux audit `connect` records (docs/architecture.md).
+- Verdict uses the mode at collect time: lines logged just before a mode switch may show the new mode.
 
 Summary: `enforce | proton0 up | hs 20s | leak 4`, plus first 3 warn / crit checks.
 
@@ -92,6 +118,10 @@ Interface names `[A-Za-z0-9_.-]{1,15}`. Unknown option -> init error, module dis
 line 1 deadline (epoch seconds), line 2 rollback command.
 Shown as `armed, 2m 05s left -> <command>`. Other content -> `armed`.
 
+The file stays after the timer fired (removed only by confirm / observe / apply / remove,
+or reboot: `/run`). Deadline in the past -> `deadline passed 3m ago -> <command>`,
+not armed, no check. `hostfw status` asks systemd for the timer, so it is always right.
+
 ## Fixtures
 
 `tests/fixtures/firewall/` from my host, 2026-10-19, enforce mode, tunnel up.
@@ -101,3 +131,5 @@ Shown as `armed, 2m 05s left -> <command>`. Other content -> `armed`.
 - journal.json: real OUT-KS / IN-NOISE lines, 3 fields kept, cursors rewritten.
   OUT-LEAK, OUT-DNS, IN-VPN and the non-HFW line are synthetic (format from real logs).
 - nft-observe.json: nft-enforce.json without the reject rule.
+- journal-audit.json: synthetic, one line per kind (format from hostfw.nft log rules),
+  OUT-NEW tcp line = brave flow in ss.txt.

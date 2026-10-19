@@ -10,7 +10,11 @@ import json
 import re
 from dataclasses import dataclass
 
-CODE_RE = re.compile(r"(HFW-[A-Z0-9]+-[A-Z0-9_]+):\s?(.*)", re.S)
+# HFW-<DIR>-<NAME>: NAME may have dashes (HFW-FWD-VM-LAN, HFW-OUT-LAN-ALLOW)
+CODE_RE = re.compile(r"(HFW-[A-Z0-9]+(?:-[A-Z0-9_]+)+):\s?(.*)", re.S)
+
+# old log prefix -> counter name (hostfw before 2026-10-19: HFW-FWD-KS)
+KIND_ALIAS = {"fwd_ks": "fwd_vm_ks"}
 
 
 @dataclass(frozen=True)
@@ -20,6 +24,11 @@ class Entry:
     kind: str          # out_leak (= hostfw counter name)
     fields: dict       # KEY=VALUE pairs, first occurrence wins
     flags: tuple       # words without '=' (SYN, ACK, ...)
+
+    @property
+    def dir(self) -> str:
+        """out, in or fwd (from HFW-<DIR>-...)."""
+        return self.code.split("-")[1].lower()
 
 
 def _message(v) -> str | None:
@@ -74,7 +83,8 @@ def parse(text: str) -> tuple:
             continue
         code = m.group(1)
         fields, flags = parse_fields(m.group(2))
-        entries.append(Entry(ts, code, code[4:].lower().replace("-", "_"), fields, flags))
+        kind = code[4:].lower().replace("-", "_")
+        entries.append(Entry(ts, code, KIND_ALIAS.get(kind, kind), fields, flags))
     return entries, cursor, bad
 
 
@@ -92,6 +102,14 @@ def _hostport(addr: str, port: str | None) -> str:
     return f"[{a}]:{port}" if ":" in a else f"{a}:{port}"
 
 
+def src(e: Entry) -> str:
+    return _hostport(e.fields.get("SRC", "?"), e.fields.get("SPT"))
+
+
+def dst(e: Entry) -> str:
+    return _hostport(e.fields.get("DST", "?"), e.fields.get("DPT"))
+
+
 def summary(e: Entry) -> str:
     """One line: uid 1000 tcp 192.168.8.102:46866 -> 1.2.3.4:443 wlo1"""
     f = e.fields
@@ -101,8 +119,7 @@ def summary(e: Entry) -> str:
     if f.get("PROTO"):
         parts.append(f["PROTO"].lower())
     if f.get("SRC") or f.get("DST"):
-        parts.append(f"{_hostport(f.get('SRC', '?'), f.get('SPT'))} -> "
-                     f"{_hostport(f.get('DST', '?'), f.get('DPT'))}")
+        parts.append(f"{src(e)} -> {dst(e)}")
     iface = f.get("OUT") or f.get("IN")
     if iface:
         parts.append(iface)

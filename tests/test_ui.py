@@ -131,6 +131,9 @@ class TestScreens(unittest.TestCase):
         listed = sorted(imp.split(".", 1)[1] for imp in registry.MODULES)
         self.assertEqual(sorted(on), listed)
 
+    def test_firewall_screen_no_events_box(self):
+        self.assertFalse(SCREENS[find("firewall")].feed)          # audit box shows the lines
+
     def test_empty_screens_have_a_note(self):
         for s in SCREENS:
             if not s.modules:
