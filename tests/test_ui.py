@@ -6,7 +6,8 @@ from core.render import BoxInfo, Frame
 from core.screens import SCREENS, Screen, find, names
 from core.ui import ESC, TAB, UI
 
-BOXES = (BoxInfo("m/a", 2, 5), BoxInfo("m/b", 30, 10, sel=3, off=0, ident="row3"),
+BOXES = (BoxInfo("m/a", 2, 5), BoxInfo("m/b", 30, 10, sel=3, off=0, ident="row3",
+                                       filterable=True),
          BoxInfo("m/c", 1, 1))
 
 
@@ -165,6 +166,64 @@ class TestKeys(unittest.TestCase):
         u.key(ord("?"))
         u.key(curses.KEY_BACKSPACE)
         self.assertFalse(u.help)
+
+
+class TestFilter(unittest.TestCase):
+    def typed(self, text, **kw):
+        u = ui(focus={0: "m/b"}, **kw)
+        u.key(ord("/"))
+        for ch in text:
+            u.key(ord(ch))
+        return u
+
+    def test_type_applies_live(self):
+        u = self.typed("brave q")
+        self.assertEqual((u.typing, u.filters), ("brave q", {"m/b": "brave q"}))
+        self.assertEqual((u.sel["m/b"], u.scroll["m/b"]), (0, 0))   # cursor back to top
+        self.assertTrue(u.key(ord("q")))                             # q is text, no quit
+        u.key(curses.KEY_BACKSPACE)
+        u.key(127)
+        u.key(10)
+        self.assertEqual((u.typing, u.filters), (None, {"m/b": "brave"}))   # stripped
+        self.assertEqual(u.screen, 0)
+
+    def test_esc_restores_old(self):
+        u = self.typed("drop")
+        u.key(10)
+        u.key(ord("/"))
+        self.assertEqual(u.typing, "drop")                           # edit starts from it
+        u.key(ord("x"))
+        u.key(ESC)
+        self.assertEqual((u.typing, u.filters), (None, {"m/b": "drop"}))
+
+    def test_empty_clears_and_esc_outside(self):
+        u = self.typed("  ")
+        u.key(13)
+        self.assertEqual(u.filters, {})
+        u = self.typed("drop")
+        u.key(10)
+        u.sel["m/b"] = 5
+        u.key(ESC)                                                   # not typing: clear filter
+        self.assertEqual((u.filters, u.sel["m/b"]), ({}, 0))
+        u.key(ESC)                                                   # nothing to clear: no-op
+        self.assertEqual(u.filters, {})
+
+    def test_only_filterable_boxes(self):
+        u = ui()                                                     # focus m/a: kv-like
+        u.key(ord("/"))
+        self.assertIsNone(u.typing)
+        u = ui(focus={0: "m/b"}, help=True)
+        u.key(ord("/"))                                              # overlay: ignored
+        self.assertIsNone(u.typing)
+
+    def test_limits_and_other_keys(self):
+        u = self.typed("x" * 80)
+        self.assertEqual(len(u.typing), 60)
+        u.key(curses.KEY_DOWN)                                       # no text, no change
+        u.key(0x4e2d)                                                # non-ASCII ignored
+        self.assertEqual(len(u.typing), 60)
+        u.key(ord("m"))                                              # text, not mask toggle
+        self.assertTrue(u.mask)
 
 
 class TestScreens(unittest.TestCase):

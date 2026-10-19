@@ -35,8 +35,8 @@ can decide from what is on screen. Read-only until the privilege split.
   replaces it.
 
 Keys now: `1-3` screen, `tab` / arrows box, `j/k` / arrows select line, `PgDn/PgUp` page,
-`enter` detail, `p` pause, `m` mask, `?` help, `q` quit. Planned: `/` filter, `a` ack alert,
-`t` capture (from detail).
+`enter` detail, `/` filter, `Esc` clear filter, `p` pause, `m` mask, `?` help, `q` quit.
+Planned: `a` ack alert, `t` capture (from detail).
 
 ## Firewall audit
 

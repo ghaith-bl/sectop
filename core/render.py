@@ -16,7 +16,10 @@ Screen, top to bottom:
 
 Cursor: every box has a selected body line; the focused box shows it in
 reverse. While the cursor is not on the first line, it stays on the same
-text when new lines arrive above it (anchor).
+row (row id, else line text) when new lines arrive above it (anchor).
+
+Filter: a table / events box shows only lines that match ui.filters[key]
+(words all match, !word must not; cells, row detail, raw and masked text).
 """
 
 import curses
@@ -24,7 +27,7 @@ import time
 import unicodedata
 from dataclasses import dataclass
 
-from core.sanitize import TRUNC, display
+from core.sanitize import TRUNC, display, mask_ips
 
 TAGS = {"ok": "OK", "info": "INFO", "warn": "WARN", "crit": "CRIT",
         "unknown": "??", "off": "OFF"}
@@ -57,13 +60,17 @@ HELP = (
     ("space PgDn / PgUp", "one page"),
     ("g G  Home End", "first / last line"),
     ("enter", "detail of the selected line (pauses while open, real IPs)"),
+    ("/", "filter the focused table: all words match, !word must not"),
+    ("Esc", "clear the filter of the focused table"),
     ("p", "pause / resume the screen (data is still collected)"),
     ("m", "mask public IPs on / off"),
     ("Esc  q  enter", "close help / detail"),
     ("q", "quit"),
 )
-FOOTER = ("1-{n} screen  tab <- -> box  up down j k select  enter detail  "
+FOOTER = ("1-{n} screen  tab <- -> box  up down j k select  enter detail  / filter  "
           "p pause  m mask  ? help  q quit")
+TYPING = "  enter apply  esc cancel  (all words match, !word must not)"
+FILTER_MAX = 60
 
 _ATTR = {}                                   # style -> curses attr, set in setup()
 
@@ -75,8 +82,9 @@ class BoxInfo:
     page: int           # body lines visible
     sel: int = 0        # selected body line
     off: int = 0        # first visible body line
-    ident: str | None = None   # text of the selected line (anchor)
+    ident: str | None = None   # row id or text of the selected line (anchor)
     cursor: bool = True        # False: overlay text, keys scroll it
+    filterable: bool = False   # table / events: / filters it
 
 
 @dataclass(frozen=True)
@@ -246,8 +254,27 @@ def _header(m: dict, width: int, mask: bool) -> list:
     return _line(width, mask, *parts)
 
 
-def _footer(n_screens: int, width: int) -> list:
+def _footer(n_screens: int, width: int, ui=None) -> list:
+    typing = getattr(ui, "typing", None)
+    if typing is not None:
+        return _line(width, False, (" / ", "focus"), (typing + "_", "plain"), (TYPING, "dim"))
     return _line(width, False, (" " + FOOTER.format(n=n_screens), "dim"))
+
+
+def _search(parts: list) -> str:
+    raw = " ".join(parts)
+    return (raw + "\n" + mask_ips(raw)).lower()
+
+
+def match(hay: str, filt: str) -> bool:
+    """All words in hay; a word starting with ! must not be in it."""
+    for word in filt.lower().split():
+        if word.startswith("!"):
+            if len(word) > 1 and word[1:] in hay:
+                return False
+        elif word not in hay:
+            return False
+    return True
 
 
 # --- boxes ----------------------------------------------------------------
@@ -264,9 +291,21 @@ class _Box:
         self.prep = None
         self.w = self.h = 0                  # natural content width, lines
         self.least = 0                       # content width it can shrink to
+        self.filt = ""                       # table / feed filter
+        self.view = []                       # table rows / events after the filter
+
+    @property
+    def filterable(self) -> bool:
+        return self.kind in ("table", "feed")
 
     def measure(self, mask: bool) -> None:
-        d = self.data
+        if self.kind == "table":
+            rows = self.data["rows"]
+            self.view = [r for r in rows if not self.filt or match(
+                _search(r["cells"] + [it["v"] for it in r.get("detail", ())]), self.filt)]
+        elif self.kind == "feed":
+            self.view = [e for e in self.data if not self.filt or match(
+                _search([e["sev"], e["src"], e["code"], e["msg"]]), self.filt)]
         self._measure(mask)
         if self.kind in ("kv", "table"):     # natural width also fits the title
             self.w = max(self.w, cols(display(self.title, mask)) + 3)
@@ -284,7 +323,7 @@ class _Box:
             self.h = max(1, len(keys))
         elif self.kind == "table":
             head = [display(c, mask) for c in d["columns"]]
-            rows = [[display(c, mask) for c in r["cells"]] for r in d["rows"]]
+            rows = [[display(c, mask) for c in r["cells"]] for r in self.view]
             widths = [min(COL_MAX, max(cols(c) for c in col)) for col in zip(head, *rows)]
             floors = [min(w, max(COL_MIN, cols(h))) for w, h in zip(widths, head)]
             self.prep = (head, rows, widths, floors)
@@ -296,7 +335,7 @@ class _Box:
             self.w, self.h = SPARK_W, 1
             self.least = SPARK_W
         else:                                # feed, note, detail
-            self.w, self.h = 0, max(1, len(d))
+            self.w, self.h = 0, max(1, len(self.view if self.kind == "feed" else d))
 
     def content(self, w: int, mask: bool, tsfmt) -> tuple:
         """-> (head lines, body lines), each at most w cells."""
@@ -315,12 +354,12 @@ class _Box:
                 return "  ".join(pad(c, cw) for c, cw in zip(cells, widths)).rstrip()
 
             body = [_line(w, mask, (row(cells), _style(r)))
-                    for cells, r in zip(rows, d["rows"])]
+                    for cells, r in zip(rows, self.view)]
             return [_line(w, mask, (row(head), "dim"))], body or dash
         if self.kind == "spark":
             return [], [_spark(d, w, mask)]
         if self.kind == "feed":
-            return [], [_event(e, w, mask, tsfmt) for e in d] or dash
+            return [], [_event(e, w, mask, tsfmt) for e in self.view] or dash
         if self.kind == "detail":                # opened on purpose: real IPs, no mask
             return [], _detail(d, w, False) or dash
         return [], [_line(w, mask, (t, "dim")) for t in d] or dash
@@ -331,8 +370,8 @@ class _Box:
         if self.kind == "kv" and i < len(d["items"]):
             it = d["items"][i]
             return [(it["k"], it["v"]), ("severity", it["sev"])]
-        if self.kind == "table" and i < len(d["rows"]):
-            r = d["rows"][i]
+        if self.kind == "table" and i < len(self.view):
+            r = self.view[i]
             out = list(zip(d["columns"], r["cells"])) + [("severity", r["sev"])]
             if r.get("detail"):
                 out += [("", "")] + [(it["k"], it["v"]) for it in r["detail"]]
@@ -343,11 +382,20 @@ class _Box:
             return [("last", _num(v[-1]) + unit), ("min", _num(min(v)) + unit),
                     ("max", _num(max(v)) + unit), ("points", str(len(v))),
                     ("values", " ".join(_num(x) for x in v))]
-        if self.kind == "feed" and i < len(d):
-            e = d[i]
+        if self.kind == "feed" and i < len(self.view):
+            e = self.view[i]
             return [("time", tsfmt(e["ts"])), ("severity", e["sev"]), ("source", e["src"]),
                     ("code", e["code"]), ("message", e["msg"])]
         return []
+
+    def idents(self, texts: list) -> list:
+        """Anchor per body line: row id if the module gave one, else the line text."""
+        if self.kind == "table" and self.view:
+            return [r.get("id") or t for r, t in zip(self.view, texts)]
+        return texts
+
+    def total(self) -> int:
+        return len(self.data["rows"] if self.kind == "table" else self.data)
 
 
 def _detail(pairs: list, w: int, mask: bool) -> list:
@@ -588,13 +636,15 @@ def _grid(boxes: list, ui, width: int, room: int, mask: bool, tsfmt, pref) -> tu
             inner = max(0, cw - 2)
             head, body = b.content(inner, mask, tsfmt)
             vis = max(0, hr - len(head))
-            texts = [_text(line) for line in body]
-            sel, off = _select(ui, b.key, texts, vis)
+            ids = b.idents([_text(line) for line in body])
+            sel, off = _select(ui, b.key, ids, vis)
             infos.append(BoxInfo(b.key, len(body), vis, sel, off,
-                                 texts[sel] if texts else None, b.cursor))
+                                 ids[sel] if ids else None, b.cursor, b.filterable))
             suffix = ""
+            if b.filt:
+                suffix = f"  / {b.filt}  {len(b.view)} of {b.total()}"
             if len(body) > vis > 0:
-                suffix = f"  {off + 1}-{min(off + vis, len(body))}/{len(body)}"
+                suffix += f"  {off + 1}-{min(off + vis, len(body))}/{len(body)}"
             on = b.key == focus
             titles.append((x, _title(b, on and b.cursor, mask, suffix), max(0, cw - 3)))
             shown_body = [_hi(line) if on and b.cursor and off + i == sel else line
@@ -639,9 +689,13 @@ def layout(screens, view: list, feed: list, ui, width: int, height: int,
     if len(top) >= height:
         return Frame(top[:height], ())
     room = height - len(top)
-    footer = [_footer(len(screens), width)] if room >= 4 else []
+    footer = [_footer(len(screens), width, ui)] if room >= 4 else []
     room -= len(footer)
     boxes = _boxes(scr, mods, feed)
+    filters = getattr(ui, "filters", {})
+    for b in boxes:
+        if b.filterable:
+            b.filt = filters.get(b.key, "")
     over = _overlay(boxes, ui, mask, tsfmt)
     if over is not None:
         boxes = [over]

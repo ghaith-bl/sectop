@@ -94,6 +94,8 @@ table (rows max 200):
 ```
 
 Row `detail` optional: extra k / v pairs shown on `enter` under the cells (max 40).
+Row `id` optional (str): stable key of the row (e.g. a grouped flow). The cursor follows
+it when the row moves or its text changes. Not shown.
 
 `tone` optional on kv items and table rows: `plain`, `red`, `blue`, `yellow`, `green`.
 A color for meaning (a verdict, a healthy state), not a severity. See Screen (color).
@@ -162,8 +164,15 @@ spark (values max 120, numbers):
   events box, else first box. Gone -> same rule.
 - Cursor: each box has a selected line, shown in reverse in the focused box; the box
   scrolls to keep it visible. Line 0 follows the newest line. Below line 0 the cursor
-  stays on the same text when new lines arrive above it (same text found nearest to the
-  old index; not found -> same index, clamped).
+  stays on the same row when new lines arrive above it: row `id`, else the same text
+  (found nearest to the old index; not found -> same index, clamped).
+- Filter (`/`, table and events boxes): type words, applied while typing; `enter` keeps
+  it, `Esc` goes back to the filter before. Every key is text while typing (q does not
+  quit). A line is shown when all words are in it and no `!word` is; case-insensitive,
+  searched in the cells, the row `detail` values (e.g. rule name `out_ks`), raw and
+  masked text (`160.79.x.x` works too). Title: `/ <filter>  <shown> of <all>`. `Esc`
+  outside typing clears the focused box's filter. Cursor back to line 0 on each change.
+  Max 60 chars.
 - `enter`: detail of the selected line in one overlay box: table row = column / cell pairs,
   severity, row `detail`; kv item, spark values, event fields. Long values wrap.
   Real IPs: the detail is opened on purpose, so it is not masked. While mask is on the
@@ -173,8 +182,8 @@ spark (values max 120, numbers):
   Resume shows the current view.
 - Keys: `1-9` screen; `tab` / right / `l` next box, `shift-tab` / left / `h` previous box;
   down / up / `j` `k` line; `space` `PgDn` / `PgUp` page; `g` `G` / `Home` `End` first / last;
-  `enter` detail; `p` pause; `m` mask; `?` help; `q` quit. In help / detail: `Esc` `q`
-  `enter` `?` close, line keys scroll. Esc delay 25 ms.
+  `enter` detail; `/` filter; `Esc` clear filter; `p` pause; `m` mask; `?` help; `q` quit.
+  In help / detail: `Esc` `q` `enter` `?` close, line keys scroll. Esc delay 25 ms.
 - Redraw: full after a collect (not while paused) or a key (incl. resize); between those
   only the clock line, once a second.
 - Every string goes through `display()`. Width counted in terminal cells (wide chars = 2).

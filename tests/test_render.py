@@ -142,6 +142,57 @@ class TestBoxes(unittest.TestCase):
         self.assertEqual(part(lines, "x        149")[1], "crit")
         self.assertEqual(part(lines, " out_leak / tick ")[1], "warn")    # title sev
 
+    def filtered(self, filt, mask=True, typing=None):
+        m = mod()
+        m["panels"][1]["rows"][0]["detail"] = [{"k": "rule", "v": "out_ks"}]
+        ui = UI(2, filters={"firewall/conns": filt}, mask=mask, typing=typing)
+        return frame([m], ui=ui)
+
+    def test_filter_rows(self):
+        f = self.filtered("fire")
+        self.assertTrue(find(f.lines, "[Connections]  / fire  1 of 2 "))
+        self.assertTrue(find(f.lines, "firefox  10.2.0.1"))
+        self.assertFalse(find(f.lines, "149.112"))
+        self.assertEqual({b.key: b for b in f.boxes}["firewall/conns"].lines, 1)
+        for filt, want in (("out_ks", 1), ("OUT_KS", 1), ("!fire", 1), ("x 149.112.x.x", 1),
+                           ("149.112.112", 1), ("!fire !x", 0), ("nothing", 0), ("!", 2)):
+            f = self.filtered(filt)
+            self.assertEqual({b.key: b for b in f.boxes}["firewall/conns"].lines,
+                             want if want else 1, filt)              # 0 rows -> one "-" line
+            if not want:
+                self.assertTrue(find(f.lines, f"/ {filt}  0 of 2"))
+
+    def test_filter_detail_uses_shown_rows(self):
+        m = mod()
+        ui = UI(2, filters={"firewall/conns": "149"}, detail="firewall/conns",
+                sel={"firewall/conns": 0})
+        f = frame([m], ui=ui)
+        self.assertTrue(find(f.lines, " proc      x"))               # row 1 of the data
+
+    def test_filter_feed_and_footer(self):
+        f = frame(feed=[ev(1), ev(2, msg="other")],
+                  ui=UI(2, filters={"one/events": "n1"}, typing="n1"))
+        self.assertEqual(len(find(f.lines, "HFW-OUT-LEAK")), 1)
+        self.assertTrue(find(f.lines, " events  2   / n1  1 of 2 "))
+        self.assertTrue(text(f.lines[-1]).startswith(" / n1_  enter apply  esc cancel"))
+        self.assertTrue(text(frame().lines[-1]).startswith(" 1-2 screen"))
+        info = {b.key: b for b in f.boxes}
+        self.assertTrue(info["one/events"].filterable and info["firewall/conns"].filterable)
+        self.assertFalse(info["firewall/mode"].filterable)
+
+    def test_row_id_anchor(self):
+        m = self.rows30()
+        for i, r in enumerate(m["panels"][1]["rows"]):
+            r["id"] = f"flow{i}"
+        ui = UI(2, sel={"firewall/conns": 5})
+        ui.update(frame([m], ui=ui))
+        self.assertEqual(ui.anchor["firewall/conns"], "flow5")
+        row = m["panels"][1]["rows"].pop(5)
+        row["cells"] = ["p5", "10.0.0.9"]                            # text changed, moved up
+        m["panels"][1]["rows"].insert(1, row)
+        b = {b.key: b for b in frame([m], ui=ui).boxes}["firewall/conns"]
+        self.assertEqual((b.sel, b.ident), (1, "flow5"))             # cursor followed the id
+
     def test_tone_styles(self):
         m = mod()
         rows = m["panels"][1]["rows"]

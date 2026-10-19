@@ -127,6 +127,8 @@ def _table(p: dict, w: str) -> dict:
         row = {"cells": [truncate(c, MAX_STR) for c in cells],
                "sev": _choice(r, "sev", SEVS, wr, "ok")}
         _tone(r, row, wr)
+        if "id" in r:                    # stable row key: the cursor follows it
+            row["id"] = _str(r, "id", wr)
         if "detail" in r:
             row["detail"] = _detail(r, wr)
         rows.append(row)

@@ -160,6 +160,15 @@ class TestValidate(unittest.TestCase):
             s2["panels"][1]["rows"][0]["detail"] = bad
             self.assertInvalid(s2)
 
+    def test_row_id(self):
+        s = snap()
+        s["panels"][1]["rows"][0]["id"] = "k" * 1000
+        row = validate(s)["panels"][1]["rows"][0]
+        self.assertEqual(len(row["id"]), m.MAX_STR)
+        self.assertNotIn("id", validate(snap())["panels"][1]["rows"][0])
+        s["panels"][1]["rows"][0]["id"] = 5
+        self.assertInvalid(s)
+
     def test_tone(self):
         s = snap()
         s["panels"][0]["items"][0]["tone"] = "green"

@@ -8,6 +8,10 @@ the focused box, the renderer keeps it visible.
 
 Overlays (help, detail) take the whole grid. In an overlay, q / Esc
 close it instead of quitting.
+
+Filter: / starts typing a filter for the focused table / events box. Every
+key is text until enter (keep) or Esc (back to the old filter). The filter
+applies while typing. Esc outside typing clears the focused box's filter.
 """
 
 import curses
@@ -18,6 +22,8 @@ ESC = 27
 ENTER_KEYS = (10, 13, curses.KEY_ENTER)
 BACK_KEYS = (ESC, curses.KEY_BACKSPACE, 127, 8)
 BIG = 1 << 30
+FILTER_MAX = 60
+BACKSPACE = (curses.KEY_BACKSPACE, 127, 8)
 
 
 @dataclass
@@ -31,9 +37,13 @@ class UI:
     focus: dict = field(default_factory=dict)    # screen index -> box key
     sel: dict = field(default_factory=dict)      # box key -> selected body line
     scroll: dict = field(default_factory=dict)   # box key -> first visible body line
-    anchor: dict = field(default_factory=dict)   # box key -> text of the selected line
+    anchor: dict = field(default_factory=dict)   # box key -> row id / text of the selected line
+    filters: dict = field(default_factory=dict)  # box key -> filter text
+    typing: str | None = None                    # filter being typed (None = not typing)
     boxes: tuple = ()                            # BoxInfo of the last frame
     _auto_pause: bool = False                    # pause came from opening detail
+    _typing_box: str | None = None
+    _typing_old: str = ""
 
     def update(self, frame) -> None:
         """Take what the renderer resolved (focus, cursor, scroll)."""
@@ -56,6 +66,9 @@ class UI:
 
     def key(self, k: int) -> bool:
         """Apply one key. Returns False to quit."""
+        if self.typing is not None:
+            self._type(k)
+            return True
         if k in (ord("m"), ord("M")):
             self.mask = not self.mask
         elif k in (ord("p"), ord("P")):
@@ -68,6 +81,15 @@ class UI:
                 self._move_key(k)
         elif k in (ord("q"), ord("Q")):
             return False
+        elif k == ord("/"):
+            b = self._box()
+            if b is not None and b.filterable:
+                self._typing_box, self._typing_old = b.key, self.filters.get(b.key, "")
+                self.typing = self._typing_old
+        elif k == ESC:
+            b = self._box()
+            if b is not None and self.filters.pop(b.key, None) is not None:
+                self._reset(b.key)
         elif k == ord("?"):
             self.help = True
         elif k in ENTER_KEYS:
@@ -84,6 +106,35 @@ class UI:
         return True
 
     # --- helpers ----------------------------------------------------------
+
+    def _type(self, k: int) -> None:
+        key = self._typing_box
+        if k == ESC:
+            self._set_filter(key, self._typing_old)
+        elif k in ENTER_KEYS:
+            self._set_filter(key, self.typing.strip())
+        else:
+            if k in BACKSPACE:
+                self.typing = self.typing[:-1]
+            elif 32 <= k < 127 and len(self.typing) < FILTER_MAX:
+                self.typing += chr(k)
+            else:
+                return
+            self._set_filter(key, self.typing)
+            return
+        self.typing = self._typing_box = None
+
+    def _set_filter(self, key: str, text: str) -> None:
+        if text.strip():
+            self.filters[key] = text
+        else:
+            self.filters.pop(key, None)
+        self._reset(key)
+
+    def _reset(self, key: str) -> None:
+        """Filter changed: cursor back to the first line."""
+        self.sel[key] = self.scroll[key] = 0
+        self.anchor.pop(key, None)
 
     def _box(self):
         key = self.focused()
