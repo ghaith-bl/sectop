@@ -349,15 +349,23 @@ class TestCollect(unittest.TestCase):
         self.assertEqual(self.items(s, "hostfw")["mode"], ("observe", "warn"))
         self.assertEqual(self.items(s, "hostfw")["boot mode"], ("enforce", "info"))
 
+    def rollback(self, text):
+        with open(self.rb_file, "w") as f:
+            f.write(text)
+        return self.items(self.collect(), "hostfw")["rollback"]
+
     def test_rollback(self):
-        with open(self.rb_file, "w") as f:
-            f.write(f"{int(self.wall) + 130} flush chain inet hostfw enforce\n")
-        s = self.collect()
-        self.assertEqual(self.items(s, "hostfw")["rollback"], ("armed, 2m 10s left", "info"))
-        self.assertEqual(s["status"], "info")
-        with open(self.rb_file, "w") as f:
-            f.write("something else\n")
-        self.assertEqual(self.items(self.collect(), "hostfw")["rollback"], ("armed", "info"))
+        # hostfw.sh rollback_arm: printf '%s\n%s\n' deadline "$*"
+        deadline = int(self.wall) + 125
+        self.assertEqual(self.rollback(f"{deadline}\n/usr/sbin/nft flush chain inet hostfw enforce\n"),
+                         ("armed, 2m 05s left -> /usr/sbin/nft flush chain inet hostfw enforce",
+                          "info"))
+        self.assertEqual(self.collect()["status"], "info")
+        self.assertEqual(self.rollback(f"{deadline}\n"), ("armed, 2m 05s left", "info"))
+        self.assertEqual(self.rollback(f"{int(self.wall) - 10}\nx\n"),
+                         ("armed, 0m 00s left -> x", "info"))         # past deadline
+        for text in ("something else\n", "", "12\n"):
+            self.assertEqual(self.rollback(text), ("armed", "info"), repr(text))
 
     def test_mode_file_untrusted(self):
         os.chmod(self.mode_file, 0o666)

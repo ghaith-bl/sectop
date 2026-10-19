@@ -187,12 +187,18 @@ def _hostfw(st: State, checks: list) -> tuple:
 
 
 def _rollback_left(text: str, now: float) -> str:
-    """Deadline file: first word epoch seconds if it is one, else just 'armed'."""
-    word = text.split()[0] if text.split() else ""
-    if word.isdigit() and int(word) > 1_000_000_000:
-        left = max(0, int(word) - int(now))
-        return f"armed, {left // 60}m {left % 60}s left"
-    return "armed"
+    """hostfw deadline file: line 1 epoch deadline, line 2 rollback command.
+
+    Anything else -> just 'armed' (the file existing is what matters).
+    """
+    lines = text.splitlines()
+    first = lines[0].strip() if lines else ""
+    if not (first.isdigit() and int(first) > 1_000_000_000):
+        return "armed"
+    left = max(0, int(first) - int(now))
+    out = f"armed, {left // 60}m {left % 60:02d}s left"
+    action = lines[1].strip() if len(lines) > 1 else ""
+    return f"{out} -> {action}" if action else out
 
 
 def _counters(st: State, counters: dict | None, now: float) -> tuple:

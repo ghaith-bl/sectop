@@ -88,8 +88,9 @@ Interface names `[A-Za-z0-9_.-]{1,15}`. Unknown option -> init error, module dis
 
 ## Rollback file
 
-hostfw writes a deadline file. If its first word is epoch seconds, remaining time is
-shown, else only `armed`. Format to confirm against hostfw.sh `rollback_arm`.
+`/run/hostfw/rollback`, written by hostfw.sh `rollback_arm`, removed by `rollback_clear`:
+line 1 deadline (epoch seconds), line 2 rollback command.
+Shown as `armed, 2m 05s left -> <command>`. Other content -> `armed`.
 
 ## Fixtures
 
