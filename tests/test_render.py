@@ -442,12 +442,14 @@ class TestFeedAndScreens(unittest.TestCase):
         ui = UI(2, detail="firewall/conns", sel={"firewall/conns": 1})
         f = frame([m], ui=ui)
         self.assertEqual([b.key for b in f.boxes], ["detail"])
-        self.assertTrue(find(f.lines, " detail: Connections   Esc close "))
+        self.assertTrue(find(f.lines, " detail: Connections   real IPs shown   Esc close "))
         body = [text(line) for line in f.lines if text(line).startswith(BV)]
         self.assertEqual([t[1:].rstrip(BV).rstrip() for t in body[:6]],
-                         [" proc      x", " dst       149.112.x.x", " severity  crit", "",
-                          " TTL       64", " SRC       149.112.x.x"])    # masked
+                         [" proc      x", " dst       149.112.112.11", " severity  crit", "",
+                          " TTL       64", " SRC       149.112.112.11"])  # opened: not masked
+        self.assertTrue(find(f.lines, "mask on"))                          # top line: mask kept
         f = frame([m], ui=UI(2, detail="firewall/conns", sel={"firewall/conns": 1}, mask=False))
+        self.assertTrue(find(f.lines, " detail: Connections   Esc close "))   # no note: mask off
         self.assertTrue(find(f.lines, "149.112.112.11"))
 
     def test_detail_other_kinds(self):
@@ -461,7 +463,7 @@ class TestFeedAndScreens(unittest.TestCase):
                           " values  0 1 2 3"])
         self.assertEqual(body("one/events", 0, [ev()])[:5],
                          [" time      12:00:00", " severity  crit", " source    firewall",
-                          " code      HFW-OUT-LEAK", " message   dst 8.8.x.x n0"])
+                          " code      HFW-OUT-LEAK", " message   dst 8.8.8.8 n0"])
         self.assertEqual(body("nope")[0].strip(), "line gone")
 
     def test_detail_wraps_long_values(self):

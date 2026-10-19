@@ -56,7 +56,7 @@ HELP = (
     ("down up  j k", "select line"),
     ("space PgDn / PgUp", "one page"),
     ("g G  Home End", "first / last line"),
-    ("enter", "detail of the selected line (pauses while open)"),
+    ("enter", "detail of the selected line (pauses while open, real IPs)"),
     ("p", "pause / resume the screen (data is still collected)"),
     ("m", "mask public IPs on / off"),
     ("Esc  q  enter", "close help / detail"),
@@ -321,8 +321,8 @@ class _Box:
             return [], [_spark(d, w, mask)]
         if self.kind == "feed":
             return [], [_event(e, w, mask, tsfmt) for e in d] or dash
-        if self.kind == "detail":
-            return [], _detail(d, w, mask) or dash
+        if self.kind == "detail":                # opened on purpose: real IPs, no mask
+            return [], _detail(d, w, False) or dash
         return [], [_line(w, mask, (t, "dim")) for t in d] or dash
 
     def pairs(self, i: int, tsfmt) -> list:
@@ -414,6 +414,8 @@ def _overlay(boxes: list, ui, mask: bool, tsfmt):
         b.measure(mask)
         pairs = b.pairs(ui.sel.get(b.key, 0), tsfmt)
     title = f"detail: {b.title}" if b is not None else "detail"
+    if mask:
+        title += "   real IPs shown"
     return _Box("detail", title + "   Esc close", "ok", "detail",
                 pairs or [("", "line gone")])
 

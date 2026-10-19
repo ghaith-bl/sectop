@@ -166,6 +166,8 @@ spark (values max 120, numbers):
   old index; not found -> same index, clamped).
 - `enter`: detail of the selected line in one overlay box: table row = column / cell pairs,
   severity, row `detail`; kv item, spark values, event fields. Long values wrap.
+  Real IPs: the detail is opened on purpose, so it is not masked. While mask is on the
+  title says `real IPs shown` (screenshots of the detail show them).
   Opening it pauses; closing resumes (unless paused before).
 - Pause (`p`): the screen keeps the view from the moment of pausing, collecting goes on.
   Resume shows the current view.
@@ -224,7 +226,8 @@ run(argv: list[str], timeout: float = 1.5) -> Result
   Private, CGNAT, link-local, loopback, broadcast, multicast shown as is.
 - Mask before truncate, so a cut never shows a partial public IP.
   When unsure, mask (a 4-part version string may get masked).
-- Masking is display only. Snapshot data stays unmasked.
+- Masking is display only. Snapshot data stays unmasked. Exception: the detail overlay
+  (see Screen) shows real IPs.
 
 ## Config
 
