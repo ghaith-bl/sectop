@@ -1,3 +1,4 @@
+import importlib
 import sys
 import types
 import unittest
@@ -5,6 +6,7 @@ from unittest import mock
 
 from core import registry
 from core.config import Config, ConfigError, parse
+from core.module import check_module
 from core.registry import close, load
 
 
@@ -52,8 +54,14 @@ class Base(unittest.TestCase):
 
 class TestLoad(Base):
     def test_default_list_valid(self):
-        registry._names(registry.MODULES)
-        self.assertEqual(load(Config()), [])
+        # Import + check only: init() would run commands on the host.
+        for imp, name in registry._names(registry.MODULES).items():
+            mod = importlib.import_module(imp)
+            check_module(mod)
+            self.assertEqual(mod.NAME, name)
+
+    def test_empty_list(self):
+        self.assertEqual(load(Config(), ()), [])
 
     def test_good(self):
         a = fake("a")
