@@ -779,6 +779,28 @@ class TestCollect(Base):
         self.assertIn("198.51.0.6", ips)
         self.assertEqual(ips[3], f"198.51.0.{fw.MAX_PEERS + 2}")     # then newest log line
 
+    def test_ip_on_rows(self):
+        self.host.set("journalctl", ok(fix("journal-audit.json")))
+        s = self.collect()
+        vpn_items = {i["k"]: i for i in self.panel(s, "vpn")["items"]}
+        self.assertEqual(vpn_items["endpoint"]["ip"], "203.0.113.83")
+        self.assertNotIn("ip", vpn_items["tunnel"])
+        audit = {r["cells"][8]: r.get("ip") for r in self.panel(s, "audit")["rows"]}
+        self.assertEqual(audit["198.51.100.20:443"], "198.51.100.20")       # out: dst
+        self.assertEqual(audit["192.168.8.102:22"], "192.168.8.50")         # in: src
+        self.assertEqual(audit["ff02::1:ff00:1"], "ff02::1:ff00:1")
+        peers = self.panel(s, "peers")["rows"]
+        self.assertTrue(all(r["ip"] == r["cells"][0] for r in peers))
+        self.host.set("wg endpoints", ok("k\t(none)\n"))
+        self.tick()
+        vpn_items = {i["k"]: i for i in self.panel(self.collect(), "vpn")["items"]}
+        self.assertNotIn("ip", vpn_items["endpoint"])
+
+    def test_leak_row_ip(self):
+        self.host.set("journalctl", ok(jline("l1", 1792410746, LEAK.format(spt=1))))
+        row = self.panel(self.collect(), "leak")["rows"][0]
+        self.assertEqual(row["ip"], "203.0.113.11")
+
     def test_peers_ss_error(self):
         self.host.set("ss", fail("ss: boom"))
         p = self.panel(self.collect(), "peers")

@@ -240,12 +240,27 @@ def _since(sec: float) -> str:
     return f"{sec // 3600}h {sec % 3600 // 60:02d}m"
 
 
-def _item(k: str, v: str, sev: str = "ok", tone: str = "") -> dict:
+def _item(k: str, v: str, sev: str = "ok", tone: str = "", ip: str | None = None) -> dict:
     """kv item; tone green = healthy state (drawn only while sev is ok)."""
     out = {"k": k, "v": v, "sev": sev}
     if tone and sev == "ok":
         out["tone"] = tone
+    if ip:
+        out["ip"] = ip
     return out
+
+
+def _ip(text: str) -> str | None:
+    """Address for the row `ip` (whois), None if text is not one."""
+    try:
+        return str(ipaddress.ip_address(text))
+    except ValueError:
+        return None
+
+
+def _remote(e) -> str | None:
+    """The other side of a log line: dst for out / fwd, src for in."""
+    return _ip(e.fields.get("SRC" if e.dir == "in" else "DST", ""))
 
 
 # --- sources --------------------------------------------------------------
@@ -504,12 +519,16 @@ def _flow_row(st: State, key: tuple, fl: Flow) -> dict:
     if len(fl.progs) > 1:
         detail.append(("programs", ", ".join(fl.progs)))
     detail.append(("last line", "fields below"))
-    return {"cells": [st.hms(fl.last), str(fl.n), d, fl.verdict, proto, uid, prog,
-                      fl.src, fl.dst, iface],
-            "sev": kind_sev(kind) or "ok", "tone": _tone(fl.verdict),
-            "id": "|".join(key),
-            "detail": [{"k": k, "v": v} for k, v in detail]
-                      + _audit_detail(st, fl.entry, fl.verdict)}
+    row = {"cells": [st.hms(fl.last), str(fl.n), d, fl.verdict, proto, uid, prog,
+                     fl.src, fl.dst, iface],
+           "sev": kind_sev(kind) or "ok", "tone": _tone(fl.verdict),
+           "id": "|".join(key),
+           "detail": [{"k": k, "v": v} for k, v in detail]
+                     + _audit_detail(st, fl.entry, fl.verdict)}
+    ip = _remote(fl.entry)
+    if ip:
+        row["ip"] = ip
+    return row
 
 
 def _vpn(st: State, checks: list, wall: float) -> tuple:
@@ -529,7 +548,8 @@ def _vpn(st: State, checks: list, wall: float) -> tuple:
     st.prev_tx = tx
 
     res = st.cmd("wg", "show", t, "endpoints")
-    items.append(_item("endpoint", vpn.endpoint(res.out) if res.rc == 0 else _fail(res)))
+    ep = vpn.endpoint(res.out) if res.rc == 0 else _fail(res)
+    items.append(_item("endpoint", ep, ip=_ip(conns.split(ep)[0]) if res.rc == 0 else None))
 
     if hs == 0:
         sev = "warn" if sending else "info"
@@ -671,6 +691,8 @@ def _leak_box(st: State, entries: list, up: bool, total, live: str) -> dict:
                       journal.dst(e), f.get("OUT") or "-", ctx],
             "sev": "info" if ctx == "pre-connect" else "crit", "tone": _tone(verdict),
             "detail": [{"k": k, "v": v} for k, v in detail] + _audit_detail(st, e, verdict)})
+        if _ip(f.get("DST", "")):
+            rows[-1]["ip"] = _ip(f["DST"])
     title = f"out_leak {total if total is not None else '?'}"
     if len(st.leaks) > LEAK_ROWS:
         title += f"  (newest {LEAK_ROWS} of {len(st.leaks)} lines)"
@@ -811,7 +833,7 @@ def _peer_row(st: State, ip: str, p: Peer, socks: list) -> dict:
                ("programs", ", ".join(p.progs) or "-"), ("uids", ", ".join(p.uids) or "-"),
                ("ports", ", ".join(p.ports) or "-"), ("ifaces", ", ".join(p.ifaces) or "-")]
     return {"cells": [ip, str(len(socks)), str(p.new), str(p.drop), prog, st.hms(p.last)],
-            "tone": tone, "id": ip, "detail": [{"k": k, "v": v} for k, v in detail]}
+            "tone": tone, "id": ip, "ip": ip, "detail": [{"k": k, "v": v} for k, v in detail]}
 
 
 def _note(items: list, key: str, err: str, value):

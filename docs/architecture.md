@@ -35,7 +35,8 @@ can decide from what is on screen. Read-only until the privilege split.
   replaces it.
 
 Keys now: `1-3` screen, `tab` / arrows box, `j/k` / arrows select line, `PgDn/PgUp` page,
-`enter` detail, `/` filter, `Esc` clear filter, `p` pause, `m` mask, `?` help, `q` quit.
+`enter` detail, `/` filter, `Esc` clear filter, `w` whois, `p` pause, `m` mask, `?` help,
+`q` quit.
 Planned: `a` ack alert, `t` capture (from detail).
 
 ## Firewall audit
@@ -55,6 +56,13 @@ Who talks to what, both ways, on the firewall screen.
   (`-n -c 50 -s 128 -Z tcpdump` + run timeout). Fits "no long-lived children".
 - Actions phase: block key = destination into a hostfw block set with timeout
   (hostfw can only tighten).
+
+## Lookups (whois)
+
+Read-only, on key press only: `w` = RDAP lookup of the selected address
+(docs/module-interface.md, Screen). Not an action: changes nothing on the host. Runs in
+a child as user nobody (setpriv, no groups, no_new_privs), so the root process never
+parses network data. Blocks the UI up to 12 s (v1: no threads).
 
 ## Alerts
 

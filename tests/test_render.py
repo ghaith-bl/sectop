@@ -193,6 +193,37 @@ class TestBoxes(unittest.TestCase):
         b = {b.key: b for b in frame([m], ui=ui).boxes}["firewall/conns"]
         self.assertEqual((b.sel, b.ident), (1, "flow5"))             # cursor followed the id
 
+    def whois_frame(self, ip="149.112.112.11", **kw):
+        m = mod()
+        m["panels"][1]["rows"][1]["ip"] = ip
+        ui = UI(2, detail="firewall/conns", sel={"firewall/conns": 1}, **kw)
+        return frame([m], ui=ui)
+
+    def test_whois_in_detail(self):
+        f = self.whois_frame()
+        self.assertTrue(find(f.lines, " whois     149.112.112.11: press w (RDAP as user nobody"))
+        self.assertEqual(f.boxes[0].ip, "149.112.112.11")             # detail box carries it
+        f = self.whois_frame(lookup="149.112.112.11")
+        self.assertTrue(find(f.lines, "149.112.112.11: looking up (RDAP, up to 12 s) ..."))
+        f = self.whois_frame(whois={"149.112.112.11": [("name", "QUAD9"), ("country", "CH")]})
+        body = [text(line)[1:].rstrip(BV).rstrip() for line in f.lines
+                if text(line).startswith(BV)]
+        i = body.index(" whois     149.112.112.11")
+        self.assertEqual(body[i + 1:i + 3], [" name      QUAD9", " country   CH"])
+        f = self.whois_frame(ip="10.2.0.1")
+        self.assertTrue(find(f.lines, "10.2.0.1: not a public address, no whois"))
+
+    def test_selected_ip_in_boxinfo(self):
+        m = mod()
+        m["panels"][1]["rows"][1]["ip"] = "149.112.112.11"
+        m["panels"][0]["items"][0]["ip"] = "8.8.8.8"
+        info = {b.key: b for b in frame([m], ui=UI(2, sel={"firewall/conns": 1})).boxes}
+        self.assertEqual((info["firewall/conns"].ip, info["firewall/mode"].ip),
+                         ("149.112.112.11", "8.8.8.8"))
+        info = {b.key: b for b in frame([m]).boxes}
+        self.assertIsNone(info["firewall/conns"].ip)                  # row 0 has no ip
+        self.assertTrue(text(frame().lines[-1]).find("w whois") > 0)
+
     def test_tone_styles(self):
         m = mod()
         rows = m["panels"][1]["rows"]

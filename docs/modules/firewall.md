@@ -92,6 +92,11 @@ kinds except hidden), audit (table, see below), peers (table, see below).
 - vpn `recv / sent` = bytes received / sent through the tunnel since it came up
   (`wg show transfer`, summed over peers, 1000-based units). Reset on every reconnect.
 
+## Row addresses (`ip`, key `w` = whois)
+
+audit: the other side (dst for out / fwd, src for in), out_leak: dst, peers: the peer,
+vpn: the endpoint (kv item). Counters: none.
+
 ## Peers box
 
 One row per remote address the host talks to (replaces the connections box): from

@@ -27,6 +27,9 @@ import time
 import unicodedata
 from dataclasses import dataclass
 
+from core.lookup import TIMEOUT as LOOKUP_TIMEOUT
+from core.lookup import USER as LOOKUP_USER
+from core.lookup import public
 from core.sanitize import TRUNC, display, mask_ips
 
 TAGS = {"ok": "OK", "info": "INFO", "warn": "WARN", "crit": "CRIT",
@@ -61,6 +64,7 @@ HELP = (
     ("g G  Home End", "first / last line"),
     ("enter", "detail of the selected line (pauses while open, real IPs)"),
     ("/", "filter the focused table: all words match, !word must not"),
+    ("w", f"whois of the selected IP (RDAP as user {LOOKUP_USER}, via the tunnel)"),
     ("Esc", "clear the filter of the focused table"),
     ("p", "pause / resume the screen (data is still collected)"),
     ("m", "mask public IPs on / off"),
@@ -68,7 +72,7 @@ HELP = (
     ("q", "quit"),
 )
 FOOTER = ("1-{n} screen  tab <- -> box  up down j k select  enter detail  / filter  "
-          "p pause  m mask  ? help  q quit")
+          "w whois  p pause  m mask  ? help  q quit")
 TYPING = "  enter apply  esc cancel  (all words match, !word must not)"
 FILTER_MAX = 60
 
@@ -85,6 +89,7 @@ class BoxInfo:
     ident: str | None = None   # row id or text of the selected line (anchor)
     cursor: bool = True        # False: overlay text, keys scroll it
     filterable: bool = False   # table / events: / filters it
+    ip: str | None = None      # address of the selected line (w = whois)
 
 
 @dataclass(frozen=True)
@@ -388,6 +393,13 @@ class _Box:
                     ("code", e["code"]), ("message", e["msg"])]
         return []
 
+    def ip_at(self, i: int) -> str | None:
+        if self.kind == "table" and 0 <= i < len(self.view):
+            return self.view[i].get("ip")
+        if self.kind == "kv" and 0 <= i < len(self.data["items"]):
+            return self.data["items"][i].get("ip")
+        return getattr(self, "src_ip", None) if self.kind == "detail" else None
+
     def idents(self, texts: list) -> list:
         """Anchor per body line: row id if the module gave one, else the line text."""
         if self.kind == "table" and self.view:
@@ -457,15 +469,32 @@ def _overlay(boxes: list, ui, mask: bool, tsfmt):
     if ui.detail is None:
         return None
     b = next((b for b in boxes if b.key == ui.detail), None)
-    pairs = []
+    pairs, ip = [], None
     if b is not None:
         b.measure(mask)
-        pairs = b.pairs(ui.sel.get(b.key, 0), tsfmt)
+        i = ui.sel.get(b.key, 0)
+        pairs = b.pairs(i, tsfmt)
+        ip = b.ip_at(i) if pairs else None
+    if ip:
+        pairs = pairs + [("", "")] + _whois(ui, ip)
     title = f"detail: {b.title}" if b is not None else "detail"
     if mask:
         title += "   real IPs shown"
-    return _Box("detail", title + "   Esc close", "ok", "detail",
-                pairs or [("", "line gone")])
+    box = _Box("detail", title + "   Esc close", "ok", "detail", pairs or [("", "line gone")])
+    box.src_ip = ip
+    return box
+
+
+def _whois(ui, ip: str) -> list:
+    """whois part of a detail: result, pending, or how to start it."""
+    done = getattr(ui, "whois", {})
+    if ip in done:
+        return [("whois", ip)] + list(done[ip])
+    if not public(ip):
+        return [("whois", f"{ip}: not a public address, no whois")]
+    if getattr(ui, "lookup", None) == ip:
+        return [("whois", f"{ip}: looking up (RDAP, up to {LOOKUP_TIMEOUT:g} s) ...")]
+    return [("whois", f"{ip}: press w (RDAP as user {LOOKUP_USER}, via the tunnel)")]
 
 
 # --- grid -----------------------------------------------------------------
@@ -639,7 +668,8 @@ def _grid(boxes: list, ui, width: int, room: int, mask: bool, tsfmt, pref) -> tu
             ids = b.idents([_text(line) for line in body])
             sel, off = _select(ui, b.key, ids, vis)
             infos.append(BoxInfo(b.key, len(body), vis, sel, off,
-                                 ids[sel] if ids else None, b.cursor, b.filterable))
+                                 ids[sel] if ids else None, b.cursor, b.filterable,
+                                 b.ip_at(sel)))
             suffix = ""
             if b.filt:
                 suffix = f"  / {b.filt}  {len(b.view)} of {b.total()}"

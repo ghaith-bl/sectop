@@ -97,6 +97,9 @@ Row `detail` optional: extra k / v pairs shown on `enter` under the cells (max 4
 Row `id` optional (str): stable key of the row (e.g. a grouped flow). The cursor follows
 it when the row moves or its text changes. Not shown.
 
+`ip` optional on kv items and table rows: the address of that line (a valid IPv4 / IPv6
+address, stored normalized). Core can look it up on key `w` (whois, see Screen).
+
 `tone` optional on kv items and table rows: `plain`, `red`, `blue`, `yellow`, `green`.
 A color for meaning (a verdict, a healthy state), not a severity. See Screen (color).
 
@@ -178,11 +181,26 @@ spark (values max 120, numbers):
   Real IPs: the detail is opened on purpose, so it is not masked. While mask is on the
   title says `real IPs shown` (screenshots of the detail show them).
   Opening it pauses; closing resumes (unless paused before).
+- whois (`w`, `core/lookup.py`, `core/rdap.py`): on a line with `ip` (or in its detail)
+  opens the detail and looks the address up with RDAP (RFC 9224 bootstrap from IANA,
+  RFC 9083 answer), the modern WHOIS. Public addresses only. Detail shows `whois` then
+  name, handle, range, cidr, type, country, parent, org, abuse, dates, remark, whois
+  server, source URL, or the error.
+  - Child process, never root: `setpriv --reuid=<nobody> --regid=<nobody> --clear-groups
+    --no-new-privs -- /usr/bin/python3 -I -c <core/rdap.py text> <ip>` via `run()`
+    (python3 checked like run() binaries). Network data is parsed only in the child;
+    core reads one JSON line (max 20 fields, values cut to 200).
+  - HTTPS only (redirects to other schemes refused), 4 s per request, body max 1 MiB,
+    whole lookup max 12 s. No proxy (run() env).
+  - Blocks the UI while it runs, after a frame that says `looking up`. Only on key press,
+    one lookup per address per session (last 100 kept). Goes out via the tunnel like
+    any program (audit shows the flows, uid of nobody).
 - Pause (`p`): the screen keeps the view from the moment of pausing, collecting goes on.
   Resume shows the current view.
 - Keys: `1-9` screen; `tab` / right / `l` next box, `shift-tab` / left / `h` previous box;
   down / up / `j` `k` line; `space` `PgDn` / `PgUp` page; `g` `G` / `Home` `End` first / last;
-  `enter` detail; `/` filter; `Esc` clear filter; `p` pause; `m` mask; `?` help; `q` quit.
+  `enter` detail; `/` filter; `Esc` clear filter; `w` whois; `p` pause; `m` mask; `?` help;
+  `q` quit.
   In help / detail: `Esc` `q` `enter` `?` close, line keys scroll. Esc delay 25 ms.
 - Redraw: full after a collect (not while paused) or a key (incl. resize); between those
   only the clock line, once a second.

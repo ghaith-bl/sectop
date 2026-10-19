@@ -169,6 +169,19 @@ class TestValidate(unittest.TestCase):
         s["panels"][1]["rows"][0]["id"] = 5
         self.assertInvalid(s)
 
+    def test_ip(self):
+        s = snap()
+        s["panels"][1]["rows"][0]["ip"] = "2607:6bc0:0000::0010"
+        s["panels"][0]["items"][0]["ip"] = "8.8.8.8"
+        out = validate(s)
+        self.assertEqual(out["panels"][1]["rows"][0]["ip"], "2607:6bc0::10")   # normalized
+        self.assertEqual(out["panels"][0]["items"][0]["ip"], "8.8.8.8")
+        self.assertNotIn("ip", out["panels"][0]["items"][1])
+        for bad in ("8.8.8.8:443", "x", "", 1, None):
+            s2 = snap()
+            s2["panels"][1]["rows"][0]["ip"] = bad
+            self.assertInvalid(s2)
+
     def test_tone(self):
         s = snap()
         s["panels"][0]["items"][0]["tone"] = "green"

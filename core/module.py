@@ -5,6 +5,7 @@ Snapshot (known keys only, defaults filled, limits applied) or raises
 InvalidSnapshot. Core never draws a Snapshot that did not pass here.
 """
 
+import ipaddress
 import json
 import math
 import re
@@ -101,8 +102,21 @@ def _kv(p: dict, w: str) -> dict:
         item = {"k": _str(it, "k", wi), "v": _str(it, "v", wi),
                 "sev": _choice(it, "sev", SEVS, wi, "ok")}
         _tone(it, item, wi)
+        _ip(it, item, wi)
         items.append(item)
     return {"items": items}
+
+
+def _ip(src: dict, out: dict, w: str) -> None:
+    """Optional `ip`: the address of this line, core can look it up (whois)."""
+    if "ip" in src:
+        v = src["ip"]
+        try:
+            out["ip"] = str(ipaddress.ip_address(v)) if isinstance(v, str) else None
+        except ValueError:
+            out["ip"] = None
+        if out["ip"] is None:
+            raise InvalidSnapshot(f"{w}.ip: IP address required")
 
 
 def _tone(src: dict, out: dict, w: str) -> None:
@@ -127,6 +141,7 @@ def _table(p: dict, w: str) -> dict:
         row = {"cells": [truncate(c, MAX_STR) for c in cells],
                "sev": _choice(r, "sev", SEVS, wr, "ok")}
         _tone(r, row, wr)
+        _ip(r, row, wr)
         if "id" in r:                    # stable row key: the cursor follows it
             row["id"] = _str(r, "id", wr)
         if "detail" in r:

@@ -234,6 +234,18 @@ class TestSource(unittest.TestCase):
         self.assertEqual((view[0]["summary"], len(feed), frozen), ("two", 2, None))
 
 
+class TestLookupStep(unittest.TestCase):
+    def test_step(self):
+        from core.ui import UI
+        ui = UI(3)
+        calls = []
+        self.assertFalse(app.step_lookup(ui, lambda ip: calls.append(ip)))
+        ui.lookup = "8.8.8.8"
+        self.assertTrue(app.step_lookup(ui, lambda ip: calls.append(ip) or [("name", "X")]))
+        self.assertEqual((calls, ui.lookup, ui.whois), (["8.8.8.8"], None,
+                                                         {"8.8.8.8": [("name", "X")]}))
+
+
 class TestMain(unittest.TestCase):
     def run_main(self, argv, cfg=None):
         cfg = cfg or types.SimpleNamespace(mask_public_ips=True)

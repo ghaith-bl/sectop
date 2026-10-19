@@ -14,6 +14,7 @@ Status: in progress (phase 1, docs/architecture.md). Runs in dev mode.
   (see docs/module-interface.md)
 - v1 runs as root. Later: collectors in a hardened root service, UI unprivileged
 - public IPs masked by default, toggle with key m. The detail view (enter) shows them
+- w: whois (RDAP) of the selected IP, in a child process as user nobody
 
 ## Modules
 

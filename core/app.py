@@ -18,6 +18,7 @@ import time
 from dataclasses import dataclass
 
 from core import config as configmod
+from core import lookup as lookupmod
 from core import registry, render
 from core.module import validate
 from core.sanitize import display
@@ -140,9 +141,19 @@ def source(core: Core, ui: UI, frozen):
     return frozen[0], frozen[1], frozen
 
 
+def step_lookup(ui: UI, lookup=lookupmod.lookup) -> bool:
+    """Run a whois the UI asked for (blocks up to lookup.TIMEOUT). True if one ran."""
+    ip = ui.lookup
+    if ip is None:
+        return False
+    ui.done(ip, lookup(ip))
+    return True
+
+
 def _ui(stdscr, core: Core, ui: UI) -> None:
     """Full redraw only after a collect (not while paused) or a key (incl. resize);
-    otherwise just the clock once a second."""
+    otherwise just the clock once a second. A whois runs after the frame that
+    says 'looking up' is on screen."""
     render.setup(stdscr)
     stdscr.timeout(TICK_MS)
     frozen, dirty, shown = None, True, None
@@ -157,6 +168,9 @@ def _ui(stdscr, core: Core, ui: UI) -> None:
         elif int(now) != shown:
             render.draw_top(stdscr, SCREENS, ui, now)
             shown = int(now)
+        if step_lookup(ui):
+            dirty = True
+            continue
         key = stdscr.getch()
         if key != -1:
             dirty = True

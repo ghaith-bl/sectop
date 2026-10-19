@@ -226,6 +226,46 @@ class TestFilter(unittest.TestCase):
         self.assertTrue(u.mask)
 
 
+class TestWhois(unittest.TestCase):
+    def test_w_opens_detail_and_asks(self):
+        u = ui(focus={0: "m/b"})
+        u.boxes = (BoxInfo("m/b", 30, 10, sel=3, ip="8.8.8.8"),)
+        u.key(ord("w"))
+        self.assertEqual((u.detail, u.lookup, u.paused), ("m/b", "8.8.8.8", True))
+        u.done("8.8.8.8", [("name", "GOGL")])
+        self.assertEqual((u.lookup, u.whois), (None, {"8.8.8.8": [("name", "GOGL")]}))
+        u.boxes = (BoxInfo("detail", 9, 9, cursor=False, ip="8.8.8.8"),)
+        u.key(ord("W"))                                    # cached: no new lookup
+        self.assertIsNone(u.lookup)
+
+    def test_w_in_detail(self):
+        u = ui(detail="m/b")
+        u.boxes = (BoxInfo("detail", 9, 9, cursor=False, ip="1.1.1.1"),)
+        u.key(ord("w"))
+        self.assertEqual((u.detail, u.lookup), ("m/b", "1.1.1.1"))
+
+    def test_w_without_ip(self):
+        u = ui(focus={0: "m/b"})
+        u.key(ord("w"))
+        self.assertEqual((u.detail, u.lookup), (None, None))
+        u = ui(help=True)
+        u.boxes = (BoxInfo("help", 9, 9, cursor=False, ip="1.1.1.1"),)
+        u.key(ord("w"))
+        self.assertIsNone(u.lookup)
+        u = ui(focus={0: "m/b"})
+        u.key(ord("/"))
+        u.key(ord("w"))                                    # typing a filter: text
+        self.assertEqual((u.typing, u.lookup), ("w", None))
+
+    def test_cache_limit(self):
+        u = ui()
+        for i in range(105):
+            u.done(f"8.8.8.{i}", [])
+        self.assertEqual(len(u.whois), 100)
+        self.assertNotIn("8.8.8.4", u.whois)
+        self.assertIn("8.8.8.5", u.whois)
+
+
 class TestScreens(unittest.TestCase):
     def test_find(self):
         self.assertEqual(find("firewall"), 0)

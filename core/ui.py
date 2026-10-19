@@ -9,6 +9,10 @@ the focused box, the renderer keeps it visible.
 Overlays (help, detail) take the whole grid. In an overlay, q / Esc
 close it instead of quitting.
 
+whois: w on a line with an address (table row / kv item `ip`) opens its
+detail and asks core for a lookup (ui.lookup). core/app.py runs it and
+calls done(). Results are kept per address for the session.
+
 Filter: / starts typing a filter for the focused table / events box. Every
 key is text until enter (keep) or Esc (back to the old filter). The filter
 applies while typing. Esc outside typing clears the focused box's filter.
@@ -23,6 +27,7 @@ ENTER_KEYS = (10, 13, curses.KEY_ENTER)
 BACK_KEYS = (ESC, curses.KEY_BACKSPACE, 127, 8)
 BIG = 1 << 30
 FILTER_MAX = 60
+WHOIS_MAX = 100          # lookups kept
 BACKSPACE = (curses.KEY_BACKSPACE, 127, 8)
 
 
@@ -40,6 +45,8 @@ class UI:
     anchor: dict = field(default_factory=dict)   # box key -> row id / text of the selected line
     filters: dict = field(default_factory=dict)  # box key -> filter text
     typing: str | None = None                    # filter being typed (None = not typing)
+    whois: dict = field(default_factory=dict)    # ip -> [(key, value)], oldest first
+    lookup: str | None = None                    # ip waiting for a lookup (core runs it)
     boxes: tuple = ()                            # BoxInfo of the last frame
     _auto_pause: bool = False                    # pause came from opening detail
     _typing_box: str | None = None
@@ -74,6 +81,8 @@ class UI:
         elif k in (ord("p"), ord("P")):
             self.paused = not self.paused
             self._auto_pause = False
+        elif k in (ord("w"), ord("W")):
+            self._whois()
         elif self.overlay:
             if k in BACK_KEYS + ENTER_KEYS + (ord("q"), ord("Q"), ord("?")):
                 self._close()
@@ -105,7 +114,27 @@ class UI:
             self._move_key(k)
         return True
 
+    def done(self, ip: str, pairs: list) -> None:
+        """Lookup finished (core/app.py)."""
+        self.whois.pop(ip, None)
+        self.whois[ip] = list(pairs)
+        while len(self.whois) > WHOIS_MAX:
+            del self.whois[next(iter(self.whois))]
+        if self.lookup == ip:
+            self.lookup = None
+
     # --- helpers ----------------------------------------------------------
+
+    def _whois(self) -> None:
+        if self.help:
+            return
+        b = self._box()
+        if b is None or not b.ip:
+            return
+        if self.detail is None:
+            self._open()
+        if b.ip not in self.whois:
+            self.lookup = b.ip
 
     def _type(self, k: int) -> None:
         key = self._typing_box
