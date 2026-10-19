@@ -526,6 +526,48 @@ class TestCollect(Base):
         self.assertEqual(next(r for r in self.panel(s, "counters")["rows"]
                               if r["cells"][0] == "out_dns")["tone"], "plain")   # pass
 
+    def counter_detail(self, snap, name):
+        row = next(r for r in self.panel(snap, "counters")["rows"] if r["cells"][0] == name)
+        return [(d["k"], d["v"]) for d in row["detail"]]
+
+    def test_counter_detail(self):
+        self.host.set("journalctl", ok(fix("journal.json")))
+        self.st.hms = lambda ts: f"t{int(ts) % 100}"
+        s = self.collect()
+        d = self.counter_detail(s, "out_ks")
+        self.assertEqual(d[:7], [
+            ("meaning", "host traffic hitting the kill switch"),
+            ("match", "host traffic routed to the kill switch dummy (pvpnksintrf0/1)"),
+            ("verdict", "drop  kill switch: always dropped"),
+            ("new packets", "info in status for 60 s after each tick with new packets"),
+            ("log", "10/min burst 20: lines are samples, the counter is exact"),
+            ("bytes", "7640"), ("since", "hostfw table load (a reload resets it)")])
+        self.assertEqual(d[7:], [("", ""), ("last lines", "1 since sectop started"),
+                                 ("t17", "icmpv6 fe80::1 -> ff02::1:ff00:1 pvpnksintrf0 type 135")])
+        noise = dict(self.counter_detail(s, "in_noise"))
+        self.assertEqual(noise["last lines"], "2 since sectop started")     # hidden kind kept here
+        self.assertEqual(noise["new packets"], "never raises status (noise)")
+        self.assertEqual(noise["verdict"].split()[0], "zone")
+        wg = dict(self.counter_detail(s, "out_wg"))
+        self.assertEqual(wg["log"], "counted only, not logged")
+        self.assertNotIn("last lines", wg)
+        self.assertEqual(wg["new packets"], "never raises status (allowed traffic)")
+        self.assertEqual(dict(self.counter_detail(s, "in_vpn"))["last lines"],
+                         "1 since sectop started")
+
+    def test_counter_detail_keeps_last_lines(self):
+        self.st.hms = lambda ts: f"t{int(ts) % 100}"
+        text = "".join(jline(f"c{i}", 1000 + i, "HFW-OUT-KS: OUT=pvpnksintrf0 PROTO=UDP")
+                       for i in range(15))
+        self.host.set("journalctl", ok(text))
+        d = self.counter_detail(self.collect(), "out_ks")
+        lines = d[d.index(("last lines", "10 since sectop started")) + 1:]
+        self.assertEqual([k for k, _ in lines], [f"t{i}" for i in range(14, 4, -1)])
+        self.host.set("journalctl", ok(""))
+        self.tick()
+        d = dict(self.counter_detail(self.collect(), "out_leak"))
+        self.assertEqual(d["last lines"], "none since sectop started")
+
     def test_audit_observe(self):
         _, rows, _ = self.audit("nft-observe.json")
         self.assertEqual(rows[4][2], "pass")                        # logged, not blocked

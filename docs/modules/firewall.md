@@ -92,6 +92,14 @@ kinds except hidden), audit (table, see below), connections (table, max 50).
 - vpn `recv / sent` = bytes received / sent through the tunnel since it came up
   (`wg show transfer`, summed over peers, 1000-based units). Reset on every reconnect.
 
+## Counter detail
+
+`enter` on a counter row: meaning (hostfw rule comment), match (from hostfw
+`docs/rules.md`, kept in `MATCH`), verdict, what new packets do to status, log rate,
+exact bytes, since (table load), then the last 10 log lines of that kind since sectop
+started (also in_noise, which is hidden elsewhere). out_dns_vpn / out_wg / out_probe are
+counted only, never logged: no lines.
+
 ## out_leak box
 
 Leak lines of this boot, newest first, last 8 shown (100 kept). Title: `out_leak <counter>`,

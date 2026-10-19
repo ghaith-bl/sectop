@@ -30,6 +30,7 @@ MAX_CONNS = 50
 MAX_EVENTS = 100
 MAX_AUDIT = 200
 MAX_LEAKS = 100          # leak lines kept (boot scan + live), newest first
+RECENT = 10              # log lines kept per counter, shown in its detail
 LEAK_ROWS = 8            # shown in the out_leak box
 FILE_MAX = 4096
 
@@ -68,6 +69,29 @@ CONTEXT_NOTE = {
                      "started: tunnel state at that time unknown",
     "unknown": "first tunnel flow unknown (boot scan failed)",
 }
+# what each hostfw counter matches (silverblue-cis-hardening firewall/docs/rules.md)
+MATCH = {
+    "out_dns_vpn": "tcp/udp 53, 853 to 10.2.0.1 via proton0",
+    "out_wg": "WireGuard transport (fwmark in wg_fwmark) on the uplink",
+    "out_probe": "uid 1000 tcp to Proton entry IPs on probe ports (before connect)",
+    "out_router_admin": "router web UI while opened (hostfw router-open)",
+    "out_lan_allow": "explicit LAN exceptions (set lan_allow4)",
+    "out_new": "first packets of every new host flow via proton0",
+    "fwd_vm_new": "first packets of every new VM flow via proton0",
+    "out_dns": "any other tcp/udp 53, 853 (not the VPN resolver)",
+    "out_disco": "udp 137 138 1900 3702 5351 5353 5355 27036, tcp 5355 5357 5358 27036 27037",
+    "out_share": "tcp 21 111 139 445 548 2049, udp 69 111 2049 (not via virbr0)",
+    "out_ks": "host traffic routed to the kill switch dummy (pvpnksintrf0/1)",
+    "out_lan": "to private / link-local / CGNAT / multicast / broadcast, not router / exception",
+    "out_leak": "anything else leaving on the uplink (not tunnel transport, DHCP, router)",
+    "fwd_vm_ks": "VM traffic routed to the kill switch dummy",
+    "fwd_vm_lan": "VM traffic to LAN / uplink (not via the tunnel)",
+    "fwd_in": "new forwarded traffic not from a VM",
+    "in_noise": "LAN broadcast / multicast to the host (not via proton0)",
+    "in_lan": "new inbound from the uplink",
+    "in_vpn": "new inbound from the tunnel",
+}
+NOT_LOGGED = {"out_dns_vpn", "out_wg", "out_probe"}
 VERDICT_NOTE = {
     "allow": "allowed by hostfw (logged new flow or exception)",
     "drop": "kill switch: always dropped",
@@ -129,6 +153,7 @@ class State:
         self.blocked = collections.deque(maxlen=SPARK)
         self.audit = collections.deque(maxlen=MAX_AUDIT)   # rows, newest first
         self.leaks = collections.deque(maxlen=MAX_LEAKS)   # (Entry, context), newest first
+        self.recent = {}               # counter name -> deque of (ts, summary), newest first
         self.leak_seen = set()         # cursors from the boot scan (live reader skips them)
         self.tunnel_first = None       # epoch of the first HFW-OUT-NEW line this boot
         self.boot = None               # boot time, epoch (from /proc/uptime)
@@ -282,6 +307,44 @@ def _rollback_state(text: str, now: float) -> tuple:
     return (f"{out} -> {action}" if action else out), armed
 
 
+def _log_note(name: str) -> str:
+    if name in NOT_LOGGED:
+        return "counted only, not logged"
+    if name.endswith("_new"):
+        return "5/s burst 50 (one line per new flow, more than that: counter only)"
+    if name == "in_noise":
+        return "6/min burst 10, hidden from audit and events"
+    return "10/min burst 20: lines are samples, the counter is exact"
+
+
+def _counter_detail(st: State, name: str, nbytes: int, live: str) -> list:
+    """Shown on enter: what the counter means, what hostfw does, last log lines."""
+    verdict = _verdict(name, live)
+    sev = kind_sev(name)
+    if name in SEV and SEV[name] is None:
+        new = "never raises status (noise)"
+    elif sev is None:
+        new = "never raises status (allowed traffic)"
+    else:
+        new = f"{sev} in status for {st.hold:g} s after each tick with new packets"
+    out = [("meaning", st.comments.get(name, "-")), ("match", MATCH.get(name, "-")),
+           ("verdict", f"{verdict}  {VERDICT_NOTE[verdict]}"), ("new packets", new),
+           ("log", _log_note(name)), ("bytes", str(nbytes)),
+           ("since", "hostfw table load (a reload resets it)")]
+    lines = list(st.recent.get(name, ()))
+    if name not in NOT_LOGGED:
+        out += [("", ""), ("last lines", f"{len(lines)} since sectop started" if lines
+                           else "none since sectop started")]
+        out += [(st.hms(ts), text) for ts, text in lines]
+    return [{"k": k, "v": v} for k, v in out]
+
+
+def _recent(st: State, entries: list) -> None:
+    for e in entries:
+        q = st.recent.setdefault(e.kind, collections.deque(maxlen=RECENT))
+        q.appendleft((e.ts, journal.summary(e)))
+
+
 def _counters(st: State, counters: dict | None, now: float, live: str = "?") -> tuple:
     """-> (table panel or None, totals, deltas). Updates held severities."""
     if counters is None:
@@ -303,7 +366,8 @@ def _counters(st: State, counters: dict | None, now: float, live: str = "?") -> 
         sev = kind_sev(name) if st.held.get(name, 0) > now else None
         rows.append({"cells": [name, str(pkts), f"+{deltas[name]}" if deltas[name] else "",
                                _human(nbytes)], "sev": sev or "ok",
-                     "tone": _tone(_verdict(name, live))})
+                     "tone": _tone(_verdict(name, live)),
+                     "detail": _counter_detail(st, name, nbytes, live)})
     zero = len(counters) - len(rows)
     title = "hostfw counters" + (f"  ({zero} zero hidden)" if zero else "")
     panel = {"id": "counters", "title": title, "type": "table",
@@ -640,11 +704,12 @@ def collect(st: State) -> dict:
 
     fw_items, counters, live = _safe(lambda: _hostfw(st, checks), "nft", checks,
                                      lambda e: ([_item("table", e, "warn")], None, "?"))
+    events, entries = _safe(lambda: _events(st, checks, fw_items), "journal", checks,
+                            lambda e: _note(fw_items, "log reader", e, ([], [])))
+    _recent(st, entries)
     table, totals, deltas = _safe(lambda: _counters(st, counters, now, live), "counters", checks,
                                   lambda e: (None, {}, {}))
     _held_checks(st, now, checks)
-    events, entries = _safe(lambda: _events(st, checks, fw_items), "journal", checks,
-                            lambda e: _note(fw_items, "log reader", e, ([], [])))
 
     vpn_items, vpn_text, mark, up = _safe(
         lambda: _vpn(st, checks, wall), "wg", checks,
