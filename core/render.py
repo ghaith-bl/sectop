@@ -70,6 +70,10 @@ HELP = (
     ("a", "ack the alerts in the alert bar (dims them; a higher count or severity "
           "shows them again)"),
     ("Esc", "clear the filter of the focused table"),
+    ("f", "on a row with a filter (programs): filter the other tables of the screen to "
+          "it; again: clear"),
+    ("x", "on such a row (one word): hide it in every table of the screen (adds !name, "
+          "Esc clears)"),
     ("p", "pause / resume the screen (data is still collected)"),
     ("m", "mask public IPs on / off"),
     ("Esc  q  enter", "close help / detail"),
@@ -94,6 +98,7 @@ class BoxInfo:
     cursor: bool = True        # False: overlay text, keys scroll it
     filterable: bool = False   # table / events: / filters it
     ip: str | None = None      # address of the selected line (w = whois)
+    pick: str | None = None    # row filter of the selected line (f follow, x hide)
 
 
 @dataclass(frozen=True)
@@ -450,6 +455,11 @@ class _Box:
             return self.data["items"][i].get("ip")
         return getattr(self, "src_ip", None) if self.kind == "detail" else None
 
+    def pick_at(self, i: int) -> str | None:
+        if self.kind == "table" and 0 <= i < len(self.view):
+            return self.view[i].get("filter")
+        return None
+
     def idents(self, texts: list) -> list:
         """Anchor per body line: row id if the module gave one, else the line text."""
         if self.kind == "table" and self.view:
@@ -502,6 +512,8 @@ def _boxes(screen, mods: list, feed: list) -> list:
         for p in m["panels"]:
             out.append(_Box(f"{m['name']}/{p['id']}", p["title"], p["sev"], p["type"], p,
                             stale=m["stale"]))
+            if p.get("width") == "full":     # layout hint: a row of its own
+                out[-1].full = True
     if screen.feed and mods:
         names = set(screen.modules)
         evs = [e for e in feed if e["src"] in names]
@@ -719,7 +731,7 @@ def _grid(boxes: list, ui, width: int, room: int, mask: bool, tsfmt, pref) -> tu
             sel, off = _select(ui, b.key, ids, vis)
             infos.append(BoxInfo(b.key, len(body), vis, sel, off,
                                  ids[sel] if ids else None, b.cursor, b.filterable,
-                                 b.ip_at(sel)))
+                                 b.ip_at(sel), b.pick_at(sel)))
             suffix = ""
             if b.filt:
                 suffix = f"  / {b.filt}  {len(b.view)} of {b.total()}"

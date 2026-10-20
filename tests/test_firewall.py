@@ -352,7 +352,9 @@ class TestCollect(Base):
         self.assertEqual(v["default v6"], ("none", "ok"))
         self.assertEqual(v["recv / sent"], ("19.5MB / 3.1MB", "ok"))
         self.assertEqual([p["id"] for p in s["panels"]],
-                         ["hostfw", "vpn", "counters", "leak", "blocked", "audit", "peers"])
+                         ["hostfw", "vpn", "counters", "leak", "blocked", "programs", "peers",
+                          "audit"])
+        self.assertEqual([p["id"] for p in s["panels"] if p["width"] == "full"], ["audit"])
         counters = next(p for p in s["panels"] if p["id"] == "counters")
         self.assertEqual(counters["title"], "hostfw counters  (9 zero hidden)")
 
@@ -585,6 +587,59 @@ class TestCollect(Base):
         self.st.stamp = lambda ts: f"T{ts:.3f}"
         p = self.panel(self.collect(), "audit")
         return p, [r["cells"] for r in p["rows"]], [r["sev"] for r in p["rows"]]
+
+    def test_programs(self):
+        self.host.set("nft list table", ok(table("nft-enforce.json")))
+        self.host.set("journalctl", ok(fix("journal-audit.json")))
+        self.st.hms = lambda ts: f"t{int(ts) % 100}"
+        self.st.stamp = lambda ts: f"T{ts:.3f}"
+        p = self.panel(self.collect(), "programs")
+        self.assertEqual(p["columns"], ["prog", "uid", "open", "out", "block", "in", "peers",
+                                        "last"])
+        self.assertEqual(p["title"], "programs 6  2 with open sockets")
+        rows = {r["id"]: r for r in p["rows"]}
+        self.assertEqual([r["id"] for r in p["rows"]][:2], ["brave", "NetworkManager"])  # open
+        self.assertEqual(rows["brave"]["cells"], ["brave", "1000", "4", "1", "0", "0", "2", "t51"])
+        self.assertEqual((rows["brave"]["tone"], rows["brave"]["filter"]), ("blue", "brave"))
+        # no ss match: grouped by uid; the leak (blocked) and two allowed flows of uid 1000
+        self.assertEqual(rows["? uid 1000"]["cells"][:6], ["?", "1000", "0", "2", "1", "0"])
+        self.assertEqual(rows["? uid 1000"]["filter"], "? 1000")
+        self.assertEqual((rows["? uid -"]["tone"], rows["? uid -"]["filter"]), ("red", "?"))
+        self.assertEqual(rows["vm"]["cells"][3:5], ["1", "1"])         # FWD-VM-NEW, FWD-VM-KS
+        self.assertEqual((rows["(inbound)"]["cells"][5], rows["(inbound)"]["filter"]),
+                         ("1", "zone"))                                # IN-NOISE hidden
+        d = {it["k"]: it["v"] for it in rows["brave"]["detail"]}
+        self.assertEqual(d["open now"], "4 sockets")
+        self.assertEqual(d["peers"], "198.51.100.20 (1), 203.0.113.10 (socket)")
+        self.assertEqual(d["kinds"], "out_new 1")
+        self.assertEqual({it["k"]: it["v"] for it in rows["(inbound)"]["detail"]}["note"],
+                         fw.APP_OTHER["(inbound)"][2])
+        self.assertEqual({it["k"]: it["v"] for it in rows["? uid 1000"]["detail"]}["note"],
+                         "program unknown: the flow closed before the next ss poll")
+
+    def test_programs_keep_and_limit(self):
+        self.audit()
+        self.host.set("journalctl", ok(""))
+        self.host.set("ss", ok(""))
+        self.tick()
+        p = self.panel(self.collect(), "programs")
+        rows = {r["id"]: r for r in p["rows"]}
+        self.assertEqual(rows["brave"]["cells"][2:4], ["0", "1"])      # socket gone, line kept
+        self.assertEqual(p["title"], "programs 6  0 with open sockets")
+        with mock.patch.object(fw, "MAX_APPS", 2):
+            self.tick()
+            p = self.panel(self.collect(), "programs")
+        self.assertEqual(len(p["rows"]), 2)
+
+    def test_programs_filter_only_typeable(self):
+        a = fw.App(1.0)
+        for name, has in (("brave", True), ("Web Content", True), ("caf\u00e9", False)):
+            row = fw._app_row(self.st, name, a, [])
+            self.assertEqual("filter" in row, has, name)
+        validate({"v": 1, "status": "ok", "summary": "", "events": [],
+                  "panels": [{"id": "p", "title": "t", "type": "table",
+                              "columns": list(fw.APP_COLUMNS),
+                              "rows": [fw._app_row(self.st, "caf\u00e9", a, [])]}]})
 
     def test_audit(self):
         p, rows, sevs = self.audit()

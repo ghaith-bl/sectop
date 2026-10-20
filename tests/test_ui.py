@@ -4,7 +4,7 @@ import unittest
 from core import registry
 from core.render import BoxInfo, Frame
 from core.screens import SCREENS, Screen, find, names
-from core.ui import ESC, TAB, UI
+from core.ui import ESC, FILTER_MAX, TAB, UI
 
 BOXES = (BoxInfo("m/a", 2, 5), BoxInfo("m/b", 30, 10, sel=3, off=0, ident="row3",
                                        filterable=True),
@@ -101,6 +101,46 @@ class TestKeys(unittest.TestCase):
         self.assertEqual((u.sel["m/a"], u.scroll["m/a"], u.anchor["m/a"]), (2, 1, "t"))
         self.assertEqual((u.focus[0], u.boxes), ("m/a", frame.boxes))
         self.assertEqual(u.bar, (("fw/a", 2, "warn"),))
+
+    def picks(self, pick):
+        boxes = (BoxInfo("m/prog", 5, 5, filterable=True, pick=pick),
+                 BoxInfo("m/audit", 9, 5, filterable=True), BoxInfo("m/peers", 9, 5,
+                                                                    filterable=True),
+                 BoxInfo("m/kv", 3, 3))
+        u = UI(3, focus={0: "m/prog"})
+        u.boxes = boxes
+        return u
+
+    def test_follow(self):
+        u = self.picks("brave")
+        u.sel["m/audit"] = 4
+        u.key(ord("f"))
+        self.assertEqual(u.filters, {"m/audit": "brave", "m/peers": "brave"})
+        self.assertEqual(u.sel["m/audit"], 0)              # cursor back to the top
+        u.key(ord("F"))                                    # again: clear
+        self.assertEqual(u.filters, {})
+        u.filters["m/audit"] = "other"
+        u.key(ord("f"))                                    # not all on it: set
+        self.assertEqual(u.filters, {"m/audit": "brave", "m/peers": "brave"})
+        u = self.picks(None)
+        u.key(ord("f"))
+        self.assertEqual(u.filters, {})
+
+    def test_hide(self):
+        u = self.picks("brave")
+        u.filters["m/audit"] = "tcp"
+        u.key(ord("x"))
+        self.assertEqual(u.filters, {"m/prog": "!brave", "m/audit": "tcp !brave",
+                                     "m/peers": "!brave"})
+        u.key(ord("X"))                                    # once only
+        self.assertEqual(u.filters["m/audit"], "tcp !brave")
+        u.filters["m/peers"] = "p" * (FILTER_MAX - 3)
+        u.key(ord("x"))
+        self.assertEqual(u.filters["m/peers"], "p" * (FILTER_MAX - 3))   # no room: unchanged
+        for pick in ("? 1000", None):                      # one word only
+            u = self.picks(pick)
+            u.key(ord("x"))
+            self.assertEqual(u.filters, {})
 
     def test_ack(self):
         u = ui(help=True)

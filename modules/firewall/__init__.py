@@ -7,6 +7,7 @@ wg endpoints + fwmark, nft wg_fwmark set, ip default routes. Files:
 /etc/hostfw/mode, /run/hostfw/rollback, /proc/uptime. At start: one boot
 journal scan (leak lines, first tunnel flow).
 Audit box: every HFW line (allowed + blocked, in + out), program from ss.
+Programs box: the same lines + open sockets, one row per program.
 Snapshot v2: problems are checks with keys (core/alerts.py keeps the alerts).
 See docs/modules/firewall.md.
 """
@@ -32,6 +33,8 @@ HS_STALE = 180           # WireGuard rejects keys after 180 s
 HOLD = 60.0              # seconds the alert (and the counter row color) stays after new packets
 SPARK = 120
 MAX_PEERS = 200          # remote addresses kept, least recently seen out first
+MAX_APPS = 100           # programs kept (programs box), least recently seen out first
+MAX_APP_PEERS = 50       # remote addresses kept per program
 MAX_SOCKS = 10           # open sockets listed in a peer's detail
 MAX_EVENTS = 100
 MAX_AUDIT = 200          # audit flows (grouped repeats) kept, newest first
@@ -69,6 +72,15 @@ LOG_ONLY = {"in_noise", "in_lan", "in_vpn"}     # hostfw logs, firewalld zone de
 AUDIT_COLUMNS = ["last", "n", "dir", "verdict", "proto", "uid", "prog", "src", "dst", "iface"]
 LEAK_COLUMNS = ["time", "uid", "proto", "dst", "iface", "context"]
 PEER_COLUMNS = ["peer", "open", "new", "drop", "prog", "last"]
+APP_COLUMNS = ["prog", "uid", "open", "out", "block", "in", "peers", "last"]
+PICK_RE = re.compile(r"[ -~]{1,60}")      # row filter: what the filter prompt can type
+# programs box rows for lines without a program: key -> (prog cell, row filter, note)
+APP_OTHER = {
+    "(inbound)": ("(inbound)", "zone",
+                  "inbound lines: no program (hostfw logs, the firewalld zone decides)"),
+    "vm": ("vm", "vm", "forwarded traffic of libvirt VMs"),
+    "(forward)": ("(forward)", "fwd_in", "forwarded traffic not from a VM"),
+}
 CGNAT = ipaddress.ip_network("100.64.0.0/10")
 ULA = ipaddress.ip_network("fc00::/7")
 CONTEXT_NOTE = {
@@ -166,6 +178,7 @@ class State:
         self.blocked = collections.deque(maxlen=SPARK)
         self.flows = {}                # audit flow key -> Flow, oldest first
         self.peers = {}                # remote address -> Peer, least recently seen first
+        self.apps = {}                 # program key -> App, least recently seen first
         self.lines = 0                 # audit lines since start (all flows)
         self.leaks = collections.deque(maxlen=MAX_LEAKS)   # (Entry, context), newest first
         self.recent = {}               # counter name -> deque of (ts, summary), newest first
@@ -959,6 +972,110 @@ def _peer_row(st: State, ip: str, p: Peer, socks: list) -> dict:
             "tone": tone, "id": ip, "ip": ip, "detail": [{"k": k, "v": v} for k, v in detail]}
 
 
+class App:
+    """One program: logged lines (audit) + open sockets (ss)."""
+
+    def __init__(self, ts):
+        self.first = self.last = ts
+        self.out = self.block = self.inb = 0       # logged lines
+        self.kinds = collections.Counter()
+        self.peers = collections.Counter()         # remote address -> logged lines
+        self.uids = []
+
+
+def _app_keys(e, prog: str) -> list:
+    """Program keys of one log line: names from ss, '? uid N' when not matched,
+    (inbound) / vm / (forward) for lines without a program."""
+    if e.dir == "in":
+        return ["(inbound)"]
+    if e.dir == "fwd":
+        return ["vm" if e.kind.startswith("fwd_vm") else "(forward)"]
+    names = [n for n in prog.split(",") if n not in ("?", "-", "")]
+    return names or [f"? uid {e.fields.get('UID') or '-'}"]
+
+
+def _app(st: State, key: str, ts: float) -> App:
+    a = st.apps.pop(key, None) or App(ts)
+    st.apps[key] = a                                        # most recent at the end
+    a.last = max(a.last, ts)
+    return a
+
+
+def _apps(st: State, entries: list, cs: list, live: str, wall: float) -> dict:
+    """programs box: one row per program, from log lines and open sockets."""
+    idx = conns.index(cs)
+    for e in entries:
+        if e.kind in SEV and SEV[e.kind] is None:
+            continue
+        prog, _iface = _prog(e, idx)
+        remote = _remote(e)
+        verdict = _verdict(e.kind, live)
+        for key in _app_keys(e, prog):
+            a = _app(st, key, e.ts)
+            if e.dir == "in":
+                a.inb += 1
+            elif verdict == "allow":
+                a.out += 1
+            else:
+                a.block += 1
+            a.kinds[e.kind] += 1
+            if remote and (remote in a.peers or len(a.peers) < MAX_APP_PEERS):
+                a.peers[remote] += 1
+            _add(a.uids, e.fields.get("UID", ""))
+    socks = collections.defaultdict(list)
+    for c in cs:
+        for name in c.procs:
+            socks[name].append(c)
+            a = _app(st, name, wall)
+            host = conns.split(c.peer)[0]
+            if _addr(host) is not None and (host in a.peers or len(a.peers) < MAX_APP_PEERS):
+                a.peers[host] += 0                          # known peer, no logged line
+    while len(st.apps) > MAX_APPS:
+        del st.apps[next(iter(st.apps))]                    # least recently seen out
+    order = sorted(sorted(st.apps.items()), reverse=True,      # open first, then newest
+                   key=lambda kv: (len(socks[kv[0]]) > 0, kv[1].last, len(socks[kv[0]])))
+    rows = [_app_row(st, key, a, socks[key]) for key, a in order]
+    n_open = sum(1 for key in st.apps if socks[key])
+    return {"id": "programs", "title": f"programs {len(rows)}  {n_open} with open sockets",
+            "type": "table", "columns": list(APP_COLUMNS), "rows": rows}
+
+
+def _app_row(st: State, key: str, a: App, socks: list) -> dict:
+    other = APP_OTHER.get(key)
+    if other:
+        prog, pick, note = other
+    elif key.startswith("? uid "):
+        uid = key[len("? uid "):]
+        prog, pick = "?", ("?" if uid == "-" else f"? {uid}")
+        note = "program unknown: the flow closed before the next ss poll"
+    else:
+        prog, pick, note = key, key, ""
+    if a.block and not (a.out or a.inb or socks):
+        tone = "red"                                        # only dropped / blocked
+    else:
+        tone = "blue" if a.out or socks else "plain"
+    peers = sorted(a.peers.items(), key=lambda kv: (-kv[1], kv[0]))
+    detail = []
+    if note:
+        detail.append(("note", note))
+    detail.append(("open now", f"{len(socks)} socket{'s' if len(socks) != 1 else ''}"))
+    for c in socks[:MAX_SOCKS]:
+        detail.append(("socket", f"{c.proto} {c.local} -> {c.peer}"))
+    detail += [("logged", f"{a.out} allowed, {a.block} dropped / blocked, {a.inb} inbound lines"),
+               ("kinds", ", ".join(f"{k} {n}" for k, n in a.kinds.most_common()) or "-"),
+               ("peers", ", ".join(f"{ip} ({n or 'socket'})" for ip, n in peers[:MAX_SOCKS])
+                or "-"),
+               ("uids", ", ".join(a.uids) or "-"),
+               ("first seen", st.stamp(a.first)), ("last seen", st.stamp(a.last))]
+    uids = ",".join(a.uids[:MAX_PROGS]) + ("+" if len(a.uids) > MAX_PROGS else "")
+    row = {"cells": [prog, uids or "-", str(len(socks)), str(a.out), str(a.block), str(a.inb),
+                     str(len(a.peers)), st.hms(a.last)],
+           "tone": tone, "id": key, "detail": [{"k": k, "v": v} for k, v in detail]}
+    if PICK_RE.fullmatch(pick) and pick.strip():
+        row["filter"] = pick                                # f follow / x hide (core/ui.py)
+    return row
+
+
 def _note(items: list, key: str, err: str, value):
     items.append(_item(key, err, "warn"))
     return value
@@ -1052,12 +1169,18 @@ def collect(st: State) -> dict:
     panels.append(leak)
     panels.append({"id": "blocked", "title": "blocked / tick", "type": "spark",
                    "values": list(st.blocked), "unit": "pkt", "sev": spark_sev})
-    panels.append(_safe(lambda: _audit(st, entries, cs, live), "audit", checks,
-                        lambda e: {"id": "audit", "title": f"audit: {e}", "type": "table",
-                                   "columns": list(AUDIT_COLUMNS), "rows": [], "sev": "warn"}))
+    panels.append(_safe(lambda: _apps(st, entries, cs, live, wall), "programs", checks,
+                        lambda e: {"id": "programs", "title": f"programs: {e}",
+                                   "type": "table", "columns": list(APP_COLUMNS), "rows": [],
+                                   "sev": "warn"}))
     panels.append(_safe(lambda: _peers(st, entries, cs, ss_err, live, wall), "peers", checks,
                         lambda e: {"id": "peers", "title": f"peers: {e}", "type": "table",
                                    "columns": list(PEER_COLUMNS), "rows": [], "sev": "warn"}))
+    audit = _safe(lambda: _audit(st, entries, cs, live), "audit", checks,
+                  lambda e: {"id": "audit", "title": f"audit: {e}", "type": "table",
+                             "columns": list(AUDIT_COLUMNS), "rows": [], "sev": "warn"})
+    audit["width"] = "full"                  # most columns: a row of its own, at the bottom
+    panels.append(audit)
 
     checks = _merge(checks)
     status = worst(*(c["sev"] for c in checks))

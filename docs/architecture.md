@@ -24,7 +24,7 @@ can decide from what is on screen. Read-only until the privilege split (phase 3)
 
 | key | screen | content |
 |---|---|---|
-| 1 | firewall | hostfw, vpn, counters (non-zero only), out_leak, spark, audit (in + out, allowed + blocked, grouped), peers (remote IPs) |
+| 1 | firewall | hostfw, vpn, counters (non-zero only), out_leak, spark, programs (one row per program), peers (remote IPs), audit (in + out, allowed + blocked, grouped) |
 | 2 | security | grouped warnings / errors / security events; posture checks |
 | 3 | processes | cpu, memory, disk, io, temperatures, top processes, services |
 
@@ -35,9 +35,21 @@ can decide from what is on screen. Read-only until the privilege split (phase 3)
   replaces it.
 
 Keys now: `1-3` screen, `tab` / arrows box, `j/k` / arrows select line, `PgDn/PgUp` page,
-`enter` detail, `/` filter, `Esc` clear filter, `w` whois, `a` ack, `p` pause, `m` mask,
-`?` help, `q` quit.
+`enter` detail, `/` filter, `Esc` clear filter, `f` follow, `x` hide, `w` whois, `a` ack,
+`p` pause, `m` mask, `?` help, `q` quit.
 Planned: `t` capture (from detail).
+
+## Firewall screen: network only (2026-10-20)
+
+- Firewall screen = who goes out / comes in. Per program: programs box, keys `f` (follow:
+  the other boxes filtered to it) and `x` (hide it, view only). Lasting noise: the noise
+  list (root file, edited by hand), never from the UI (one-way, see Privilege split).
+- Security screen = who ran what: commands as root / via sudo (who: login uid also after
+  sudo, what, count, first / last, from which program / tty), kernel (module loads, AVC,
+  errors). After the privilege split: now sectop's own root polling (~56 root commands /
+  min) would bury my real commands, and hiding them by rule would hide anyone's.
+- After this: firewall screen done for now. Changes later only from need, architecture
+  or new sources (e.g. audit connect records for program names).
 
 ## Firewall audit
 
@@ -181,7 +193,7 @@ Stop / restart a service, kill a process. Only after the privilege split:
 ## Contract changes (Snapshot v2)
 
 - `checks`: conditions for the alert engine. Done (docs/module-interface.md, Checks).
-- Planned: panel layout hint, width (half / full), min height.
+- Panel layout hint `width`: `full` done (audit box). Planned: half, min height.
 - Planned: `collect()` gets a context with `visible` (screen shown or not).
 - v1 Snapshots keep working until all modules move to v2.
 
@@ -192,5 +204,6 @@ Stop / restart a service, kill a process. Only after the privilege split:
 2. Alert engine + noise list. Firewall checks move to it.
 3. Privilege split (non-root collector service, unprivileged UI). Moved before logs
    2026-10-20: the logs screen reads the audit log and must not show sectop's own commands.
-4. Logs + posture, and system (read-only). Both required, order free.
+4. Logs + posture, and system (read-only). Both required, order free. Security screen:
+   commands (sudo / root: who, what, count, when, from where), kernel, posture.
 5. Actions.

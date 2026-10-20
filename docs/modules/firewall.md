@@ -116,8 +116,9 @@ failure. Keys are rejected after 180 s, so age > 180 s with traffic going out = 
 
 hostfw (kv), vpn (kv), hostfw counters (table: pkts, new this tick, bytes; zero counters
 hidden, count in the title), out_leak (table, see below), blocked / tick (spark, deny
-kinds except hidden; severity = worst `new:<kind>` check of the tick), audit (table, see
-below), peers (table, see below).
+kinds except hidden; severity = worst `new:<kind>` check of the tick), programs (table,
+see below), peers (table, see below), audit (table, see below; `width` full: a row of its
+own at the bottom, it has the most columns and gets the leftover lines).
 
 - Colors (`tone`): audit, out_leak and counter rows by verdict: allow blue, drop (kill
   switch) red, block yellow, zone / pass / deny plain. Healthy kv values green (table
@@ -127,6 +128,35 @@ below), peers (table, see below).
   System journal view: security screen (phase 4).
 - vpn `recv / sent` = bytes received / sent through the tunnel since it came up
   (`wg show transfer`, summed over peers, 1000-based units). Reset on every reconnect.
+
+## Programs box
+
+Who goes out and comes in, per program (2026-10-20). From the same log lines as the audit
+box (hidden kinds skipped) and the open sockets (`ss`). 100 kept, least recently seen out
+first. Order: with open sockets first, then newest, ties by key.
+Title: `programs <rows>  <n> with open sockets`.
+
+| column | value |
+|---|---|
+| prog | program name from `ss`; `?` = no ss match (one row per uid); `(inbound)`, `vm`, `(forward)` = lines without a program |
+| uid | UIDs of its lines (OUT rules with `skuid`), max 3 then `+`, else `-` |
+| open | open sockets now |
+| out | allowed lines (new flows, exceptions), out and forward |
+| block | drop / block / pass / deny lines, out and forward |
+| in | inbound lines (`(inbound)` row) |
+| peers | remote addresses (lines + sockets, max 50 kept per program) |
+| last | last log line or now while a socket is open |
+
+- Tone: blue = allowed flows or open sockets, red = only dropped / blocked lines.
+- Row detail: note (for `?` / inbound / vm rows), open sockets (max 10), logged counts,
+  kinds (`out_new 12, out_ks 3`), peers by lines (`(socket)` = open, no line yet), uids,
+  first / last seen.
+- Row `filter` (keys `f` / `x`, docs/module-interface.md, Screen): the name; `? <uid>` for
+  unknown programs (`?` when no uid); `zone` for (inbound), `vm`, `fwd_in` for (forward).
+  Only when it is printable ASCII (the filter prompt's chars): else no filter.
+- Same limit as the audit `prog` column: a flow that closes before the next `ss` poll
+  (6 s) has no program. Blocked flows: mostly `?`. Full fix: audit `connect` records after
+  the privilege split (docs/architecture.md).
 
 ## Row addresses (`ip`, key `w` = whois)
 

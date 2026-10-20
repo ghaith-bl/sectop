@@ -78,6 +78,7 @@ this tick. Core overrides both for stale / error (see Errors).
 ## Panels
 
 Common keys: `id` (unique in module), `title`, `type`. `sev` optional, default ok.
+`width` optional (layout hint): `auto` (default) or `full` = a grid row of its own.
 All displayed values are str. Module formats numbers.
 
 kv:
@@ -100,6 +101,8 @@ table (rows max 200):
 Row `detail` optional: extra k / v pairs shown on `enter` under the cells (max 40).
 Row `id` optional (str): stable key of the row (e.g. a grouped flow). The cursor follows
 it when the row moves or its text changes. Not shown.
+Row `filter` optional (str, 1..60 printable ASCII, not blank): filter text for keys `f` /
+`x` on that row (e.g. a program name). Not shown.
 
 `ip` optional on kv items and table rows: the address of that line (a valid IPv4 / IPv6
 address, stored normalized). Core can look it up on key `w` (whois, see Screen).
@@ -202,6 +205,7 @@ A condition that is not true any more is left out.
   - key help
 - Box grid: one box per panel, in module order, then the events box.
   - Width: a box joins the row while its least width fits, extra width shared in the row.
+    Panel `width` full: a row of its own (like events / note).
     Natural content width: kv = key + value (24..56 cells), table = its columns (min 24),
     kv / table at least the title, spark 40, events / note = full row.
     Sparks share a row only with sparks.
@@ -250,8 +254,12 @@ A condition that is not true any more is left out.
   Resume shows the current view.
 - Keys: `1-9` screen; `tab` / right / `l` next box, `shift-tab` / left / `h` previous box;
   down / up / `j` `k` line; `space` `PgDn` / `PgUp` page; `g` `G` / `Home` `End` first / last;
-  `enter` detail; `/` filter; `Esc` clear filter; `w` whois; `a` ack; `p` pause; `m` mask;
-  `?` help; `q` quit.
+  `enter` detail; `/` filter; `Esc` clear filter; `f` follow; `x` hide; `w` whois; `a` ack;
+  `p` pause; `m` mask; `?` help; `q` quit.
+- Follow (`f`, on a row with `filter`): that filter on every other filterable box of the
+  screen; `f` again (all of them on it): cleared. Hide (`x`, filter of one word): adds
+  `!word` to every filterable box of the screen (once; skipped when it would pass 60
+  chars). Both are plain filters: shown in the box titles, `Esc` clears a box.
 - Ack (`a`, also in help / detail, not while typing a filter): every engine alert in the
   alert bar is acked: key -> (count, sev) at ack (`core/ui.py`). Shown dim, last, until
   its count or severity rises. Acks of alerts no longer in the bar are dropped. Phase 2:
@@ -269,7 +277,7 @@ A condition that is not true any more is left out.
 ## Validation (`core/module.py`)
 
 - `validate()` returns a new Snapshot: known keys only, defaults filled
-  (`sev` ok, `unit` "", check `detail` "", check `n` 0). Input not changed.
+  (`sev` ok, `width` auto, `unit` "", check `detail` "", check `n` 0). Input not changed.
 - Missing required key or wrong type -> `InvalidSnapshot`. Also: duplicate panel id,
   table row cell count != columns, non-finite numbers, `v` not int 1 or 2,
   duplicate check key.

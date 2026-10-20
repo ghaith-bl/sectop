@@ -19,6 +19,7 @@ EVENT_SEVS = ("info", "warn", "crit")
 CHECK_SEVS = ("info", "warn", "crit")   # a check is a problem that is true now
 SEV_RANK = {"ok": 0, "info": 1, "warn": 2, "crit": 3}
 PANEL_TYPES = ("kv", "table", "spark")
+WIDTHS = ("auto", "full")                # panel layout hint: full = a grid row of its own
 TONES = ("plain", "red", "blue", "yellow", "green")   # optional color hint, not severity
 
 MAX_STR = 512
@@ -35,6 +36,7 @@ MAX_HOLD = 3600.0
 MIN_INTERVAL = 1.0
 
 NAME_RE = re.compile(r"[a-z0-9_]+")
+PICK_RE = re.compile(r"[ -~]{1,60}")    # row filter: printable ASCII, the filter prompt's chars
 KEY_RE = re.compile(r"[A-Za-z0-9_.:/@%+-]{1,128}")    # check key: rule + subject
 
 
@@ -150,6 +152,11 @@ def _table(p: dict, w: str) -> dict:
         _ip(r, row, wr)
         if "id" in r:                    # stable row key: the cursor follows it
             row["id"] = _str(r, "id", wr)
+        if "filter" in r:                # f follow / x hide (core/ui.py)
+            v = r["filter"]
+            if not isinstance(v, str) or not PICK_RE.fullmatch(v) or not v.strip():
+                raise InvalidSnapshot(f"{wr}.filter: 1..60 printable ASCII chars required")
+            row["filter"] = v
         if "detail" in r:
             row["detail"] = _detail(r, wr)
         rows.append(row)
@@ -184,7 +191,8 @@ def _panel(p, i: int, seen: set) -> dict:
     seen.add(pid)
     ptype = _choice(p, "type", PANEL_TYPES, w)
     out = {"id": pid, "title": _str(p, "title", w), "type": ptype,
-           "sev": _choice(p, "sev", SEVS, w, "ok")}
+           "sev": _choice(p, "sev", SEVS, w, "ok"),
+           "width": _choice(p, "width", WIDTHS, w, "auto")}
     out.update(_PANEL[ptype](p, w))
     return out
 

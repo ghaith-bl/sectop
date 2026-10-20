@@ -271,6 +271,17 @@ class TestBoxes(unittest.TestCase):
         f = self.whois_frame(ip="10.2.0.1")
         self.assertTrue(find(f.lines, "10.2.0.1: not a public address, no whois"))
 
+    def test_selected_filter_in_boxinfo(self):
+        m = mod()
+        m["panels"][1]["rows"][1]["filter"] = "brave"
+        ui = UI(len(SCR), focus={0: "firewall/conns"})
+        ui.sel["firewall/conns"] = 1
+        b = next(b for b in frame([m], ui=ui).boxes if b.key == "firewall/conns")
+        self.assertEqual(b.pick, "brave")
+        ui.sel["firewall/conns"] = 0
+        b = next(b for b in frame([m], ui=ui).boxes if b.key == "firewall/conns")
+        self.assertIsNone(b.pick)
+
     def test_selected_ip_in_boxinfo(self):
         m = mod()
         m["panels"][1]["rows"][1]["ip"] = "149.112.112.11"
@@ -399,6 +410,18 @@ class TestBoxes(unittest.TestCase):
         m["panels"][0]["title"] = "hostfw counters  (11 zero hidden)"
         f = frame([m], width=120)
         self.assertTrue(find(f.lines, " hostfw counters  (11 zero hidden) "))
+
+    def test_full_width_hint(self):
+        m = mod()
+        m["panels"].insert(0, {"id": "k2", "title": "k2", "type": "kv", "sev": "ok",
+                               "items": [{"k": "a", "v": "b", "sev": "ok"}]})
+        m["panels"][1]["width"] = "full"                 # hostfw kv: a row of its own
+        lines = lay([m], width=120)
+        top = next(text(line) for line in lines if " k2 " in text(line))
+        self.assertNotIn("hostfw", top)                  # k2 does not share hostfw's row
+        row = next(text(line) for line in lines if " hostfw " in text(line))
+        self.assertNotIn("Connections", row)             # nor the next box
+        self.assertEqual(cols(row), 120)
 
     def test_narrow_stacks(self):
         lines = lay(width=30)

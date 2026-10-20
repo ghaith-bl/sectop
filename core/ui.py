@@ -17,6 +17,11 @@ Filter: / starts typing a filter for the focused table / events box. Every
 key is text until enter (keep) or Esc (back to the old filter). The filter
 applies while typing. Esc outside typing clears the focused box's filter.
 
+Follow / hide (rows with a `filter`, e.g. programs): f sets that filter on
+the other filterable boxes of the screen (f again: clears them). x adds
+!filter (one word) to every filterable box of the screen. Both are plain
+filters: shown in the box titles, Esc clears.
+
 Ack: a acks every engine alert in the last alert bar (Frame.alerts): key ->
 (count, sev) at ack. render.acked() dims it until its count or severity
 rises. Kept here, not in core: the channel stays one-way (docs/architecture.md).
@@ -105,6 +110,10 @@ class UI:
             if b is not None and b.filterable:
                 self._typing_box, self._typing_old = b.key, self.filters.get(b.key, "")
                 self.typing = self._typing_old
+        elif k in (ord("f"), ord("F")):
+            self._follow()
+        elif k in (ord("x"), ord("X")):
+            self._hide()
         elif k == ESC:
             b = self._box()
             if b is not None and self.filters.pop(b.key, None) is not None:
@@ -123,6 +132,26 @@ class UI:
         else:
             self._move_key(k)
         return True
+
+    def _follow(self) -> None:
+        b = self._box()
+        if b is None or not b.pick:
+            return
+        targets = [x.key for x in self.boxes if x.filterable and x.key != b.key]
+        clear = bool(targets) and all(self.filters.get(t) == b.pick for t in targets)
+        for t in targets:
+            self._set_filter(t, "" if clear else b.pick)
+
+    def _hide(self) -> None:
+        b = self._box()
+        if b is None or not b.pick or len(b.pick.split()) != 1:
+            return
+        word = "!" + b.pick.strip()
+        for x in self.boxes:
+            cur = self.filters.get(x.key, "")
+            if not x.filterable or word in cur.split() or len(cur) + 1 + len(word) > FILTER_MAX:
+                continue
+            self._set_filter(x.key, f"{cur} {word}".strip())
 
     def _ack(self) -> None:
         """Ack the alerts in the bar. Acks of alerts no longer in it are dropped

@@ -31,6 +31,15 @@ class TestValidate(unittest.TestCase):
         with self.assertRaises(InvalidSnapshot):
             validate(s)
 
+    def test_width_hint(self):
+        self.assertEqual(validate(snap())["panels"][0]["width"], "auto")
+        s = snap()
+        s["panels"][1]["width"] = "full"
+        self.assertEqual(validate(s)["panels"][1]["width"], "full")
+        for bad in ("half", "", None, 1):
+            s["panels"][1]["width"] = bad
+            self.assertInvalid(s)
+
     def test_good(self):
         out = validate(snap())
         self.assertEqual(out["status"], "warn")
@@ -198,6 +207,17 @@ class TestValidate(unittest.TestCase):
             s3 = snap()
             s3["panels"][0]["items"][0]["tone"] = bad
             self.assertInvalid(s3)
+
+    def test_row_filter(self):
+        s = snap()
+        s["panels"][1]["rows"][0]["filter"] = "? 1000"
+        out = validate(s)
+        self.assertEqual(out["panels"][1]["rows"][0]["filter"], "? 1000")
+        self.assertNotIn("filter", validate(snap())["panels"][1]["rows"][0])
+        for bad in ("", "   ", "x" * 61, "caf\u00e9", "a\tb", 1, None):
+            s2 = snap()
+            s2["panels"][1]["rows"][0]["filter"] = bad
+            self.assertInvalid(s2)
 
     def test_rows_cut(self):
         s = snap()

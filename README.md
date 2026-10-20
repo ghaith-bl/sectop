@@ -21,8 +21,8 @@ Status: in progress (phase 2: alert engine, docs/architecture.md). Runs in dev m
 
 ## Modules
 
-- firewall: hostfw mode + counters, kernel log (HFW-*), peers (remote IPs), WireGuard
-  (docs/modules/firewall.md)
+- firewall: hostfw mode + counters, kernel log (HFW-*), programs, peers (remote IPs),
+  WireGuard (docs/modules/firewall.md)
 
 ## Run (dev)
 
