@@ -25,7 +25,7 @@ can decide from what is on screen. Read-only until the privilege split (phase 3)
 | key | screen | content |
 |---|---|---|
 | 1 | firewall | hostfw, vpn, counters (non-zero only), out_leak, spark, programs (one row per program), peers (remote IPs), audit (in + out, allowed + blocked, grouped) |
-| 2 | security | grouped warnings / errors / security events; posture checks |
+| 2 | security | commands, auth, kernel, posture, logs (grouped). See Security screen |
 | 3 | processes | cpu, memory, disk, io, temperatures, top processes, services |
 
 - Each screen uses the whole terminal. Static list in `core/screens.py`.
@@ -37,19 +37,18 @@ can decide from what is on screen. Read-only until the privilege split (phase 3)
 Keys now: `1-3` screen, `tab` / arrows box, `j/k` / arrows select line, `PgDn/PgUp` page,
 `enter` detail, `/` filter, `Esc` clear filter, `f` follow, `x` hide, `w` whois, `a` ack,
 `p` pause, `m` mask, `?` help, `q` quit.
-Planned: `t` capture (from detail).
+Planned: `t` capture (from detail); program card (`enter` on a program, phase 4).
 
 ## Firewall screen: network only (2026-10-20)
 
 - Firewall screen = who goes out / comes in. Per program: programs box, keys `f` (follow:
   the other boxes filtered to it) and `x` (hide it, view only). Lasting noise: the noise
   list (root file, edited by hand), never from the UI (one-way, see Privilege split).
-- Security screen = who ran what: commands as root / via sudo (who: login uid also after
-  sudo, what, count, first / last, from which program / tty), kernel (module loads, AVC,
-  errors). After the privilege split: now sectop's own root polling (~56 root commands /
-  min) would bury my real commands, and hiding them by rule would hide anyone's.
+- Security screen = who ran what (see Security screen). After the privilege split: now
+  sectop's own root polling (~56 root commands / min) would bury my real commands, and
+  hiding them by rule would hide anyone's.
 - After this: firewall screen done for now. Changes later only from need, architecture
-  or new sources (e.g. audit connect records for program names).
+  or new sources (e.g. `ss --cgroup` for program names after the split).
 
 ## Firewall audit
 
@@ -60,9 +59,13 @@ Who talks to what, both ways, on the firewall screen.
   (rate limit), counters are exact.
 - Row: time, dir, verdict, proto, uid, program, src, dst, iface. Color = severity.
 - Program name: netfilter logs only the UID.
-  - now: matched with `ss` (same 5-tuple) while the flow is still open
-  - later: Linux audit (`connect` syscall: pid + exe), also for blocked flows.
-    Needs a filter (volume); check auditctl docs first
+  - now: matched with `ss -p` (same 5-tuple) while the flow is still open
+  - after the split: `ss --cgroup`, no CAP_SYS_PTRACE (works as my user, 2026-10-20).
+    Socket -> cgroup -> app id / unit: `app-flatpak-com.brave.Browser-<n>.scope`,
+    `NetworkManager.service`. systemd.io DESKTOP_ENVIRONMENTS:
+    `app[-<launcher>]-<ApplicationID>-<RANDOM>.scope`. One word: also fixes `x` for
+    "Web Content".
+  - not: audit `connect` rule (every unix socket connect matches too -> volume)
 - Detail (`enter`): all fields of the log line, rule, verdict meaning.
 - Later, from the detail view: short `tcpdump` on that host, bounded
   (`-n -c 50 -s 128 -Z tcpdump` + run timeout). Fits "no long-lived children".
@@ -75,6 +78,97 @@ Read-only, on key press only: `w` = RDAP lookup of the selected address
 (docs/module-interface.md, Screen). Not an action: changes nothing on the host. Runs in
 a child as user nobody (setpriv, no groups, no_new_privs), so the root process never
 parses network data. Blocks the UI up to 12 s (v1: no threads).
+
+## Security screen (2026-10-20)
+
+Who ran what as root, who tried to get in, what the kernel did, is the baseline still
+true. Built in phase 4, after the privilege split.
+
+    +---------------------------+---------------------------+
+    | commands (root / setuid)  | auth                      |
+    +---------------------------+---------------------------+
+    | kernel                    | posture                   |
+    +---------------------------+---------------------------+
+    | logs (full width)                                     |
+    +-------------------------------------------------------+
+
+Source: the one journal reader. Audit records via journald
+(`systemd-journald-audit.socket` enabled + active, 2026-10-20). Not `/var/log/audit` or
+`/var/log/sudo.log` (root only).
+
+Audit records in the journal (host sample 2026-10-20: 2 sudo calls, 195 entries):
+- One entry per record. Event = entries with the same `_AUDIT_ID`. No EOE records: a
+  syscall event is complete at its PROCTITLE.
+- Only SYSCALL carries auid / ses / uid / euid. EXECVE, CWD, PATH joined by `_AUDIT_ID`.
+- argv from the EXECVE MESSAGE (`a0=` quoted or hex, long args `a1[0]`), not from
+  `_AUDIT_FIELD_A*`: journald maps max 64 fields per record (`N_IOVEC_AUDIT_FIELDS`).
+- User space types have no name: USER_CMD = `AUDIT1123`. Match `_AUDIT_TYPE=<n>`.
+- Every sudo starts root's user manager (pam_systemd, `user@0.service`): ~100 entries
+  (BPF, SYSCALL `key=(null)`). No key -> ignored.
+
+### Commands
+
+- Keys: audit uses the first matching rule (auditctl(8): "the event triggers on the first
+  matching rule"). Hardening rule order: `user_emulation` before `root_cmds`:
+  - `user_emulation` = setuid launch (uid != euid): sudo itself, pkexec, fusermount3
+  - `root_cmds` = what runs as root after it (uid = euid = 0, auid = login user)
+- Row = one group: who (auid) > as (euid), exe + normalized argv.
+  Cols: last, n, who>as, via, cmd. Normalized for grouping only: numbers, hex ids, IPs,
+  UUIDs -> placeholder (same as logs).
+- Via sudo: the command's ppid is the sudo monitor (fork, no execve, gone at once), and
+  `use_pty` gives the command a new pty. Join: `root_cmds` argv == USER_CMD `cmd`, same
+  ses, within 5 s -> via `sudo <tty of the sudo launch>`. Else parent = exe of an execve
+  already seen (pid), else `/proc/<ppid>/comm`, else `?`.
+- `unix_chkpwd` under sudo (2 per password prompt): folded into that sudo row.
+- Launch without a root child (sudo -k / -l, sudoedit, denied sudo, setuid helpers):
+  own row, dim. Nothing hidden.
+- Detail: last 5 distinct full argv, cwd, first / last, ses, pid / ppid, key.
+- Secrets: always masked in rows. Detail: masked, `m` shows the raw argv (same key as
+  IPs). Masked: values of `--password --passwd --token --secret --api-key`,
+  `user:pass@` in URLs, `*_PASSWORD= *_TOKEN= *_SECRET=`. Argv is readable by every user
+  in `/proc/<pid>/cmdline` and stored in audit + journal anyway: this only keeps it off
+  the screen.
+- Alerts: none per command. Watch list `/etc/sectop/watch.toml` (root-owned, same file
+  checks as config): commands that weaken the baseline -> warn. Changes nothing on the
+  host. First entries: `setenforce 0`, `auditctl -D` / `-e 0`, `nft flush`,
+  `systemctl stop|disable|mask` of auditd / hostfw / firewalld, `usermod -aG wheel`.
+
+### Auth
+
+- sudo denied: USER_CMD `res=failed` (sudoers(5) log_denied: "to the system audit log")
+  + sudo syslog reason ("user NOT in sudoers", "command not allowed", "N incorrect
+  password attempts", "a password is required"; PRIORITY 1) -> warn.
+- sudo syslog splits at 980 bytes (sudoers(5) `syslog_maxlen`): command text from audit,
+  reason from syslog.
+- PAM: USER_AUTH `res=failed` (sudo, gdm, polkit) -> warn. faillock lock -> crit
+  (source: check on host).
+- Logins: logind "New session", USER_START of gdm-password / login -> info.
+- polkit: polkitd lines (authenticated / failed, action id) -> info / warn.
+
+### Kernel
+
+- Taint: `/proc/sys/kernel/tainted` (file). Bit new since the first read this boot:
+  W -> warn; D L M B -> crit (docs.kernel.org tainted-kernels: the kernel stays tainted
+  after the cause is gone). Boot value decoded in posture. 2026-10-20: 12288 = O + E.
+- Modules: audit `kernel_modules` (SYSCALL + KERN_MODULE name). Group: name, syscall,
+  exe, result. auid set (manual load) -> warn, auid unset (autoload) -> info.
+  Boot 2026-10-20: 38 autoloads ok; 37 failed loads of `nvidia` by kmod, auid 60578
+  (GDM greeter, systemd.io UIDS-GIDS: 60578-60705) and 1000, dGPU off (Integrated).
+  Noise entry until akmod-nvidia is removed.
+- AVC: audit AVC / USER_AVC. Group: comm, scontext type, tcontext type, tclass, perms.
+  `permissive=1` -> warn, else info.
+- Kernel log: `_TRANSPORT=kernel`, PRIORITY <= 4, minus `HFW-*` (firewall screen).
+- USB: "New USB device found" -> idVendor:idProduct + Product -> info.
+
+### Program card (phase 4)
+
+`enter` on a program: everything sectop can tie to it.
+- Identity = cgroup app id / unit (Firewall audit, program name). Process -> cgroup:
+  `/proc/<pid>/cgroup` while it runs.
+- Network flows; root commands / setuid launches with a parent in it; polkit requests
+  from it; its AVC denials; its journal warnings / errors (`_SYSTEMD_USER_UNIT`,
+  `_SYSTEMD_UNIT`).
+- Not shown: file access and plain (non-root) execs. Not audited (volume).
 
 ## Alerts
 
@@ -93,7 +187,8 @@ Alert = state, not event.
   match (glob on the alert key, module part literal), reason, expires (date, required).
   Expired entries stop matching: the alert shows again. A noise alert is still tracked
   and shown as noise, never dropped. Same idea as an Alertmanager silence (matchers,
-  reason, end time). Examples: ACPI BIOS errors, NVRM lines from akmod-nvidia (logs).
+  reason, end time). Examples: ACPI BIOS errors, NVRM lines from akmod-nvidia (logs),
+  failed `nvidia` loads (kernel).
 - Ack: dims the alert, does not delete it. Higher count or severity after ack shows it
   again. Key `a` acks every alert in the bar (2026-10-20). A per-alert list: later, if
   needed.
@@ -127,11 +222,24 @@ Target: < 1% CPU, < 30 MiB RSS.
 
 - Baseline = my repo silverblue-cis-hardening. No invented standard.
 - Policy file `/etc/sectop/posture.toml` (root-owned): check id, what, expected value,
-  source (file / command).
-- Result per check: pass, fail, accepted deviation (with ref to the repo's
-  `docs/deviations.md`), unknown.
-- First checks: SELinux enforcing, firewalld default zone drop, hostfw enforce, disk
-  encrypted, listening ports vs allowlist, key sysctls, failed units, pending updates.
+  source (file / command), optional `ref` into the repo's `docs/deviations.md`.
+- Result per check: pass, fail, accepted deviation (has `ref`: shown dim, no alert),
+  unknown.
+- Every 5 min. Read by the non-root collector (2026-10-20):
+  - SELinux: `/sys/fs/selinux/enforce` = 1
+  - hostfw: enforce (firewall module check)
+  - LUKS: `/sys/dev/block/<maj:min of /var>/dm/uuid` starts `CRYPT-LUKS`
+  - listeners: `/proc/net/{tcp,tcp6,udp,udp6}` vs allowlist (addr:port)
+  - sysctl: `/proc/sys/*` vs the hardening values
+  - audit: `audit=1` in `/proc/cmdline`, auditd active, rules loaded = CONFIG_CHANGE
+    `op=add_rule` - `op=remove_rule` this boot (2026-10-20: 70, verification.md ~70)
+  - taint: decoded, expected bits in the policy (now O E)
+  - failed units: `systemctl list-units --state=failed`
+  - updates: `rpm-ostree status --json`, cached only, once per day (collector has no
+    network)
+  - wifi: `ipv6.method` disabled on every wifi profile (nmcli)
+- Open: firewalld default zone without root; flatpak updates without network.
+- Needs root, not checked: `auditctl -l` / `-s` (CAP_AUDIT_CONTROL), `/var/run/faillock`.
 
 ## Logs
 
@@ -140,6 +248,10 @@ Target: < 1% CPU, < 30 MiB RSS.
 - Grouped by unit + normalized message (numbers, ids, addresses -> placeholder):
   count, first seen, last seen.
 - Noise list applies. Grouping and noise rules are tested with fixtures from my host.
+- Own entries (sectop units, `SYSLOG_IDENTIFIER=sectop`): tagged `own`, shown and
+  filterable, never dropped.
+- Noise candidate 2026-10-20: `pam_systemd(sudo:session): Failed to check if
+  /run/user/0/bus exists` (PRIORITY 4, every sudo).
 - Audit volume 2026-10-20: key `mounts` (CIS rule) = 99% `exe=/usr/bin/bwrap` (2922 of
   2941 in 2 h). Every Flatpak sandbox start: bubblewrap always creates a new mount
   namespace, invisible from the host (bubblewrap README). Group by exe, noise list
@@ -161,21 +273,33 @@ would be hidden too).
 Design (least privilege: NIST SP 800-53 / 800-171 AC-6, systemd.exec(5), capabilities(7)):
 - Collector = system service started by systemd, not from my login. loginuid stays
   unset (pam_loginuid(8): set by login entry points), so rules with `auid>=1000` /
-  `auid!=-1` do not match: daemon events, not user events.
-- Not root: own user (`DynamicUser=` or a system user). Journal via
-  `SupplementaryGroups=systemd-journal` (journalctl(1): this group reads all journal files).
+  `auid!=-1` do not match: daemon events, not user events. Audit rules unchanged: the
+  same commands from a login are still recorded.
+- Not root: static system user + group `sectop` (sysusers.d), no login, no home. Not
+  `DynamicUser=` (2026-10-20): Red Hat, "systemd secure services": with "directories
+  shared with a particular group ... dynamic users are probably not the best option".
+  Journal via `SupplementaryGroups=systemd-journal` (journalctl(1): this group reads all
+  journal files).
+- Output: `RuntimeDirectory=sectop`, mode 0750 -> `/run/sectop/state.json` (write +
+  rename). My user in group `sectop`, read only. File, not socket: one-way, less code.
 - Capabilities only where the kernel requires them: `nft list` and `wg show` need
-  CAP_NET_ADMIN even to read. `AmbientCapabilities=` + the same `CapabilityBoundingSet=`.
-  CAP_NET_ADMIN can also change the firewall -> the part that holds it stays minimal:
-  fixed argv, output handed on, no parsing there.
-- Program names via `ss -p` need CAP_SYS_PTRACE (capabilities(7): /proc/pid/fd of other
-  users). Too strong for a monitor -> program from audit connect records (journal, same
-  group) or uid only.
+  CAP_NET_ADMIN even to read. CAP_NET_ADMIN can also change the firewall -> separate
+  small unit, same user, `AmbientCapabilities=` + the same `CapabilityBoundingSet=`:
+  fixed argv, raw output to the collector, no parsing there. Not in the collector:
+  ambient capabilities pass to every child (capabilities(7)).
+- Program names: `ss -p` needs CAP_SYS_PTRACE (capabilities(7): /proc/pid/fd of other
+  users). Too strong for a monitor -> `ss --cgroup` (see Firewall audit).
+- No network: `IPAddressDeny=any`, `RestrictAddressFamilies=AF_UNIX AF_NETLINK`.
 - `NoNewPrivileges=yes`, sandboxing options on ("as many of these options ... as is
-  possible", systemd.exec(5)), checked with `systemd-analyze security <unit>`.
-- UI = my user, no sudo. Reads collector output (socket or /run file, group read).
-  One-way: the UI never writes to the collector (ack stays in the UI).
-- whois child stays separate: own user, no capabilities.
+  possible", systemd.exec(5)), checked with `systemd-analyze security <unit>` (Red Hat:
+  results "should be considered hints").
+- SELinux: without a policy the service runs as `unconfined_service_t` (RHEL Using
+  SELinux, "Writing a custom SELinux policy"). Own policy (`sepolicy generate --init`)
+  after the split works, built from its real behavior (AVC).
+- UI = my user, no sudo. Reads `/run/sectop/state.json`. One-way: the UI never writes
+  to the collector (ack stays in the UI).
+- whois child stays separate: own user, no capabilities, not in the collector (no
+  network). Details in phase 3.
 
 Until then: `/etc/sectop/config.toml` `[modules.firewall] interval = 6.0`, fewer
 commands per tick (slow sources on their own interval).
@@ -204,6 +328,7 @@ Stop / restart a service, kill a process. Only after the privilege split:
 2. Alert engine + noise list. Firewall checks move to it.
 3. Privilege split (non-root collector service, unprivileged UI). Moved before logs
    2026-10-20: the logs screen reads the audit log and must not show sectop's own commands.
+   Then: own SELinux policy for the collector.
 4. Logs + posture, and system (read-only). Both required, order free. Security screen:
-   commands (sudo / root: who, what, count, when, from where), kernel, posture.
+   commands, auth, kernel, posture, logs; program card.
 5. Actions.
