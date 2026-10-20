@@ -6,7 +6,12 @@ commands, applies rules, builds the Snapshot.
 
 ## Sources
 
-All via `core.run.run()`, timeout 1.0 s each, binaries from `/usr/bin` (fallback `/usr/sbin`).
+Binaries from `/usr/bin` (fallback `/usr/sbin`), timeout 1.0 s each. nft and wg need
+CAP_NET_ADMIN even to read: the net unit (`core/netd.py`, sectop-net.service) runs them and
+writes each result to `/run/sectop-net/<name>.json`; the module reads the last one
+(`netd.Reader`, same Result as `core.run.run()`). Missing, unsafe, other command or older
+than 30 s (slow ones 90 s) -> a failed result that says why, shown like any command
+error. The rest runs in the collector via `core.run.run()` as user sectop.
 
 Every tick (5 commands):
 
@@ -25,9 +30,12 @@ Slow (every 30 s, and at once when the tunnel goes up / down):
 | fwmark set | `nft -j list set inet hostfw wg_fwmark` |
 | routes | `ip -j -4 route show default`, `ip -j -6 route show default` |
 
-- Why: sectop v1 runs as root from my login, so every command is an audit record
+- Why few: sectop v1 ran as root from my login, so every command was an audit record
   (rule `root_cmds`, ~7 journal entries each). Was 11 commands per tick. See
   docs/architecture.md, Privilege split.
+- Net unit timing: fast (table, handshakes, transfer) every half module interval, slow
+  (endpoints, fwmark, fwmark set) every 15 s: each tick reads a fresh sample. Counters are
+  cumulative: a sample read twice gives delta 0 now and the full delta next tick.
 - `-t` (nft(8): "Omit contents of sets"): counters and the enforce chain without the
   set elements (Proton entry IPs: thousands). wg_fwmark elements come from the slow set call.
 - Mode from the table: only rules of chain `enforce` count; no chain `enforce` = unknown.

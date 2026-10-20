@@ -5,6 +5,7 @@ import unittest
 from unittest import mock
 
 import modules.firewall as fw
+from core import netd
 from core.module import check_module, validate
 from core.run import Result
 from modules.firewall import conns, journal, nft, vpn
@@ -297,7 +298,8 @@ class Base(unittest.TestCase):
         self.host = Host()
         self.mono = 1000.0
         self.wall = 1792410745.0                      # 20 s after the fixture handshake
-        self.st = fw.State(run=self.host, mono=lambda: self.mono, wall=lambda: self.wall,
+        self.st = fw.State(run=self.host, net=self.host, mono=lambda: self.mono,
+                           wall=lambda: self.wall,
                            owner=os.getuid(), mode_file=self.mode_file,
                            rollback_file=self.rb_file)
 
@@ -1193,6 +1195,47 @@ class TestLeakBox(Base):
                          ["?", "0s", "119s", "2m 00s", "59m 59s", "1h 00m", "25h 01m"])
 
 
+class TestNetSource(Base):
+    """nft / wg come from the net unit (core/netd.py), the rest is run here."""
+
+    def setUp(self):
+        super().setUp()
+        self.ran, self.net = [], []
+        host = self.host
+
+        def run(argv, timeout):
+            self.ran.append(os.path.basename(argv[0]))
+            return host(argv, timeout)
+
+        def net(argv, timeout):
+            self.net.append(tuple(argv))
+            return host(argv, timeout)
+
+        self.st.run, self.st.net = run, net
+
+    def test_routing(self):
+        self.collect()
+        self.assertTrue(self.net)
+        self.assertFalse({"nft", "wg"} & set(self.ran))
+        self.assertTrue({"journalctl", "ss", "ip"} <= set(self.ran))
+
+    def test_net_unit_has_every_command(self):
+        """Each nft / wg argv the module asks for is one the net unit runs."""
+        self.st.slow_at = None
+        self.collect()
+        known = {argv for argv, _kind in netd.commands(self.st.tunnel).values()}
+        self.assertEqual(set(self.net) - known, set())
+        self.assertEqual({os.path.basename(a[0]) + " " + a[-1] for a in self.net},
+                         {"nft hostfw", "wg latest-handshakes", "wg transfer",
+                          "wg endpoints", "wg fwmark", "nft wg_fwmark"})
+
+    def test_net_error_shown(self):
+        self.host.set("nft list table", fail("/run/sectop-net/table.json missing: "
+                                             "is sectop-net.service running?"))
+        snap = self.collect()
+        self.assertIn("is sectop-net.service running?", self.items(snap, "hostfw")["table"][0])
+
+
 class TestInit(unittest.TestCase):
     def test_options(self):
         bad = ({"x": 1}, {"tunnel": "a b"}, {"tunnel": "x" * 16}, {"tunnel": 1},
@@ -1206,12 +1249,12 @@ class TestInit(unittest.TestCase):
         host = Host()
         host.set("journalctl", ok('{"__CURSOR": "c1", "__REALTIME_TIMESTAMP": "1", '
                                   '"MESSAGE": "x"}\n'))
-        st = fw.State(run=host)
+        st = fw.State(run=host, net=host)
         fw._start_cursor(st)
         self.assertEqual(st.cursor, "c1")
         self.assertIn("-n", host.calls[0])
         host.set("journalctl", fail("no journal"))
-        st = fw.State(run=host)
+        st = fw.State(run=host, net=host)
         fw._start_cursor(st)
         self.assertIsNone(st.cursor)
 

@@ -1,9 +1,11 @@
 """firewall: hostfw + Proton WireGuard status for sectop.
 
-Sources (fixed argv, via core.run.run). Every tick: nft table without set
-elements (counters + enforce chain), kernel journal (HFW- lines, cursor),
-wg handshakes + transfer, ss. Every SLOW s or when the tunnel goes up / down:
-wg endpoints + fwmark, nft wg_fwmark set, ip default routes. Files:
+Sources (fixed argv). Every tick: nft table without set elements (counters +
+enforce chain), kernel journal (HFW- lines, cursor), wg handshakes + transfer,
+ss. Every SLOW s or when the tunnel goes up / down: wg endpoints + fwmark, nft
+wg_fwmark set, ip default routes. nft and wg need CAP_NET_ADMIN: their results
+come from the net unit's files (core/netd.py Reader), the rest via
+core.run.run as user sectop. Files:
 /etc/hostfw/mode, /run/hostfw/rollback, /proc/uptime. At start: one boot
 journal scan (leak lines, first tunnel flow).
 Audit box: every HFW line (allowed + blocked, in + out), program from ss.
@@ -19,16 +21,17 @@ import re
 import stat
 import time
 
+from core import netd
 from core.module import SEV_RANK, worst
 from core.run import run as _run
 from modules.firewall import conns, journal, nft, vpn
 
 NAME = "firewall"
-INTERVAL = 2.0
+INTERVAL = netd.FW_INTERVAL
 
-TIMEOUT = 1.0            # per command, keeps a full tick below INTERVAL
+TIMEOUT = netd.TIMEOUT   # per command, keeps a full tick below INTERVAL
 BOOT_TIMEOUT = 5.0       # boot journal scan, once in init()
-SLOW = 30.0              # endpoint, live fwmark, wg_fwmark set, default routes: rarely change
+SLOW = netd.FW_SLOW      # endpoint, live fwmark, wg_fwmark set, default routes: rarely change
 HS_STALE = 180           # WireGuard rejects keys after 180 s
 HOLD = 60.0              # seconds the alert (and the counter row color) stays after new packets
 SPARK = 120
@@ -45,14 +48,14 @@ RECENT = 10              # log lines kept per counter, shown in its detail
 LEAK_ROWS = 8            # shown in the out_leak box
 FILE_MAX = 4096
 
-TABLE = ("inet", "hostfw")
+TABLE = netd.TABLE
 MODE_FILE = "/etc/hostfw/mode"
 ROLLBACK_FILE = "/run/hostfw/rollback"
 UPTIME_FILE = "/proc/uptime"
-DEFAULT_TUNNEL = "proton0"
+DEFAULT_TUNNEL = netd.DEFAULT_TUNNEL
 DEFAULT_KS = ("pvpnksintrf0", "pvpnksintrf1")
 OPTIONS = {"tunnel", "ks_ifaces", "hold"}
-IFACE_RE = re.compile(r"[A-Za-z0-9_.-]{1,15}")
+IFACE_RE = netd.IFACE_RE
 
 # hostfw counter / log kind -> severity. None = hidden (counter only, no event).
 SEV = {
@@ -149,16 +152,8 @@ def _stamp(ts: float) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts)) + f".{int(ts * 1000) % 1000:03d}"
 
 
-def _bin(name: str) -> str:
-    for d in ("/usr/bin", "/usr/sbin"):
-        p = f"{d}/{name}"
-        if os.path.isfile(p):
-            return p
-    return f"/usr/bin/{name}"         # run() reports rc 127
-
-
 class State:
-    def __init__(self, tunnel=DEFAULT_TUNNEL, ks=DEFAULT_KS, hold=HOLD, run=_run,
+    def __init__(self, tunnel=DEFAULT_TUNNEL, ks=DEFAULT_KS, hold=HOLD, run=_run, net=None,
                  mono=time.monotonic, wall=time.time, owner=0,
                  mode_file=MODE_FILE, rollback_file=ROLLBACK_FILE, hms=_hms, stamp=_stamp,
                  uptime_file=UPTIME_FILE):
@@ -169,7 +164,8 @@ class State:
         self.hms = hms                 # epoch -> "HH:MM:SS" for audit rows
         self.stamp = stamp             # epoch -> full local time for audit detail
         self.comments = {}             # counter name -> hostfw rule comment
-        self.bins = {n: _bin(n) for n in ("nft", "journalctl", "ss", "wg", "ip")}
+        self.bins = {n: netd.bin_path(n) for n in ("nft", "journalctl", "ss", "wg", "ip")}
+        self.net = net if net is not None else netd.Reader(tunnel, wall=wall)
         self.cursor = None
         self.since = int(wall())
         self.prev = None               # counters of last tick
@@ -191,7 +187,11 @@ class State:
         self.slow = (None, [], [])     # last slow result: endpoint item, items, checks
 
     def cmd(self, *argv, timeout=TIMEOUT):
-        return self.run([self.bins[argv[0]], *argv[1:]], timeout=timeout)
+        """nft / wg: last result from the net unit (CAP_NET_ADMIN). Others: run here."""
+        full = [self.bins[argv[0]], *argv[1:]]
+        if argv[0] in netd.NET_BINS:
+            return self.net(full, timeout=timeout)
+        return self.run(full, timeout=timeout)
 
 
 # --- helpers --------------------------------------------------------------
