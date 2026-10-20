@@ -47,8 +47,9 @@ def _check_owner(st: os.stat_result, what: str, owner_uid: int) -> None:
         raise ConfigError(f"{what}: group/other writable")
 
 
-def _read(path: str, owner_uid: int) -> bytes | None:
-    """Read the file safely. None if it (or its directory) does not exist."""
+def read_file(path: str, owner_uid: int) -> bytes | None:
+    """Read the file safely. None if it (or its directory) does not exist.
+    Also used for /etc/sectop/noise.toml (core/noise.py)."""
     parent = os.path.dirname(os.path.abspath(path))
     try:
         pst = os.lstat(parent)
@@ -134,7 +135,7 @@ def parse(data: bytes, path: str = DEFAULT_PATH) -> Config:
 
 def load(path: str = DEFAULT_PATH, owner_uid: int = 0) -> Config:
     """owner_uid is 0 in production; tests pass their own uid."""
-    data = _read(path, owner_uid)
+    data = read_file(path, owner_uid)
     if data is None:
         return Config()
     return parse(data, path)

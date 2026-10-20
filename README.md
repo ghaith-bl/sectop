@@ -7,8 +7,8 @@ Status: in progress (phase 2: alert engine, docs/architecture.md). Runs in dev m
 
 ## Design
 
-- core: config, module registry, safe subprocess runner, sanitizer, alert engine, screens,
-  curses renderer
+- core: config, module registry, safe subprocess runner, sanitizer, alert engine + noise list,
+  screens, curses renderer
 - screens: 1 firewall, 2 security, 3 processes. Each uses the whole terminal
   (docs/architecture.md)
 - modules: collectors, return a JSON-serializable Snapshot

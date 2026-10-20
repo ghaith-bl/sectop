@@ -1,9 +1,11 @@
 import copy
+import datetime
 import json
 import unittest
 from unittest import mock
 
 from core import alerts as al
+from core.noise import Entry
 
 T0 = 1760950000.0
 
@@ -157,6 +159,20 @@ class TestActive(unittest.TestCase):
     def test_tie_by_key(self):
         e = Engine().step("fw", chk("b"), chk("a"))
         self.assertEqual(e.active(), [("fw/a", "open"), ("fw/b", "open")])
+
+    def test_noise(self):
+        e = Engine().step("fw", chk("ks:a", "warn"), chk("leak", "info"), chk("ks:b", "crit"))
+        far = datetime.date.fromtimestamp(e.now) + datetime.timedelta(days=30)
+        past = datetime.date.fromtimestamp(e.now) - datetime.timedelta(days=30)
+        noise = (Entry("fw/ks:*", "proton ndp", far), Entry("fw/leak", "old", past))
+        got = [(a["key"], a["noise"]) for a in al.active(e.state, e.now, noise)]
+        # noise last; an expired entry does not match
+        self.assertEqual(got, [("fw/leak", None), ("fw/ks:b", "proton ndp"),
+                               ("fw/ks:a", "proton ndp")])
+        self.assertEqual([a["noise"] for a in al.active(e.state, e.now)], [None] * 3)
+        e.step("fw", chk("ks:a", "warn", n=2))                # still tracked while noise
+        self.assertEqual(e.rec("fw/ks:a")["count"], 3)
+        self.assertNotIn("noise", e.rec("fw/ks:a"))
 
     def test_copies(self):
         e = Engine().step("fw", chk("a"))

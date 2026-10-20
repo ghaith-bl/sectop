@@ -160,10 +160,11 @@ A condition that is not true any more is left out.
   period (`since` = now), same record (`first`, `count` kept).
 - count: + max(n, 1) when the check turns true, + n while it stays true.
 - Latest sev / title / detail / hold win. A held alert keeps the last ones.
-- `active(state, now)`: open and held alerts, worst first, open before held, newest
-  `since` first, then key.
+- `active(state, now, noise)`: open and held alerts, each with `state` and `noise`
+  (reason of the matching noise entry, else None). Noise last, then worst first, open
+  before held, newest `since` first, then key.
 - Records max 500: closed out first, then held, oldest last seen first. Open never.
-- Not here: ack (UI, docs/architecture.md, Alerts). Noise list: not yet.
+- Not here: ack (UI, docs/architecture.md, Alerts).
 
 ## Errors (`core/app.py`)
 
@@ -317,4 +318,24 @@ mask_public_ips = true
 [modules.firewall]
 enabled = true
 interval = 2.0
+```
+
+## Noise list (`core/noise.py`)
+
+`/etc/sectop/noise.toml`. Known, accepted alerts, kept out of the alert bar.
+
+- Same file checks as config.toml. Missing -> no entries. Anything wrong -> refuse to start.
+- Strict: only `[[noise]]` entries with `match`, `reason`, `expires`. Max 200.
+- `match`: glob (fnmatch, case-sensitive) on the alert key `<module>/<check key>`. Module
+  part literal (`[a-z0-9_]+`, no glob): one entry never covers all modules.
+- `reason`: 1..200 chars.
+- `expires`: TOML local date, required. Matches through that day (local time), then stops:
+  the alert shows again.
+- A noise alert is still tracked (count, last seen). `active()` marks it, never drops it.
+
+```toml
+[[noise]]
+match = "firewall/out_ks:*"
+reason = "kill switch NDP from the Proton client"
+expires = 2026-12-31
 ```

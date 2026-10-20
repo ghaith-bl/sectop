@@ -78,8 +78,10 @@ Alert = state, not event.
   expected (pre-connect DoH fallback); after connect = crit. The out_leak box already
   shows this context (docs/modules/firewall.md); status follows in phase 2.
 - Noise list: `/etc/sectop/noise.toml` (root-owned, same file checks as config). Each entry:
-  match, reason, expires. Expired entries stop matching. Examples: ACPI BIOS errors,
-  NVRM lines from akmod-nvidia.
+  match (glob on the alert key, module part literal), reason, expires (date, required).
+  Expired entries stop matching: the alert shows again. A noise alert is still tracked
+  and shown as noise, never dropped. Same idea as an Alertmanager silence (matchers,
+  reason, end time). Examples: ACPI BIOS errors, NVRM lines from akmod-nvidia (logs).
 - Ack: dims the alert, does not delete it. Higher count or severity after ack shows it
   again.
 - Who decides what: modules report checks (key, sev, title, detail, n, hold) each
@@ -123,6 +125,11 @@ Target: < 1% CPU, < 30 MiB RSS.
 - Grouped by unit + normalized message (numbers, ids, addresses -> placeholder):
   count, first seen, last seen.
 - Noise list applies. Grouping and noise rules are tested with fixtures from my host.
+- Audit volume 2026-10-20: key `mounts` (CIS rule) = 99% `exe=/usr/bin/bwrap` (2922 of
+  2941 in 2 h). Every Flatpak sandbox start: bubblewrap always creates a new mount
+  namespace, invisible from the host (bubblewrap README). Group by exe, noise list
+  candidate (phase 4 extends match to log groups). The CIS rule stays (no deviation):
+  the audit ring holds a week (hardening repo, 40 x 32 MiB).
 
 ## Privilege split
 

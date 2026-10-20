@@ -20,8 +20,10 @@ Per alert (key = "<module>/<check key>"):
 
 A module that fails to collect is not stepped: its alerts keep their state.
 Ack is not kept here. The UI keeps it, so the channel stays one-way.
+Noise list (core/noise.py): applied in active(), the alert is still tracked.
 """
 
+from core import noise as noisemod
 from core.module import SEV_RANK
 
 DEFAULT_HOLD = 60.0
@@ -65,12 +67,14 @@ def step(state: dict, module: str, checks: list, now: float) -> dict:
     return {"alerts": _trim(new, now)}
 
 
-def active(state: dict, now: float) -> list:
-    """Open and held alerts: worst first, open before held, newest first.
-    Each is a copy of its record plus `state`."""
-    out = [{**rec, "state": st} for rec in state["alerts"].values()
-           if (st := status(rec, now)) != "closed"]
-    out.sort(key=lambda r: (-SEV_RANK[r["sev"]], r["state"] != "open", -r["since"], r["key"]))
+def active(state: dict, now: float, noise=()) -> list:
+    """Open and held alerts. Each is a copy of its record plus `state` and
+    `noise` (reason from the noise list, else None). Order: noise last, worst
+    first, open before held, newest since first, then key."""
+    out = [{**rec, "state": st, "noise": noisemod.reason(noise, rec["key"], now)}
+           for rec in state["alerts"].values() if (st := status(rec, now)) != "closed"]
+    out.sort(key=lambda r: (r["noise"] is not None, -SEV_RANK[r["sev"]],
+                            r["state"] != "open", -r["since"], r["key"]))
     return out
 
 

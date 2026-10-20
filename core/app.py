@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from core import alerts as alertsmod
 from core import config as configmod
 from core import lookup as lookupmod
+from core import noise as noisemod
 from core import registry, render
 from core.module import validate
 from core.sanitize import display
@@ -68,11 +69,12 @@ def backoff(base: float, errors: int) -> float:
 
 
 class Core:
-    def __init__(self, loaded: list, clock=time.monotonic, wall=time.time):
+    def __init__(self, loaded: list, clock=time.monotonic, wall=time.time, noise=()):
         self.clock, self.wall = clock, wall
         self.runs = [Run(ld, ld.interval, ld.interval) for ld in loaded]
         self.feed = collections.deque(maxlen=FEED_MAX)   # newest first
         self.alerts = alertsmod.empty()                  # alert engine state
+        self.noise = tuple(noise)                        # core/noise.py entries
 
     def tick(self) -> bool:
         """Collect modules that are due. True if any was collected."""
@@ -204,6 +206,7 @@ def main(argv: list | None = None) -> int:
         return 2
     try:
         cfg = configmod.load()
+        noise = noisemod.load()            # before modules load: nothing to close on error
         loaded = registry.load(cfg)
     except configmod.ConfigError as e:
         print(f"sectop: config: {display(e)}", file=sys.stderr)
@@ -211,8 +214,8 @@ def main(argv: list | None = None) -> int:
     locale.setlocale(locale.LC_ALL, "")
     signal.signal(signal.SIGTERM, _term)
     try:
-        curses.wrapper(_ui, Core(loaded), UI(len(SCREENS), screen=start,
-                                             mask=cfg.mask_public_ips))
+        curses.wrapper(_ui, Core(loaded, noise=noise), UI(len(SCREENS), screen=start,
+                                                          mask=cfg.mask_public_ips))
     except (KeyboardInterrupt, Quit):
         pass
     finally:

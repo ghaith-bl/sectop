@@ -276,6 +276,7 @@ class TestMain(unittest.TestCase):
     def run_main(self, argv, cfg=None):
         cfg = cfg or types.SimpleNamespace(mask_public_ips=True)
         with mock.patch.object(app.configmod, "load", return_value=cfg), \
+             mock.patch.object(app.noisemod, "load", return_value=("entry",)), \
              mock.patch.object(app.registry, "load", return_value=[]), \
              mock.patch.object(app.registry, "close", return_value=[]), \
              mock.patch.object(app.locale, "setlocale"), \
@@ -294,6 +295,22 @@ class TestMain(unittest.TestCase):
         wrapper.assert_not_called()
         written = "".join(c.args[0] for c in err.write.call_args_list)
         self.assertIn("sectop: config: bad ?", written)
+
+    def test_noise_error(self):
+        with mock.patch.object(app.configmod, "load", return_value=types.SimpleNamespace()), \
+             mock.patch.object(app.noisemod, "load", side_effect=ConfigError("noise.toml: x")), \
+             mock.patch.object(app.registry, "load") as reg, \
+             mock.patch("sys.stderr") as err, \
+             mock.patch.object(app.curses, "wrapper") as wrapper:
+            self.assertEqual(app.main([]), 2)
+        wrapper.assert_not_called()
+        reg.assert_not_called()                          # no module loaded, nothing to close
+        written = "".join(c.args[0] for c in err.write.call_args_list)
+        self.assertIn("sectop: config: noise.toml: x", written)
+
+    def test_noise_to_core(self):
+        _, wrapper, _, _ = self.run_main([])
+        self.assertEqual(wrapper.call_args.args[1].noise, ("entry",))
 
     def test_start_screen(self):
         for argv, want in (([], 0), (["firewall"], 0), (["2"], 1), (["processes"], 2)):
