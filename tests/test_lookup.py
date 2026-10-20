@@ -120,10 +120,18 @@ class TestRdap(unittest.TestCase):
         doc, _ = self.run_main("193.0.6.139", {rdap.BOOT[4]: BOOT4})
         self.assertIn("no RDAP server", doc["error"])
 
+    def test_main_closes_http_error(self):
+        body = io.BytesIO(b"not found")
+        err = urllib.error.HTTPError(rdap.BOOT[4], 404, "Not Found", {}, body)
+        doc, _ = self.run_main("8.8.8.8", {rdap.BOOT[4]: err})
+        self.assertEqual(doc["error"], "HTTPError: HTTP Error 404: Not Found")
+        self.assertTrue(body.closed)
+
     def test_https_only_redirect(self):
         h = rdap.HttpsOnly()
-        with self.assertRaises(urllib.error.HTTPError):
+        with self.assertRaises(urllib.error.HTTPError) as cm:
             h.redirect_request(None, None, 302, "Found", {}, "http://rdap.example/ip/1")
+        cm.exception.close()                    # Python 3.14: ResourceWarning if left open
 
 
 class Run:

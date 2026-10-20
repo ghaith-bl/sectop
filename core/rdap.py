@@ -154,6 +154,8 @@ def main(argv=None, get=fetch) -> int:
         result = {"ok": True, "fields": pick(get(url)) + [("source", url)]}
     except (OSError, ValueError, KeyError, TypeError) as e:     # URLError, HTTPError: OSError
         result = {"ok": False, "error": f"{type(e).__name__}: {e}"[:MAX_VALUE]}
+        if isinstance(e, urllib.error.HTTPError):
+            e.close()                  # holds the response body; not left to the gc
     print(json.dumps(result))
     return 0
 
