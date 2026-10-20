@@ -7,7 +7,7 @@ Build one phase at a time. This file changes when a decision changes.
 
 One terminal tool for my host (Fedora Silverblue): network / firewall, logs + security
 posture, system. My own replacement for btop + top. Shows real problems, not noise, so I
-can decide from what is on screen. Read-only until the privilege split.
+can decide from what is on screen. Read-only until the privilege split (phase 3).
 
 ## Layers
 
@@ -113,11 +113,44 @@ Target: < 1% CPU, < 30 MiB RSS.
   count, first seen, last seen.
 - Noise list applies. Grouping and noise rules are tested with fixtures from my host.
 
+## Privilege split
+
+Why (2026-10-20): v1 runs as root from my login, so every command it runs matches the
+audit rule `root_cmds` (execve, euid 0, auid >= 1000). Boot 2026-10-19 17:09-21:49:
+402826 of 433116 journal entries = audit (93%), execve 4 wg : 3 nft : 2 ip : 1 ss :
+1 journalctl = one tick, ~2.9 h of sectop. Two problems:
+- my own polling hides real root commands
+- it pushes real records out of the audit.log ring (max_log_file 8 MB x num_logs 5)
+
+Not a fix: excluding these commands from the audit rules (anyone running them as root
+would be hidden too).
+
+Design (least privilege: NIST SP 800-53 / 800-171 AC-6, systemd.exec(5), capabilities(7)):
+- Collector = system service started by systemd, not from my login. loginuid stays
+  unset (pam_loginuid(8): set by login entry points), so rules with `auid>=1000` /
+  `auid!=-1` do not match: daemon events, not user events.
+- Not root: own user (`DynamicUser=` or a system user). Journal via
+  `SupplementaryGroups=systemd-journal` (journalctl(1): this group reads all journal files).
+- Capabilities only where the kernel requires them: `nft list` and `wg show` need
+  CAP_NET_ADMIN even to read. `AmbientCapabilities=` + the same `CapabilityBoundingSet=`.
+  CAP_NET_ADMIN can also change the firewall -> the part that holds it stays minimal:
+  fixed argv, output handed on, no parsing there.
+- Program names via `ss -p` need CAP_SYS_PTRACE (capabilities(7): /proc/pid/fd of other
+  users). Too strong for a monitor -> program from audit connect records (journal, same
+  group) or uid only.
+- `NoNewPrivileges=yes`, sandboxing options on ("as many of these options ... as is
+  possible", systemd.exec(5)), checked with `systemd-analyze security <unit>`.
+- UI = my user, no sudo. Reads collector output (socket or /run file, group read).
+- whois child stays separate: own user, no capabilities.
+
+Until then: `/etc/sectop/config.toml` `[modules.firewall] interval = 6.0`, fewer
+commands per tick (slow sources on their own interval).
+
 ## Actions (last phase)
 
 Stop / restart a service, kill a process. Only after the privilege split:
 
-- Collector = root service. UI = my user, unprivileged.
+- Collector = non-root service (see Privilege split). UI = my user, unprivileged.
 - Actions run as my user via `systemctl`; polkit asks for the password.
 - Confirm before every action. Deny list never touched: journald, NetworkManager,
   firewalld, hostfw, Proton daemon, sshd if present.
@@ -135,6 +168,7 @@ Stop / restart a service, kill a process. Only after the privilege split:
 1. Core v2 UI: screens (whole terminal, start screen), boxes, focus, scroll, alert bar.
    Firewall screen only. Firewall: hide zero counters, audit box, rollback expiry.
 2. Alert engine + noise list. Firewall checks move to it.
-3. Logs + posture, and system (read-only). Both required, order free.
-4. Privilege split (root collector service, unprivileged UI).
+3. Privilege split (non-root collector service, unprivileged UI). Moved before logs
+   2026-10-20: the logs screen reads the audit log and must not show sectop's own commands.
+4. Logs + posture, and system (read-only). Both required, order free.
 5. Actions.
