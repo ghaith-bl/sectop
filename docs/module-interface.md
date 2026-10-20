@@ -341,6 +341,23 @@ enabled = true
 interval = 2.0
 ```
 
+## State files (`core/statefile.py`)
+
+JSON files between sectop's parts (docs/architecture.md, Privilege split).
+
+- `/run/sectop/state.json`: collector -> UI. `{v, ts, interval, modules, feed, alerts}`:
+  the module view, the events feed (newest first) and the active alerts
+  (`core/alerts.py` active(), noise applied). `interval` = longest module interval.
+- `/run/sectop-net/<name>.json`: net unit -> collector, one command result
+  (`core/netd.py`).
+- Write: temp file in the same directory, `fchmod`, then rename over the old file
+  (atomic): a reader never sees half a file. JSON compact, ASCII only, no NaN.
+- Read: same file checks as config.toml (owner, not group/other writable, regular file,
+  `O_NOFOLLOW`, directory owner), max 8 MiB.
+- The UI never trusts the content: `check_state()` validates every field it draws.
+  Panels pass the Snapshot rules again (core/module.py), alerts and feed events their
+  own. Anything wrong -> the whole file is refused, the last good one stays.
+
 ## Noise list (`core/noise.py`)
 
 `/etc/sectop/noise.toml`. Known, accepted alerts, kept out of the alert bar.

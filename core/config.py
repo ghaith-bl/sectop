@@ -47,9 +47,10 @@ def _check_owner(st: os.stat_result, what: str, owner_uid: int) -> None:
         raise ConfigError(f"{what}: group/other writable")
 
 
-def read_file(path: str, owner_uid: int) -> bytes | None:
+def read_file(path: str, owner_uid: int, max_size: int = MAX_SIZE) -> bytes | None:
     """Read the file safely. None if it (or its directory) does not exist.
-    Also used for /etc/sectop/noise.toml (core/noise.py)."""
+    Also used for /etc/sectop/noise.toml (core/noise.py) and the state files
+    between sectop's parts (core/statefile.py, larger max_size)."""
     parent = os.path.dirname(os.path.abspath(path))
     try:
         pst = os.lstat(parent)
@@ -70,13 +71,13 @@ def read_file(path: str, owner_uid: int) -> bytes | None:
         if not stat.S_ISREG(st.st_mode):
             raise ConfigError(f"{path}: not a regular file")
         _check_owner(st, path, owner_uid)
-        if st.st_size > MAX_SIZE:
-            raise ConfigError(f"{path}: larger than {MAX_SIZE} bytes")
-        data = os.read(fd, MAX_SIZE + 1)
+        if st.st_size > max_size:
+            raise ConfigError(f"{path}: larger than {max_size} bytes")
+        data = os.read(fd, max_size + 1)
     finally:
         os.close(fd)
-    if len(data) > MAX_SIZE:
-        raise ConfigError(f"{path}: larger than {MAX_SIZE} bytes")
+    if len(data) > max_size:
+        raise ConfigError(f"{path}: larger than {max_size} bytes")
     return data
 
 
