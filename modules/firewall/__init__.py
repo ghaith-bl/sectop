@@ -852,7 +852,7 @@ def _audit_detail(st: State, e, verdict: str) -> list:
 
 def _conns(st: State, checks: list) -> tuple:
     """-> (open sockets, error or '')."""
-    res = st.cmd("ss", "-tunapH", "state", "established")
+    res = st.cmd("ss", "-tunaH", "--cgroup", "state", "established")
     if res.rc != 0:
         _chk(checks, "ss", "warn", "ss error", _fail(res))
         return [], _fail(res)

@@ -197,6 +197,51 @@ class TestConns(unittest.TestCase):
         self.assertEqual(len(cs), 2)
 
 
+class TestCgroup(unittest.TestCase):
+    """ss --cgroup: program = innermost systemd unit (no CAP_SYS_PTRACE)."""
+
+    def test_fixture(self):
+        cs = conns.parse(fix("ss-cgroup.txt"))
+        self.assertEqual([c.procs for c in cs],
+                         [("NetworkManager",), ("com.brave.Browser",), ("com.brave.Browser",),
+                          ("systemd-resolved",), ("chronyd",), ("vte-spawn",), ()])
+        idx = conns.index(cs)
+        self.assertEqual(idx[("tcp", "10.2.0.2", "33146", "198.51.100.20", "443")],
+                         ("com.brave.Browser",))
+
+    def test_program(self):
+        app = "/user.slice/user-1000.slice/user@1000.service/app.slice/"
+        cases = {
+            app + "app-flatpak-com.brave.Browser-2324164128.scope": "com.brave.Browser",
+            app + "app-gnome-org.gnome.Ptyxis-4711.scope": "org.gnome.Ptyxis",
+            app + "app-firefox-12.scope": "firefox",                         # no launcher
+            app + "app-gnome-foo\\x2dbar@autostart.service": "foo-bar",       # escaped dash
+            app + "app-org.example.Tool.service": "org.example.Tool",
+            app + "xdg-document-portal.service": "xdg-document-portal",
+            "/system.slice/system-getty.slice/getty@tty1.service": "getty",
+            "/user.slice/user-1000.slice/session-3.scope": "session",
+            "/machine.slice/machine-qemu\\x2d1\\x2dlab.scope/libvirt": "machine-qemu-1-lab",
+            "/x/libpod-" + "a" * 64 + ".scope/container": "libpod",
+            "unreachable:1f": None, "/": None, "/user.slice": None, "": None,
+        }
+        for path, want in cases.items():
+            self.assertEqual(conns.program(path), want, path)
+
+    def test_ss_p_wins(self):
+        line = ('tcp 0 0 1.2.3.4:1 5.6.7.8:2 users:(("curl",pid=1,fd=3)) '
+                "cgroup:/system.slice/x.service\n")
+        self.assertEqual(conns.parse(line)[0].procs, ("curl",))
+
+    def test_module_asks_with_cgroup(self):
+        host = Host()
+        st = fw.State(run=host, net=host)
+        fw._conns(st, [])
+        argv = host.calls[-1]
+        self.assertIn("--cgroup", argv)
+        self.assertFalse(any(a.startswith("-") and "p" in a and not a.startswith("--")
+                             for a in argv[1:]), argv)                    # no -p
+
+
 class TestFlow(unittest.TestCase):
     def flow(self, **f):
         return journal.flow(journal.Entry(0, "HFW-OUT-NEW", "out_new", f, ()))
@@ -1013,7 +1058,7 @@ class TestCollect(Base):
             "nft -j list set inet hostfw wg_fwmark",
             "ip -j -4 route show default",
             "ip -j -6 route show default",
-            "ss -tunapH state established",
+            "ss -tunaH --cgroup state established",
         ])
         self.assertFalse(any("dump" in a for a in argvs))           # never prints private key
 

@@ -20,7 +20,7 @@ Every tick (5 commands):
 | counters + live mode | `nft -j -t list table inet hostfw` |
 | log lines | `journalctl _TRANSPORT=kernel -o json --output-fields=MESSAGE -q --no-pager --after-cursor=<c>` |
 | tunnel | `wg show proton0 latest-handshakes`, `transfer` |
-| open sockets (peers, prog) | `ss -tunapH state established` |
+| open sockets (peers, prog) | `ss -tunaH --cgroup state established` |
 
 Slow (every 30 s, and at once when the tunnel goes up / down):
 
@@ -146,7 +146,7 @@ Title: `programs <rows>  <n> with open sockets`.
 
 | column | value |
 |---|---|
-| prog | program name from `ss`; `?` = no ss match (one row per uid); `(inbound)`, `vm`, `(forward)` = lines without a program |
+| prog | program from the socket's cgroup (`ss --cgroup`, see below); `?` = no ss match (one row per uid); `(inbound)`, `vm`, `(forward)` = lines without a program |
 | uid | UIDs of its lines (OUT rules with `skuid`), max 3 then `+`, else `-` |
 | open | open sockets now |
 | out | allowed lines (new flows, exceptions), out and forward |
@@ -163,8 +163,19 @@ Title: `programs <rows>  <n> with open sockets`.
   unknown programs (`?` when no uid); `zone` for (inbound), `vm`, `fwd_in` for (forward).
   Only when it is printable ASCII (the filter prompt's chars): else no filter.
 - Same limit as the audit `prog` column: a flow that closes before the next `ss` poll
-  (6 s) has no program. Blocked flows: mostly `?`. Full fix: audit `connect` records after
-  the privilege split (docs/architecture.md).
+  (6 s) has no program. Blocked flows: mostly `?`. No audit `connect` rule (volume).
+
+Program name (2026-10-20, privilege split): the collector runs as user sectop, `ss -p`
+would need CAP_SYS_PTRACE. `ss --cgroup` works without privilege (tested as my user:
+NetworkManager, systemd-resolved, libvirtd, chronyd, Brave). Program = innermost systemd
+unit of the socket's cgroup (`conns.program()`):
+- desktop app: `app[-<launcher>]-<ApplicationID>-<RANDOM>.scope` or
+  `...[@<RANDOM>].service` (systemd.io DESKTOP_ENVIRONMENTS) -> the ApplicationID, e.g.
+  `com.brave.Browser`. One word: `x` works for every program.
+- other units: name without `.service` / `.scope`, template instance and random part
+  (`NetworkManager`, `chronyd`, `getty`, `session`). `\xNN` escapes decoded.
+- terminal commands: the tab's scope, `vte-spawn` (not `curl`): the price of no ptrace.
+- `cgroup:unreachable:<id>` or no unit -> no program (`?` row).
 
 ## Row addresses (`ip`, key `w` = whois)
 
@@ -304,3 +315,7 @@ not armed, no check. `hostfw status` asks systemd for the timer, so it is always
   nft-counters.json + nft-enforce.json / nft-observe.json (same shape, known values).
 - journal-audit.json: synthetic, one line per kind (format from hostfw.nft log rules),
   OUT-NEW tcp line = brave flow in ss.txt.
+- ss-cgroup.txt: ss.txt lines with the cgroup paths my host printed 2026-10-20
+  (`ss --cgroup` as my user: NetworkManager, systemd-resolved, chronyd, Brave scope);
+  vte-spawn and unreachable lines synthetic. To be replaced by a full capture at the live
+  test.

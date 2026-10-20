@@ -1,0 +1,7 @@
+udp 0      0      192.168.8.102%wlo1:68      192.168.8.1:67  cgroup:/system.slice/NetworkManager.service
+udp 0      0                10.2.0.2:37436 203.0.113.10:443 cgroup:/user.slice/user-1000.slice/user@1000.service/app.slice/app-flatpak-com.brave.Browser-2324164128.scope
+tcp 0      0                10.2.0.2:33146  198.51.100.20:443 cgroup:/user.slice/user-1000.slice/user@1000.service/app.slice/app-flatpak-com.brave.Browser-2324164128.scope
+udp 0      0           10.2.0.2:52011     10.2.0.1:53 cgroup:/system.slice/systemd-resolved.service
+udp 0      0           10.2.0.2:123  198.51.100.123:123 cgroup:/system.slice/chronyd.service
+tcp 0      0           10.2.0.2:40210   192.0.2.80:443 cgroup:/user.slice/user-1000.slice/user@1000.service/app.slice/app-gnome-org.gnome.Ptyxis-4711.scope/vte-spawn-00000000-0000-0000-0000-000000000000.scope
+tcp 0      0           10.2.0.2:40222   192.0.2.80:443 cgroup:unreachable:1f2e
