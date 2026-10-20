@@ -84,6 +84,32 @@ class TestReader(unittest.TestCase):
         r.poll()
         self.assertIn("user sectop missing", r.current(NOW)[2][0]["detail"])
 
+    def test_alert_title_says_why(self):
+        r = self.reader(owner=None)
+        r.poll()
+        a = r.current(NOW)[2][0]
+        self.assertEqual(a["title"], "collector: " + a["detail"])
+        self.assertTrue(a["title"].startswith("collector: user sectop missing"))
+
+    def test_owner_looked_up_until_found(self):
+        uids = iter([None, None, 990])
+        calls = []
+
+        def lookup():
+            calls.append(1)
+            return next(uids)
+
+        self.disk = Disk()
+        r = app.Reader("/x", lookup, load=self.disk.load, stat=self.disk.stat)
+        self.disk.set(doc(summary="later"))
+        r.poll()
+        r.poll()
+        self.assertIsNone(r.state)
+        r.poll()                                             # user created meanwhile
+        self.assertEqual(r.current(NOW)[0][0]["summary"], "later")
+        r.poll()
+        self.assertEqual(len(calls), 3)                      # found: not asked again
+
     def test_not_in_group_yet(self):
         def stat(path):
             raise PermissionError(13, "Permission denied")

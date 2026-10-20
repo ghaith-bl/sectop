@@ -48,24 +48,35 @@ def owner_uid(user: str = COLLECTOR_USER) -> int | None:
 
 
 def collector_alert(problem: str, now: float) -> dict:
-    """An alert like core/alerts.py active() makes, for the alert bar."""
+    """An alert like core/alerts.py active() makes, for the alert bar. The title
+    says why: the bar shows only titles (first install 2026-10-20: "no data" alone
+    did not say that user sectop was missing)."""
     return {"key": ALERT_KEY, "module": "core", "sev": "crit",
-            "title": "collector: no data", "detail": problem, "count": 1,
+            "title": f"collector: {problem}", "detail": problem, "count": 1,
             "first": now, "since": now, "last": now, "hold": 0.0, "true": True,
             "state": "open", "noise": None}
 
 
 class Reader:
     """Last good state.json. poll() reads it again when the file changed
-    (inode, mtime, size). A bad file is refused whole; the last good stays."""
+    (inode, mtime, size). A bad file is refused whole; the last good stays.
+    owner: uid of user sectop, or a function that looks it up (asked again on
+    every poll while it is missing: the install may create it while the UI runs)."""
 
-    def __init__(self, path: str = STATE_PATH, owner: int | None = None,
-                 load=statefile.load, stat=os.stat):
-        self.path, self.owner = path, owner
+    def __init__(self, path: str = STATE_PATH, owner=None, load=statefile.load, stat=os.stat):
+        self.path = path
+        self._owner = owner if callable(owner) else (lambda: owner)
+        self._uid = None
         self._load, self._stat = load, stat
         self.state = None            # checked state (core/statefile.py check_state)
         self.error = None            # last read problem
         self.sig = None
+
+    @property
+    def owner(self) -> int | None:
+        if self._uid is None:
+            self._uid = self._owner()
+        return self._uid
 
     def poll(self) -> bool:
         """True if something changed (new state or new problem)."""
@@ -211,7 +222,7 @@ def main(argv: list | None = None) -> int:
     locale.setlocale(locale.LC_ALL, "")
     signal.signal(signal.SIGTERM, _term)
     try:
-        curses.wrapper(_ui, Reader(owner=owner_uid()),
+        curses.wrapper(_ui, Reader(owner=owner_uid),
                        UI(len(SCREENS), screen=start, mask=cfg.mask_public_ips))
     except (KeyboardInterrupt, Quit):
         pass

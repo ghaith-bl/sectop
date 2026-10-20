@@ -186,8 +186,10 @@ A condition that is not true any more is left out.
   Disabled -> shown as OFF.
 - Collector -> UI: `/run/sectop/state.json` (State files) after every collect and every
   5 s. UI (`core/app.py`): no new state for 3 x the longest module interval (min 15 s),
-  no file or a bad file -> crit alert `core/collector` "collector: no data", last good
-  data kept, modules marked stale (status unknown).
+  no file, a bad file, user sectop missing or no access -> crit alert `core/collector`
+  "collector: <why>" (the bar shows titles only, so the title says why), last good data
+  kept, modules marked stale (status unknown). User sectop is looked up again on every
+  poll until it exists (install while the UI runs).
 - Collector and UI refuse to run as root (rc 2).
 
 ## Screen (`core/render.py`, `core/screens.py`, `core/ui.py`)
