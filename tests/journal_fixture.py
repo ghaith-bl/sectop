@@ -6,13 +6,15 @@ Stays in the repo (install.sh drops tests/). Run as my login user.
       | python3 -I tests/journal_fixture.py OUTDIR [--name NAME] [--drop-key KEY]...
 
 - Sections: an entry with SYSLOG_IDENTIFIER=sectop-fix (`logger -t sectop-fix NAME`)
-  starts section NAME -> OUTDIR/NAME.json. Entries before the first marker are
-  dropped. --name NAME: no markers, all entries -> OUTDIR/NAME.json.
+  starts section NAME -> OUTDIR/NAME.json. The same marker again continues that
+  section (logger prints nothing, a second press happens). Entries before the
+  first marker are dropped. --name NAME: no markers, all entries -> OUTDIR/NAME.json.
 - Per entry: fields not in FIELDS dropped (machine id, boot id, host name ...),
   cursor renumbered, HFW-* kernel lines dropped (firewall fixtures exist).
 - Masked in every value, also inside audit hex (proctitle, argv): public IPs ->
-  documentation ranges (same address, same mask), MACs, login name, real name,
-  host name, machine id, boot id, USB serial numbers.
+  documentation ranges (same address, same mask), MACs (also the byte dump of a
+  kernel `ll header:` line), login name, real name, host name, machine id, boot id,
+  USB serial numbers. Names that are common log words (null, root ...) stay.
 - --drop-key KEY: audit events (same _AUDIT_ID) whose SYSCALL key is KEY are left
   out (volume). Still counted in the report.
 - Report on stderr: per section entries, span, audit events by key (before drop),
@@ -42,7 +44,11 @@ FIELDS = (
     "MESSAGE",
 )
 
-GENERIC_HOSTS = {"", "localhost", "localhost-live", "fedora"}
+# Words that are also normal log text (/dev/null, key=(null), USER=root): masking
+# them would break the fixture, and they tell nothing about me.
+COMMON = {"", "null", "root", "user", "admin", "nobody", "guest", "test", "none", "true",
+          "false", "kernel", "audit", "host", "name", "real", "localhost", "localhost-live",
+          "fedora"}
 DOC4 = tuple(f"{net}.{i}" for net in ("203.0.113", "198.51.100", "192.0.2")
              for i in range(1, 255))
 
@@ -50,6 +56,7 @@ IP4_RE = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?!\w|\.\d)")
 COLON_RE = re.compile(r"(?<![\w:.])[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f.]*){2,}(?![\w:])")
 HEX_RE = re.compile(r"(?<==)(?:[0-9A-F]{2}){2,}(?![0-9A-Za-z])")
 SERIAL_RE = re.compile(r"(?<=SerialNumber: )\S+")
+LL_RE = re.compile(r"(?<=ll header: )([0-9a-fA-F]+:)((?: [0-9a-fA-F]{2})+)")
 KEY_RE = re.compile(r'\bkey=(?:"([^"]*)"|\(null\)|((?:[0-9A-F]{2})+))')
 KEEP_MACS = {"00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff"}
 
@@ -81,6 +88,7 @@ class Masker:
         return self._plain(HEX_RE.sub(self._hex, s))
 
     def _plain(self, s: str) -> str:
+        s = LL_RE.sub(self._ll, s)
         s = COLON_RE.sub(self._colon, s)
         s = IP4_RE.sub(self._ip4, s)
         s = SERIAL_RE.sub(lambda m: self._hit("serial", "SERIAL"), s)
@@ -144,6 +152,12 @@ class Masker:
         rest = g[len(out) * 6:]
         return ":".join(out + rest)
 
+    def _ll(self, m) -> str:
+        """ll header: 00000000: <dst 6> <src 6> <type 2> (martian log, print_hex_dump)."""
+        b = m.group(2).split()
+        macs = self._macs(":".join(b[:12])).split(":") if len(b) >= 12 else b[:12]
+        return m.group(1) + "".join(" " + x for x in macs + b[12:])
+
     def _mac(self, mac: str) -> str:
         if mac in KEEP_MACS or mac.startswith("02:00:00:00:"):
             return mac
@@ -203,23 +217,23 @@ def load(lines) -> tuple:
 
 
 def split(entries: list, name: str | None) -> tuple:
-    """-> ({section: [entries]}, entries before the first marker)."""
+    """-> ({section: [entries]}, {section: markers seen}, entries before the first
+    marker). A repeated marker continues its section."""
     if name is not None:
-        return {_check_name(name): [e for e in entries if not _marker(e)]}, 0
-    out, cur, before = {}, None, 0
+        return {_check_name(name): [e for e in entries if not _marker(e)]}, {name: 0}, 0
+    out, marks, cur, before = {}, collections.Counter(), None, 0
     for e in entries:
         if _marker(e):
             cur = _check_name(message(e).strip())
-            if cur in out:
-                raise FixtureError(f"marker twice: {cur}")
-            out[cur] = []
+            out.setdefault(cur, [])
+            marks[cur] += 1
         elif cur is None:
             before += 1
         else:
             out[cur].append(e)
     if not out:
         raise FixtureError(f"no markers (logger -t {MARKER} NAME); one section: --name NAME")
-    return out, before
+    return out, dict(marks), before
 
 
 def drop_events(entries: list, drop: tuple) -> tuple:
@@ -262,7 +276,7 @@ def _span(entries: list) -> int:
 def convert(lines, masker: Masker, name: str | None = None, drop: tuple = ()) -> tuple:
     """-> ({section: [clean entries]}, report)."""
     entries, bad = load(lines)
-    raw, before = split(entries, name)
+    raw, marks, before = split(entries, name)
     rep = {"bad": bad, "before": before, "hfw": 0, "sections": {}}
     out = {}
     for sec, es in raw.items():
@@ -276,7 +290,7 @@ def convert(lines, masker: Masker, name: str | None = None, drop: tuple = ()) ->
             kept.append(clean(e, masker, len(kept) + 1))
         out[sec] = kept
         rep["sections"][sec] = {"entries": len(kept), "span": span, "events": events,
-                                "dropped": dropped}
+                                "dropped": dropped, "markers": marks[sec]}
     rep["masked"] = dict(masker.n)
     return out, rep
 
@@ -299,7 +313,9 @@ def report(rep: dict, out) -> None:
     for sec, r in rep["sections"].items():
         ev = ", ".join(f"{k} {n}" for k, n in sorted(r["events"].items(),
                                                      key=lambda kv: (-kv[1], kv[0])))
-        print(f"{sec}: {r['entries']} entries, {r['span']} s, {r['dropped']} events dropped"
+        again = f" ({r['markers']} markers)" if r["markers"] > 1 else ""
+        print(f"{sec}{again}: {r['entries']} entries, {r['span']} s, "
+              f"{r['dropped']} events dropped"
               + (f" | audit events by key: {ev}" if ev else ""), file=out)
     print(f"dropped: {rep['before']} before first marker, {rep['hfw']} HFW lines, "
           f"{rep['bad']} bad lines", file=out)
@@ -308,30 +324,41 @@ def report(rep: dict, out) -> None:
           file=out)
 
 
-def host_names() -> dict:
-    """Text to mask -> replacement, read from this host and my login."""
-    pw = pwd.getpwuid(os.getuid())
-    names = {pw.pw_name: "user"}
-    real = pw.pw_gecos.split(",")[0].strip()
-    if real and real != pw.pw_name:
-        names[real] = "Real Name"
+def names_for(login: str, gecos: str, node: str, ids: tuple) -> dict:
+    """Text to mask -> replacement. Common words (COMMON) are never masked."""
+    names = {}
+
+    def add(text, rep):
+        if text.lower() not in COMMON:
+            names.setdefault(text, rep)
+
+    add(login, "user")
+    real = gecos.split(",")[0].strip()
+    if real and real != login:
+        add(real, "Real Name")
         for part in real.split():
             if len(part) >= 3:
-                names.setdefault(part, "Name")
-    node = os.uname().nodename
-    for h in (node, node.split(".")[0]):
-        if h.lower() not in GENERIC_HOSTS:
-            names.setdefault(h, "host")
-    for path in ("/etc/machine-id", "/proc/sys/kernel/random/boot_id"):
-        try:
-            with open(path, encoding="ascii") as f:
-                v = f.read().strip()
-        except (OSError, ValueError):
-            continue
+                add(part, "Name")
+    add(node, "host")
+    add(node.split(".")[0], "host")
+    for v in ids:
         if len(v) >= 32:
             names[v] = re.sub(r"[0-9a-fA-F]", "0", v)
             names[v.replace("-", "")] = "0" * 32
     return names
+
+
+def host_names() -> dict:
+    """names_for() my login and this host (machine id, boot id)."""
+    pw = pwd.getpwuid(os.getuid())
+    ids = []
+    for path in ("/etc/machine-id", "/proc/sys/kernel/random/boot_id"):
+        try:
+            with open(path, encoding="ascii") as f:
+                ids.append(f.read().strip())
+        except (OSError, ValueError):
+            continue
+    return names_for(pw.pw_name, pw.pw_gecos, os.uname().nodename, tuple(ids))
 
 
 def main(argv=None, stdin=None, stdout=None, stderr=None, names=None) -> int:

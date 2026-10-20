@@ -66,6 +66,17 @@ class TestMasker(unittest.TestCase):
             "gw 02:00:00:00:00:01 again 02:00:00:00:00:01 zero 00:00:00:00:00:00 "
             "MAC=02:00:00:00:00:02:02:00:00:00:00:03:08:00"))
 
+    def test_ll_header(self):
+        m = jf.Masker(NAMES)
+        s = ("ll header: 00000000: 26 83 57 d7 e5 ad 42 4d 93 61 47 b3 08 00 | "
+             "ll header: 00000000: ff ff ff ff ff ff 42 4d 93 61 47 b3 08 06 | "
+             "ll header: 00000000: 01 02")
+        self.assertEqual(m.text(s), (
+            "ll header: 00000000: 02 00 00 00 00 01 02 00 00 00 00 02 08 00 | "
+            "ll header: 00000000: ff ff ff ff ff ff 02 00 00 00 00 02 08 06 | "
+            "ll header: 00000000: 01 02"))
+        self.assertEqual(m.n["mac"], 3)
+
     def test_names(self):
         m = jf.Masker(NAMES)
         s = ('acct="alice" /home/alice/x unix-user:alice alicex box1.lan box1 '
@@ -95,6 +106,30 @@ class TestMasker(unittest.TestCase):
         self.assertEqual(m.value(["alice", "x"]), ["user", "x"])
         self.assertIsNone(m.value(None))
         self.assertEqual(m.value(7), 7)
+
+
+class TestNamesFor(unittest.TestCase):
+    def test_names(self):
+        mid = "ab" * 16
+        boot = "12345678-9abc-def0-1234-56789abcdef0"
+        n = jf.names_for("alice", "Alice Doe,,,", "box1.lan", (mid, boot, "short"))
+        self.assertEqual(n["alice"], "user")
+        self.assertEqual(n["Alice Doe"], "Real Name")
+        self.assertEqual(n["Doe"], "Name")
+        self.assertEqual(n["box1.lan"], "host")
+        self.assertEqual(n["box1"], "host")
+        self.assertEqual(n[mid], "0" * 32)
+        self.assertEqual(n[boot], "00000000-0000-0000-0000-000000000000")
+        self.assertEqual(n[boot.replace("-", "")], "0" * 32)
+        self.assertNotIn("short", n)
+
+    def test_common_words_stay(self):
+        n = jf.names_for("null", "", "fedora", ())
+        self.assertEqual(n, {})
+        m = jf.Masker(n)
+        s = 'key=(null) a1="/dev/null" host fedora'
+        self.assertEqual(m.text(s), s)
+        self.assertEqual(jf.names_for("root", "Root", "localhost", ()), {})
 
 
 class TestAuditKeys(unittest.TestCase):
@@ -149,6 +184,15 @@ class TestConvert(unittest.TestCase):
         self.assertEqual(r["events"], {"mounts": 1, "root_cmds": 1, "-": 1})
         self.assertEqual(r["dropped"], 1)
 
+    def test_repeated_marker_continues(self):
+        es = [marker(1, "a"), ent(2, "one"), marker(3, "a"), ent(4, "two"), marker(5, "b"),
+              ent(6, "three"), marker(7, "a"), ent(8, "four")]
+        out, rep = self.run_convert(es)
+        self.assertEqual([e["MESSAGE"] for e in out["a"]], ["one", "two", "four"])
+        self.assertEqual([e["MESSAGE"] for e in out["b"]], ["three"])
+        self.assertEqual(rep["sections"]["a"]["markers"], 3)
+        self.assertEqual(rep["sections"]["b"]["markers"], 1)
+
     def test_name_option(self):
         es = [ent(1, "avc: denied"), marker(2, "x"), ent(3, "avc: denied")]
         out, rep = self.run_convert(es, name="avc")
@@ -157,8 +201,7 @@ class TestConvert(unittest.TestCase):
         self.assertEqual(rep["before"], 0)
 
     def test_errors(self):
-        cases = ([ent(1, "x")], [marker(1, "Sudo X")], [marker(1, "a"), marker(2, "a")],
-                 [marker(1, "a" * 41)])
+        cases = ([ent(1, "x")], [marker(1, "Sudo X")], [marker(1, "a" * 41)])
         for es in cases:
             with self.assertRaises(jf.FixtureError, msg=repr(es)):
                 self.run_convert(es)
@@ -195,6 +238,7 @@ class TestMain(unittest.TestCase):
         rc, err = self.run_main(es)
         self.assertEqual(rc, 0, err)
         self.assertEqual(os.listdir(self.out), ["sudo.json"])
+        self.assertNotIn("markers", err)
         raw = self.read("sudo.json")
         raw.decode("ascii")
         self.assertEqual(json.loads(raw)["MESSAGE"], "caf\u00e9 user")
