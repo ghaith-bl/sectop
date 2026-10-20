@@ -1,166 +1,142 @@
-"""sectop main loop.
+"""sectop UI: draws what the collector wrote and handles keys.
 
-v1: single thread. Each loop: collect modules that are due, draw,
-wait for a key (TICK_MS). Error / backoff / stale / slow rules are
-in docs/module-interface.md (Errors). Core is pure logic with an
-injected clock so the rules can be tested without a terminal.
-After each good collect the module's checks go to the alert engine
-(core/alerts.py, wall clock).
+Runs as my user, never as root, never collects. Reads
+/run/sectop/state.json (core/collector.py writes it, core/statefile.py
+checks it) when the file changed. One-way: the UI never writes to the
+collector; ack stays here (core/ui.py). No update for a while or a bad
+file -> a crit alert "collector: ..." on top of the last good data.
 
-Dev run (from repo root): sudo python3 -B -m core.app [SCREEN]
+v1: single thread. Each loop: read the state file if it changed, draw,
+wait for a key (TICK_MS). whois: core/lookup.py (socket service).
+
+Run: sectop [SCREEN]   (launcher /usr/local/bin/sectop, docs/install.md)
 SCREEN = name or number from core/screens.py, default 1.
 """
 
-import collections
 import curses
 import locale
+import os
+import pwd
 import signal
 import sys
 import time
-from dataclasses import dataclass
 
-from core import alerts as alertsmod
 from core import config as configmod
 from core import lookup as lookupmod
-from core import noise as noisemod
-from core import registry, render
-from core.module import validate, worst
+from core import render, statefile
 from core.sanitize import display
 from core.screens import SCREENS, find, names
 from core.ui import UI
 
-FEED_MAX = 500
-STALE_FACTOR = 3         # last good older than 3 x interval -> unknown
-BACKOFF_AFTER = 3        # errors in a row before the interval grows
-BACKOFF_MAX = 60.0
+STATE_PATH = "/run/sectop/state.json"
+COLLECTOR_USER = "sectop"
 TICK_MS = 250
+STALE_MIN = 15.0         # seconds without a new state -> collector alert
+STALE_FACTOR = 3         # ... or 3 x the longest module interval, if longer
+ALERT_KEY = "core/collector"
 
 
 class Quit(BaseException):
-    """Raised by the SIGTERM handler. BaseException so module error
-    handling (Exception, SystemExit) cannot swallow it."""
+    """Raised by the SIGTERM handler."""
 
 
-@dataclass
-class Run:
-    """Runtime state of one module."""
-    loaded: registry.Loaded
-    base: float                 # configured interval
-    interval: float             # current, grows with backoff
-    due: float = 0.0            # monotonic time of next collect
-    errors: int = 0             # errors in a row
-    error: str | None = None    # last error, None after a success
-    snap: dict | None = None    # last good (validated) Snapshot
-    good_at: float | None = None
-    slow: bool = False
+def owner_uid(user: str = COLLECTOR_USER) -> int | None:
+    try:
+        return pwd.getpwnam(user).pw_uid
+    except KeyError:
+        return None
 
 
-def _err(e: BaseException) -> str:
-    msg = str(e)
-    return f"{type(e).__name__}: {msg}" if msg else type(e).__name__
+def collector_alert(problem: str, now: float) -> dict:
+    """An alert like core/alerts.py active() makes, for the alert bar."""
+    return {"key": ALERT_KEY, "module": "core", "sev": "crit",
+            "title": "collector: no data", "detail": problem, "count": 1,
+            "first": now, "since": now, "last": now, "hold": 0.0, "true": True,
+            "state": "open", "noise": None}
 
 
-def backoff(base: float, errors: int) -> float:
-    """Interval after `errors` errors in a row."""
-    if errors < BACKOFF_AFTER:
-        return base
-    grown = base * 2 ** (errors - BACKOFF_AFTER + 1)
-    return max(base, min(BACKOFF_MAX, grown))
+class Reader:
+    """Last good state.json. poll() reads it again when the file changed
+    (inode, mtime, size). A bad file is refused whole; the last good stays."""
 
+    def __init__(self, path: str = STATE_PATH, owner: int | None = None,
+                 load=statefile.load, stat=os.stat):
+        self.path, self.owner = path, owner
+        self._load, self._stat = load, stat
+        self.state = None            # checked state (core/statefile.py check_state)
+        self.error = None            # last read problem
+        self.sig = None
 
-class Core:
-    def __init__(self, loaded: list, clock=time.monotonic, wall=time.time, noise=()):
-        self.clock, self.wall = clock, wall
-        self.runs = [Run(ld, ld.interval, ld.interval) for ld in loaded]
-        self.feed = collections.deque(maxlen=FEED_MAX)   # newest first
-        self.alerts = alertsmod.empty()                  # alert engine state
-        self.noise = tuple(noise)                        # core/noise.py entries
-
-    def tick(self) -> bool:
-        """Collect modules that are due. True if any was collected."""
-        done = False
-        for r in self.runs:
-            if r.loaded.active and self.clock() >= r.due:
-                self._collect(r)
-                done = True
-        return done
-
-    def _collect(self, r: Run) -> None:
-        start = self.clock()
+    def poll(self) -> bool:
+        """True if something changed (new state or new problem)."""
+        if self.owner is None:
+            return self._problem(f"user {COLLECTOR_USER} missing: sectop not installed? "
+                                 "(docs/install.md)")
         try:
-            snap = validate(r.loaded.mod.collect(r.loaded.state))
-        except (Exception, SystemExit) as e:
-            end = self.clock()
-            r.errors += 1
-            r.error = _err(e)
-            r.interval = backoff(r.base, r.errors)
+            st = self._stat(self.path)
+        except FileNotFoundError:
+            self.sig = None
+            return self._problem(f"{self.path} missing: is sectop.service running?")
+        except PermissionError:
+            self.sig = None
+            return self._problem(f"{self.path}: permission denied: my user in group "
+                                 f"{COLLECTOR_USER}? (log out and in after install)")
+        except OSError as e:
+            self.sig = None
+            return self._problem(f"{self.path}: {e.strerror}")
+        sig = (st.st_ino, st.st_mtime_ns, st.st_size)
+        if sig == self.sig:
+            return False
+        self.sig = sig
+        try:
+            doc = self._load(self.path, self.owner)
+            if doc is None:
+                raise statefile.StateError(f"{self.path} missing")
+            self.state, self.error = statefile.check_state(doc), None
+        except statefile.StateError as e:
+            self._problem(str(e))
+        return True
+
+    def _problem(self, text: str) -> bool:
+        changed = text != self.error
+        self.error = text
+        return changed
+
+    def limit(self) -> float:
+        s = self.state
+        return STALE_MIN if s is None else max(STALE_MIN, STALE_FACTOR * s["interval"])
+
+    def stale(self, now: float) -> bool:
+        return self.state is None or now - self.state["ts"] > self.limit()
+
+    def current(self, now: float) -> tuple:
+        """-> (view, feed, alerts) to draw. Old or no data: collector alert first,
+        modules marked stale (status unknown)."""
+        s = self.state
+        problem = self.error
+        if s is None:
+            view, feed, alerts = [], [], []
         else:
-            end = self.clock()
-            r.errors, r.error, r.interval = 0, None, r.base
-            r.snap, r.good_at = snap, end
-            for ev in snap["events"]:
-                self.feed.appendleft({**ev, "src": r.loaded.name})
-            self.alerts = alertsmod.step(self.alerts, r.loaded.name, snap["checks"], self.wall())
-        r.slow = end - start > r.base
-        # A slow module waits a full interval after it ended,
-        # so it cannot take every tick.
-        nxt = start + r.interval
-        r.due = nxt if nxt > end else end + r.interval
-
-    def active(self) -> list:
-        """Open and held alerts for the screen (core/alerts.py, wall clock, noise list)."""
-        return alertsmod.active(self.alerts, self.wall(), self.noise)
-
-    def view(self, alerts: list | None = None) -> list:
-        """One dict per module, for render.layout(). A v2 module's status is the
-        worst of its open / held alerts (not noise), so header and alert bar agree."""
-        now = self.clock()
-        alerts = self.active() if alerts is None else alerts
-        sev = {}
-        for a in alerts:
-            if a["noise"] is None:
-                sev[a["module"]] = worst(sev.get(a["module"], "ok"), a["sev"])
-        out = []
-        for r in self.runs:
-            ld = r.loaded
-            m = {"name": ld.name, "flags": [], "panels": [], "stale": False, "waiting": False}
-            if not ld.enabled:
-                m.update(status="off", summary="disabled")
-            elif ld.error:
-                m.update(status="unknown", summary="not loaded", flags=["failed: " + ld.error])
-            else:
-                old = r.good_at is None or now - r.good_at > STALE_FACTOR * r.base
-                m["engine"] = r.snap is not None and r.snap["v"] == 2
-                if old:
-                    m["status"] = "unknown"
-                else:
-                    m["status"] = sev.get(ld.name, "ok") if m["engine"] else r.snap["status"]
-                m["summary"] = r.snap["summary"] if r.snap else "waiting"
-                m["waiting"] = r.snap is None and r.error is None
-                if r.error:
-                    m["flags"].append("error: " + r.error)
-                if r.interval != r.base:
-                    m["flags"].append(f"backoff {r.interval:g}s")
-                if r.slow:
-                    m["flags"].append("slow")
-                if r.snap is not None:
-                    m["panels"] = r.snap["panels"]
-                    m["stale"] = r.error is not None or old
-                    if m["stale"]:
-                        m["flags"].append("stale")
-            out.append(m)
-        return out
+            view, feed, alerts = s["modules"], s["feed"], s["alerts"]
+            if self.stale(now):
+                when = time.strftime("%H:%M:%S", time.localtime(s["ts"]))
+                problem = problem or f"no update since {when} (limit {self.limit():g} s)"
+                view = [{**m, "stale": True, "flags": m["flags"] + ["stale"],
+                         "status": m["status"] if m["status"] == "off" else "unknown"}
+                        for m in view]
+        if problem:
+            alerts = [collector_alert(problem, now)] + list(alerts)
+        return view, feed, alerts
 
 
-def source(core: Core, ui: UI, frozen):
-    """What to draw: live view + feed + alerts, or the copy taken when pause
-    started. Collecting goes on while paused. -> (view, feed, alerts, frozen)."""
+def source(reader: Reader, ui: UI, frozen, now: float):
+    """What to draw: live data, or the copy taken when pause started.
+    Reading goes on while paused. -> (view, feed, alerts, frozen)."""
     if not ui.paused:
-        alerts = core.active()
-        return core.view(alerts), list(core.feed), alerts, None
+        view, feed, alerts = reader.current(now)
+        return view, feed, alerts, None
     if frozen is None:
-        alerts = core.active()
-        frozen = (core.view(alerts), list(core.feed), alerts)
+        frozen = reader.current(now)
     return frozen[0], frozen[1], frozen[2], frozen
 
 
@@ -173,19 +149,22 @@ def step_lookup(ui: UI, lookup=lookupmod.lookup) -> bool:
     return True
 
 
-def _ui(stdscr, core: Core, ui: UI) -> None:
-    """Full redraw only after a collect (not while paused) or a key (incl. resize);
-    otherwise just the clock once a second. A whois runs after the frame that
-    says 'looking up' is on screen."""
+def _ui(stdscr, reader: Reader, ui: UI) -> None:
+    """Full redraw only after a new state or a stale flip (not while paused) or
+    a key (incl. resize); otherwise just the clock once a second. A whois runs
+    after the frame that says 'looking up' is on screen."""
     render.setup(stdscr)
     stdscr.timeout(TICK_MS)
-    frozen, dirty, shown = None, True, None
+    frozen, dirty, shown, stale = None, True, None, None
     while True:
-        if core.tick() and not ui.paused:
-            dirty = True
+        changed = reader.poll()
         now = time.time()
+        if reader.stale(now) != stale:
+            stale, changed = reader.stale(now), True
+        if changed and not ui.paused:
+            dirty = True
         if dirty:
-            view, feed, alerts, frozen = source(core, ui, frozen)
+            view, feed, alerts, frozen = source(reader, ui, frozen, now)
             ui.update(render.draw(stdscr, SCREENS, view, feed, ui, now, alerts))
             dirty, shown = False, int(now)
         elif int(now) != shown:
@@ -220,23 +199,22 @@ def main(argv: list | None = None) -> int:
     except ValueError as e:
         print(f"sectop: {display(e)}\n{USAGE}", file=sys.stderr)
         return 2
+    if os.geteuid() == 0:
+        print("sectop: refusing to run as root: run it as your user, no sudo "
+              "(docs/install.md)", file=sys.stderr)
+        return 2
     try:
         cfg = configmod.load()
-        noise = noisemod.load()            # before modules load: nothing to close on error
-        loaded = registry.load(cfg)
     except configmod.ConfigError as e:
         print(f"sectop: config: {display(e)}", file=sys.stderr)
         return 2
     locale.setlocale(locale.LC_ALL, "")
     signal.signal(signal.SIGTERM, _term)
     try:
-        curses.wrapper(_ui, Core(loaded, noise=noise), UI(len(SCREENS), screen=start,
-                                                          mask=cfg.mask_public_ips))
+        curses.wrapper(_ui, Reader(owner=owner_uid()),
+                       UI(len(SCREENS), screen=start, mask=cfg.mask_public_ips))
     except (KeyboardInterrupt, Quit):
         pass
-    finally:
-        for name, err in registry.close(loaded):
-            print(f"sectop: {display(name)}: {display(err)}", file=sys.stderr)
     return 0
 
 

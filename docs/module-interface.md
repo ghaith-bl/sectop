@@ -156,7 +156,8 @@ A condition that is not true any more is left out.
 
 - Pure: `step(state, module, checks, now) -> new state`. No I/O, no clock, input not
   changed. State = plain JSON, so the collector can hand it to the UI after the split.
-- `core/app.py` steps it after each successful collect of a module, `now` = wall clock.
+- `core/collector.py` steps it after each successful collect of a module, `now` = wall
+  clock.
   A module that fails is not stepped: its alerts keep their state.
 - Alert key = `<module NAME>/<check key>`.
 - open: reported in the last step of its module. held: not reported any more, still
@@ -171,11 +172,11 @@ A condition that is not true any more is left out.
 - Records max 500: closed out first, then held, oldest last seen first. Open never.
 - Not here: ack (UI, docs/architecture.md, Alerts).
 
-## Errors (`core/app.py`)
+## Errors (`core/collector.py`)
 
 - `collect` raises (incl. `SystemExit`) or returns an invalid Snapshot -> module state error.
   Header shows exception type + message. Last good panels kept, marked stale.
-  Other modules unaffected. `KeyboardInterrupt` and SIGTERM stop sectop.
+  Other modules unaffected. `KeyboardInterrupt` and SIGTERM stop the collector.
 - 3 errors in a row -> interval x2, each further error x2 again, max 60 s
   (never below the configured interval). Reset on first success.
 - Last good Snapshot older than 3 x interval (configured, not backed off) -> status unknown.
@@ -183,6 +184,11 @@ A condition that is not true any more is left out.
   Keep `run()` timeouts below interval.
 - Module not loaded (registry error) -> status unknown, header shows the error.
   Disabled -> shown as OFF.
+- Collector -> UI: `/run/sectop/state.json` (State files) after every collect and every
+  5 s. UI (`core/app.py`): no new state for 3 x the longest module interval (min 15 s),
+  no file or a bad file -> crit alert `core/collector` "collector: no data", last good
+  data kept, modules marked stale (status unknown).
+- Collector and UI refuse to run as root (rc 2).
 
 ## Screen (`core/render.py`, `core/screens.py`, `core/ui.py`)
 

@@ -4,7 +4,7 @@ sectop runs as root. A lookup talks to the network and parses what comes
 back, so the child runs as user nobody: setpriv sets uid / gid, drops all
 groups and sets no_new_privs. It goes out via the tunnel like any program
 (audit shows it). Only on key press, one lookup per address per session
-(cache in core/ui.py). Blocks the UI up to TIMEOUT (core/app.py).
+(cache in core/ui.py). Blocks the UI up to TIMEOUT (core/app.py, the UI).
 """
 
 import ipaddress

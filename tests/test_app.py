@@ -1,305 +1,165 @@
-import datetime
+import os
+import tempfile
 import types
 import unittest
 from unittest import mock
 
-from core import app
-from core.app import Core, Quit, backoff
+from core import app, statefile
+from core.alerts import active, empty, step
 from core.config import ConfigError
-from core.noise import Entry
-from core.registry import Loaded
+
+PANEL = {"id": "p", "title": "t", "type": "kv", "items": []}
+NOW = 1760950000.0
 
 
-class Clock:
-    def __init__(self, t=100.0):
-        self.t = t
-
-    def __call__(self):
-        return self.t
-
-
-def snap(status="ok", events=(), summary="s"):
-    return {"v": 1, "status": status, "summary": summary,
-            "panels": [{"id": "p", "title": "t", "type": "kv", "items": []}],
-            "events": list(events)}
+def mod(name="firewall", status="ok", **over):
+    m = {"name": name, "status": status, "summary": "s", "flags": [], "panels": [PANEL],
+         "stale": False, "waiting": False, "engine": True}
+    m.update(over)
+    return m
 
 
-def ev(ts, msg="m", sev="warn"):
-    return {"ts": ts, "sev": sev, "code": "C", "msg": msg}
+def doc(ts=NOW, summary="s", n_feed=1, alerts=()):
+    feed = [{"ts": ts - i, "sev": "warn", "code": "C", "msg": "m", "src": "firewall"}
+            for i in range(n_feed)]
+    return statefile.state(ts, 6.0, [mod(summary=summary)], feed, list(alerts))
 
 
-def loaded(name="a", collect=None, interval=2.0, **over):
-    mod = types.SimpleNamespace(collect=collect or (lambda st: snap()))
-    kw = {"name": name, "import_name": f"modules.{name}", "enabled": True,
-          "mod": mod, "interval": interval, "state": {"st": name}}
-    kw.update(over)
-    return Loaded(**kw)
+def warn_alert():
+    st = step(empty(), "firewall", [{"key": "k", "sev": "warn", "title": "w", "detail": "",
+                                     "n": 1}], NOW)
+    return active(st, NOW)
 
 
-class Script:
-    """collect() that plays a list of results: dict = Snapshot, exception = raise."""
-    def __init__(self, *results, clock=None, takes=0.0):
-        self.results = list(results)
-        self.calls = []
-        self.clock, self.takes = clock, takes
+class Disk:
+    """Fake stat + load for the Reader: a file that changes when set() is called."""
 
-    def __call__(self, state):
-        self.calls.append(state)
-        if self.clock:
-            self.clock.t += self.takes
-        r = self.results.pop(0) if len(self.results) > 1 else self.results[0]
-        if isinstance(r, BaseException):
-            raise r
-        return r
+    def __init__(self):
+        self.doc, self.ino, self.loads = None, 0, 0
+        self.error = None
 
+    def set(self, doc=None, error=None):
+        self.doc, self.error = doc, error
+        self.ino += 1
 
-class TestBackoff(unittest.TestCase):
-    def test_backoff(self):
-        self.assertEqual([backoff(2.0, n) for n in range(7)],
-                         [2.0, 2.0, 2.0, 4.0, 8.0, 16.0, 32.0])
-        self.assertEqual(backoff(2.0, 20), 60.0)
-        self.assertEqual(backoff(90.0, 5), 90.0)         # never below interval
+    def stat(self, path):
+        if self.doc is None and self.error is None:
+            raise FileNotFoundError(path)
+        return types.SimpleNamespace(st_ino=self.ino, st_mtime_ns=1, st_size=1)
+
+    def load(self, path, owner):
+        self.loads += 1
+        if self.error:
+            raise statefile.StateError(self.error)
+        return self.doc
 
 
-class TestCore(unittest.TestCase):
-    def core(self, *lds):
-        self.clock = Clock()
-        return Core(list(lds), clock=self.clock)
+class TestReader(unittest.TestCase):
+    def reader(self, owner=1000):
+        self.disk = Disk()
+        return app.Reader("/run/sectop/state.json", owner, load=self.disk.load,
+                          stat=self.disk.stat)
 
-    def test_schedule(self):
-        s = Script(snap())
-        c = self.core(loaded(collect=s))
-        self.assertTrue(c.tick())                         # collected
-        self.assertEqual(s.calls, [{"st": "a"}])
-        self.clock.t += 1.9
-        self.assertFalse(c.tick())                        # nothing due: no redraw needed
-        self.assertEqual(len(s.calls), 1)
-        self.clock.t += 0.1
-        self.assertTrue(c.tick())
-        self.assertEqual(len(s.calls), 2)
+    def test_reads_only_when_changed(self):
+        r = self.reader()
+        self.disk.set(doc(summary="one"))
+        self.assertTrue(r.poll())
+        self.assertFalse(r.poll())
+        self.assertEqual(self.disk.loads, 1)
+        view, feed, alerts = r.current(NOW + 1)
+        self.assertEqual((view[0]["summary"], len(feed), alerts), ("one", 1, []))
+        self.disk.set(doc(summary="two"))
+        self.assertTrue(r.poll())
+        self.assertEqual(r.current(NOW + 1)[0][0]["summary"], "two")
 
-    def test_view_ok(self):
-        c = self.core(loaded(collect=Script(snap("warn", summary="hi"))))
-        self.assertEqual(c.view()[0]["summary"], "waiting")
-        self.assertEqual(c.view()[0]["status"], "unknown")
-        self.assertTrue(c.view()[0]["waiting"])
-        c.tick()
-        [m] = c.view()
-        self.assertEqual((m["name"], m["status"], m["summary"], m["flags"], m["stale"],
-                          m["waiting"]), ("a", "warn", "hi", [], False, False))
-        self.assertEqual(m["panels"][0]["id"], "p")
+    def test_missing_file_and_user(self):
+        r = self.reader()
+        self.assertTrue(r.poll())
+        self.assertFalse(r.poll())                           # same problem: no redraw
+        view, _feed, alerts = r.current(NOW)
+        self.assertEqual(view, [])
+        self.assertEqual((alerts[0]["key"], alerts[0]["sev"]), ("core/collector", "crit"))
+        self.assertIn("is sectop.service running?", alerts[0]["detail"])
+        r = self.reader(owner=None)
+        r.poll()
+        self.assertIn("user sectop missing", r.current(NOW)[2][0]["detail"])
 
-    def test_events_feed(self):
-        s = Script(snap(events=[ev(1, "x1"), ev(2, "x2")]), snap(events=[ev(3, "x3")]))
-        b = Script(snap(events=[ev(5, "b")]), snap())
-        c = self.core(loaded(collect=s), loaded("b", collect=b))
-        c.tick()
-        self.clock.t += 2
-        c.tick()
-        self.assertEqual([(e["src"], e["msg"]) for e in c.feed],
-                         [("a", "x3"), ("b", "b"), ("a", "x2"), ("a", "x1")])
-        self.assertEqual(c.feed[0]["ts"], 3.0)
+    def test_not_in_group_yet(self):
+        def stat(path):
+            raise PermissionError(13, "Permission denied")
+        r = app.Reader("/run/sectop/state.json", 990, stat=stat)
+        self.assertTrue(r.poll())
+        self.assertIn("in group sectop? (log out and in", r.current(NOW)[2][0]["detail"])
+        r = app.Reader("/x", 990, stat=lambda p: (_ for _ in ()).throw(OSError(5, "I/O")))
+        r.poll()
+        self.assertEqual(r.current(NOW)[2][0]["detail"], "/x: I/O")
 
-    def test_feed_limit(self):
-        many = snap(events=[ev(i) for i in range(100)])
-        c = self.core(loaded(collect=Script(many), interval=1.0))
-        for _ in range(7):
-            c.tick()
-            self.clock.t += 1
-        self.assertEqual(len(c.feed), app.FEED_MAX)
-        self.assertEqual(c.feed[0]["ts"], 99.0)
+    def test_bad_file_keeps_last_good(self):
+        r = self.reader()
+        self.disk.set(doc(summary="good"))
+        r.poll()
+        self.disk.set(error="state.json: owner uid 0, expected 990")
+        self.assertTrue(r.poll())
+        view, _f, alerts = r.current(NOW + 1)
+        self.assertEqual(view[0]["summary"], "good")
+        self.assertIn("owner uid 0", alerts[0]["detail"])
+        self.disk.set(doc={"v": 99})                         # fails check_state
+        r.poll()
+        self.assertIn("state.v", r.current(NOW + 1)[2][0]["detail"])
+        self.disk.set(doc(summary="back"))
+        r.poll()
+        self.assertEqual(r.current(NOW + 1)[2], [])
 
-    def test_waiting_vs_first_error(self):
-        c = self.core(loaded(collect=Script(RuntimeError("boom"))))
-        c.tick()
-        [m] = c.view()
-        self.assertFalse(m["waiting"])                   # an error is not "waiting"
-        self.assertEqual(m["status"], "unknown")
+    def test_stale(self):
+        r = self.reader()
+        self.disk.set(doc(alerts=warn_alert()))
+        r.poll()
+        self.assertEqual(r.limit(), 18.0)                    # 3 x 6 s
+        self.assertFalse(r.stale(NOW + 18))
+        self.assertTrue(r.stale(NOW + 19))
+        view, _f, alerts = r.current(NOW + 19)
+        self.assertEqual((view[0]["status"], view[0]["stale"], view[0]["flags"]),
+                         ("unknown", True, ["stale"]))
+        self.assertEqual([a["key"] for a in alerts], ["core/collector", "firewall/k"])
+        self.assertIn("no update since", alerts[0]["detail"])
+        self.assertTrue(self.reader().stale(NOW))            # no data yet
 
-    def test_error_keeps_last_good(self):
-        s = Script(snap("crit"), RuntimeError("boom"))
-        c = self.core(loaded(collect=s))
-        c.tick()
-        self.clock.t += 2
-        c.tick()
-        [m] = c.view()
-        self.assertEqual(m["status"], "crit")            # recent good data
-        self.assertEqual(m["flags"], ["error: RuntimeError: boom", "stale"])
-        self.assertTrue(m["stale"])
-        self.assertEqual(len(m["panels"]), 1)
+    def test_off_module_stays_off(self):
+        r = self.reader()
+        d = doc()
+        d["modules"] = [mod(status="off", panels=[])]
+        self.disk.set(d)
+        r.poll()
+        self.assertEqual(r.current(NOW + 100)[0][0]["status"], "off")
 
-    def test_checks_go_to_alert_engine(self):
-        wall = Clock(1760950000.0)
-        v2 = {**snap(), "v": 2, "checks": [{"key": "k", "sev": "crit", "title": "t"}]}
-        c = Core([loaded(collect=Script(v2, {**snap(), "v": 2, "checks": []},
-                                        RuntimeError("boom")))],
-                 clock=Clock(), wall=wall)
-        c.tick()
-        self.assertEqual(c.alerts["alerts"]["a/k"]["last"], 1760950000.0)
-        self.assertTrue(c.alerts["alerts"]["a/k"]["true"])
-        c.clock.t += 2
-        wall.t += 2
-        c.tick()                                          # check gone -> held
-        self.assertFalse(c.alerts["alerts"]["a/k"]["true"])
-        kept = c.alerts
-        c.clock.t += 2
-        wall.t += 2
-        c.tick()                                          # error: not stepped
-        self.assertIs(c.alerts, kept)
-        self.assertEqual(Core([]).alerts, {"alerts": {}})
-
-    def test_v2_status_from_engine(self):
-        wall = Clock(1760950000.0)
-        checks = [{"key": "a", "sev": "warn", "title": "t"}, {"key": "b", "sev": "crit",
-                                                             "title": "u"}]
-        v2 = {**snap(status="ok"), "v": 2, "checks": checks}
-        c = Core([loaded(collect=Script(v2, {**v2, "checks": []}))], clock=Clock(), wall=wall,
-                 noise=(Entry("a/b", "known", datetime.date(2999, 1, 1)),))
-        c.tick()
-        [m] = c.view()
-        self.assertEqual((m["status"], m["engine"]), ("warn", True))   # b is noise
-        c.clock.t += 2
-        wall.t += 2
-        c.tick()                                         # checks gone: held, still warn
-        self.assertEqual(c.view()[0]["status"], "warn")
-        wall.t += 60
-        self.assertEqual(c.view()[0]["status"], "ok")    # hold over
-        c.clock.t += 7
-        self.assertEqual(c.view()[0]["status"], "unknown")   # stale beats the engine
-
-    def test_v1_status_from_snapshot(self):
-        c = self.core(loaded(collect=Script(snap("crit"))))
-        c.tick()
-        [m] = c.view()
-        self.assertEqual((m["status"], m["engine"]), ("crit", False))
-
-    def test_v1_checks_ignored(self):
-        c = self.core(loaded(collect=Script({**snap(), "checks": [1]})))
-        c.tick()
-        self.assertEqual(c.alerts, {"alerts": {}})
-        self.assertIsNone(c.runs[0].error)
-
-    def test_invalid_snapshot_is_error(self):
-        c = self.core(loaded(collect=Script({"v": 3})))
-        c.tick()
-        [m] = c.view()
-        self.assertEqual(m["flags"], ["error: InvalidSnapshot: v: 1 or 2 required"])
-        self.assertEqual(m["panels"], [])
-
-    def test_backoff_and_reset(self):
-        boom = RuntimeError("x")
-        c = self.core(loaded(collect=Script(boom, boom, boom, boom, snap())))
-        waits = []
-        for _ in range(5):
-            self.clock.t = max(self.clock.t, c.runs[0].due)
-            c.tick()
-            waits.append(c.runs[0].due - self.clock.t)
-        self.assertEqual(waits, [2.0, 2.0, 4.0, 8.0, 2.0])
-        self.assertEqual(c.runs[0].errors, 0)
-        self.assertEqual(c.view()[0]["flags"], [])
-
-    def test_backoff_flag(self):
-        c = self.core(loaded(collect=Script(RuntimeError())))
-        for _ in range(3):
-            self.clock.t = max(self.clock.t, c.runs[0].due)
-            c.tick()
-        self.assertIn("backoff 4s", c.view()[0]["flags"])
-        self.assertIn("error: RuntimeError", c.view()[0]["flags"])
-
-    def test_stale_unknown(self):
-        s = Script(snap("ok"), RuntimeError("x"))
-        c = self.core(loaded(collect=s))
-        c.tick()
-        self.clock.t += 6.0                               # 3 x 2.0, not older yet
-        self.assertEqual(c.view()[0]["status"], "ok")
-        self.clock.t += 0.1
-        [m] = c.view()
-        self.assertEqual(m["status"], "unknown")
-        self.assertTrue(m["stale"])                        # old even without error
-
-    def test_slow(self):
-        clock = Clock()
-        s = Script(snap(), clock=clock, takes=3.0)
-        c = Core([loaded(collect=s)], clock=clock)
-        c.tick()
-        self.assertTrue(c.runs[0].slow)
-        self.assertIn("slow", c.view()[0]["flags"])
-        self.assertEqual(c.runs[0].due, clock.t + 2.0)     # full interval after end
-        s.takes = 0.5
-        clock.t = c.runs[0].due
-        c.tick()
-        self.assertFalse(c.runs[0].slow)
-
-    def test_isolation(self):
-        def boom(st):
-            raise ValueError("bad")
-
-        def bye(st):
-            raise SystemExit(1)
-
-        good = Script(snap("info"))
-        c = self.core(loaded("a", collect=boom), loaded("b", collect=bye),
-                      loaded("c", collect=good))
-        c.tick()
-        v = c.view()
-        self.assertEqual(v[0]["flags"], ["error: ValueError: bad"])
-        self.assertEqual(v[1]["flags"], ["error: SystemExit: 1"])
-        self.assertEqual(v[2]["status"], "info")
-
-    def test_quit_and_interrupt_propagate(self):
-        for exc in (Quit, KeyboardInterrupt):
-            def f(st, exc=exc):
-                raise exc
-            c = self.core(loaded(collect=f))
-            with self.assertRaises(exc):
-                c.tick()
-
-    def test_disabled_and_failed(self):
-        never = Script(snap())
-        c = self.core(loaded("a", enabled=False, mod=None, interval=0.0),
-                      loaded("b", collect=never, error="init: OSError: nope"))
-        c.tick()
-        a, b = c.view()
-        self.assertEqual((a["status"], a["summary"], a["flags"]), ("off", "disabled", []))
-        self.assertEqual((b["status"], b["summary"], b["flags"]),
-                         ("unknown", "not loaded", ["failed: init: OSError: nope"]))
-        self.assertEqual(never.calls, [])
+    def test_real_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "state.json")
+            statefile.write(path, doc(summary="disk"))
+            r = app.Reader(path, os.getuid())
+            self.assertTrue(r.poll())
+            self.assertEqual(r.current(NOW)[0][0]["summary"], "disk")
+            self.assertFalse(r.poll())
 
 
 class TestSource(unittest.TestCase):
-    def test_pause_freezes_view_not_collect(self):
-        clock = Clock()
-        s = Script(snap(summary="one", events=[ev(1)]), snap(summary="two", events=[ev(2)]))
-        core = Core([loaded(collect=s)], clock=clock)
+    def test_pause_freezes_view_not_reading(self):
+        disk = Disk()
+        r = app.Reader("/x", 1000, load=disk.load, stat=disk.stat)
+        disk.set(doc(summary="one"))
+        r.poll()
         ui = types.SimpleNamespace(paused=False)
-        core.tick()
-        view, feed, alerts, frozen = app.source(core, ui, None)
+        view, feed, alerts, frozen = app.source(r, ui, None, NOW)
         self.assertEqual((view[0]["summary"], len(feed), alerts, frozen), ("one", 1, [], None))
         ui.paused = True
-        view, feed, alerts, frozen = app.source(core, ui, frozen)
-        clock.t += 2
-        core.tick()                                      # still collects while paused
-        self.assertEqual(len(s.calls), 2)
-        view, feed, alerts, frozen = app.source(core, ui, frozen)
+        view, feed, alerts, frozen = app.source(r, ui, frozen, NOW)
+        disk.set(doc(summary="two", n_feed=2))
+        r.poll()                                             # still reads while paused
+        view, feed, alerts, frozen = app.source(r, ui, frozen, NOW)
         self.assertEqual((view[0]["summary"], len(feed)), ("one", 1))
         ui.paused = False
-        view, feed, alerts, frozen = app.source(core, ui, frozen)
+        view, feed, alerts, frozen = app.source(r, ui, frozen, NOW)
         self.assertEqual((view[0]["summary"], len(feed), frozen), ("two", 2, None))
-
-    def test_alerts_frozen_while_paused(self):
-        clock, wall = Clock(), Clock(1760950000.0)
-        crit = {**snap(), "v": 2, "checks": [{"key": "k", "sev": "crit", "title": "t"}]}
-        core = Core([loaded(collect=Script(crit, {**snap(), "v": 2, "checks": []}))],
-                    clock=clock, wall=wall)
-        ui = types.SimpleNamespace(paused=True)
-        core.tick()
-        _v, _f, alerts, frozen = app.source(core, ui, None)
-        clock.t += 2
-        wall.t += 120                                    # past the hold
-        core.tick()
-        self.assertEqual(app.source(core, ui, frozen)[2], alerts)
-        ui.paused = False
-        self.assertEqual(app.source(core, ui, frozen)[2], [])
 
 
 class TestLookupStep(unittest.TestCase):
@@ -315,12 +175,11 @@ class TestLookupStep(unittest.TestCase):
 
 
 class TestMain(unittest.TestCase):
-    def run_main(self, argv, cfg=None):
+    def run_main(self, argv, cfg=None, euid=1000):
         cfg = cfg or types.SimpleNamespace(mask_public_ips=True)
         with mock.patch.object(app.configmod, "load", return_value=cfg), \
-             mock.patch.object(app.noisemod, "load", return_value=("entry",)), \
-             mock.patch.object(app.registry, "load", return_value=[]), \
-             mock.patch.object(app.registry, "close", return_value=[]), \
+             mock.patch.object(app.os, "geteuid", return_value=euid), \
+             mock.patch.object(app, "owner_uid", return_value=990), \
              mock.patch.object(app.locale, "setlocale"), \
              mock.patch.object(app.signal, "signal"), \
              mock.patch("sys.stdout") as out, mock.patch("sys.stderr") as err, \
@@ -331,6 +190,7 @@ class TestMain(unittest.TestCase):
 
     def test_config_error(self):
         with mock.patch.object(app.configmod, "load", side_effect=ConfigError("bad \x1b")), \
+             mock.patch.object(app.os, "geteuid", return_value=1000), \
              mock.patch("sys.stderr") as err, \
              mock.patch.object(app.curses, "wrapper") as wrapper:
             self.assertEqual(app.main([]), 2)
@@ -338,21 +198,16 @@ class TestMain(unittest.TestCase):
         written = "".join(c.args[0] for c in err.write.call_args_list)
         self.assertIn("sectop: config: bad ?", written)
 
-    def test_noise_error(self):
-        with mock.patch.object(app.configmod, "load", return_value=types.SimpleNamespace()), \
-             mock.patch.object(app.noisemod, "load", side_effect=ConfigError("noise.toml: x")), \
-             mock.patch.object(app.registry, "load") as reg, \
-             mock.patch("sys.stderr") as err, \
-             mock.patch.object(app.curses, "wrapper") as wrapper:
-            self.assertEqual(app.main([]), 2)
+    def test_refuses_root(self):
+        rc, wrapper, _, err = self.run_main([], euid=0)
+        self.assertEqual(rc, 2)
         wrapper.assert_not_called()
-        reg.assert_not_called()                          # no module loaded, nothing to close
-        written = "".join(c.args[0] for c in err.write.call_args_list)
-        self.assertIn("sectop: config: noise.toml: x", written)
+        self.assertIn("refusing to run as root", err)
 
-    def test_noise_to_core(self):
+    def test_reader_owner(self):
         _, wrapper, _, _ = self.run_main([])
-        self.assertEqual(wrapper.call_args.args[1].noise, ("entry",))
+        reader = wrapper.call_args.args[1]
+        self.assertEqual((reader.path, reader.owner), ("/run/sectop/state.json", 990))
 
     def test_start_screen(self):
         for argv, want in (([], 0), (["firewall"], 0), (["2"], 1), (["processes"], 2)):
@@ -379,6 +234,13 @@ class TestMain(unittest.TestCase):
         self.assertEqual(rc, 0)
         wrapper.assert_not_called()
         self.assertIn("SCREEN: firewall | security | processes or 1-3", out)
+
+    def test_owner_uid(self):
+        with mock.patch.object(app.pwd, "getpwnam", side_effect=KeyError("x")):
+            self.assertIsNone(app.owner_uid())
+        with mock.patch.object(app.pwd, "getpwnam",
+                               return_value=types.SimpleNamespace(pw_uid=990)):
+            self.assertEqual(app.owner_uid(), 990)
 
 
 if __name__ == "__main__":

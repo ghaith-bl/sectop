@@ -3,17 +3,17 @@
 Terminal security dashboard for my Silverblue workstation.
 Python 3 stdlib only (curses, tomllib). No third-party packages.
 
-Status: in progress (phase 2: alert engine, docs/architecture.md). Runs in dev mode.
+Status: in progress (phase 3: privilege split, docs/architecture.md).
 
 ## Design
 
 - core: config, module registry, safe subprocess runner, sanitizer, alert engine + noise list,
-  screens, curses renderer
+  collector (service), state file, screens, curses renderer (UI)
 - screens: 1 firewall, 2 security, 3 processes. Each uses the whole terminal
   (docs/architecture.md)
 - modules: collectors, return a JSON-serializable Snapshot
   (see docs/module-interface.md)
-- v1 runs as root. Phase 3: non-root collector service, UI as my user
+- collector = non-root service, UI = my user, no sudo. Neither runs as root
   (docs/architecture.md, Privilege split)
 - alert bar on every screen (alert engine, warn / crit), key a acks what it shows
 - public IPs masked by default, toggle with key m. The detail view (enter) shows them
@@ -24,11 +24,12 @@ Status: in progress (phase 2: alert engine, docs/architecture.md). Runs in dev m
 - firewall: hostfw mode + counters, kernel log (HFW-*), programs, peers (remote IPs),
   WireGuard (docs/modules/firewall.md)
 
-## Run (dev)
+## Run
 
-    sudo python3 -B -m core.app [SCREEN]     # firewall | security | processes | 1-3
+    sectop [SCREEN]     # firewall | security | processes | 1-3
 
-`-B`: no root-owned `__pycache__` in the repo.
+Installed from the repo with install.sh (docs/install.md). Not from the repo with sudo:
+the services run root-owned code only.
 
 ## Tests
 
