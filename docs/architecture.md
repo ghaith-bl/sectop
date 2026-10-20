@@ -271,38 +271,66 @@ Not a fix: excluding these commands from the audit rules (anyone running them as
 would be hidden too).
 
 Design (least privilege: NIST SP 800-53 / 800-171 AC-6, systemd.exec(5), capabilities(7)):
+
+    sectop-net.service   user sectop-net, CAP_NET_ADMIN only -> /run/sectop-net/
+    sectop.service       user sectop, journal group, no caps -> /run/sectop/state.json
+    sectop-whois.socket  one sectop-whois@.service per lookup, DynamicUser, RDAP only
+    sectop (UI)          my user, no sudo, reads /run/sectop/state.json
+
 - Collector = system service started by systemd, not from my login. loginuid stays
   unset (pam_loginuid(8): set by login entry points), so rules with `auid>=1000` /
   `auid!=-1` do not match: daemon events, not user events. Audit rules unchanged: the
   same commands from a login are still recorded.
-- Not root: static system user + group `sectop` (sysusers.d), no login, no home. Not
-  `DynamicUser=` (2026-10-20): Red Hat, "systemd secure services": with "directories
-  shared with a particular group ... dynamic users are probably not the best option".
+- Users (2026-10-20): static system users `sectop` (collector) and `sectop-net` (net
+  unit), group `sectop` (sysusers.d), no login, no home. Two users: the collector cannot
+  forge firewall data, the capability never sits next to the parsing code. Not
+  `DynamicUser=`: Red Hat, "systemd secure services": with "directories shared with a
+  particular group ... dynamic users are probably not the best option".
   Journal via `SupplementaryGroups=systemd-journal` (journalctl(1): this group reads all
   journal files).
 - Output: `RuntimeDirectory=sectop`, mode 0750 -> `/run/sectop/state.json` (write +
   rename). My user in group `sectop`, read only. File, not socket: one-way, less code.
+  Written after every collect and every 5 s. No update for 3 x the longest module
+  interval (min 15 s) -> UI shows crit alert "collector: no data".
 - Capabilities only where the kernel requires them: `nft list` and `wg show` need
-  CAP_NET_ADMIN even to read. CAP_NET_ADMIN can also change the firewall -> separate
-  small unit, same user, `AmbientCapabilities=` + the same `CapabilityBoundingSet=`:
-  fixed argv, raw output to the collector, no parsing there. Not in the collector:
-  ambient capabilities pass to every child (capabilities(7)).
+  CAP_NET_ADMIN even to read (tested 2026-10-20, transient unit as nobody: works with
+  the capability only, "Operation not permitted" without). CAP_NET_ADMIN can also change
+  the firewall -> net unit, own user, `AmbientCapabilities=` + the same
+  `CapabilityBoundingSet=`. Fixed argv (`modules/firewall/netcmds.py`: argv only, the
+  only firewall code it imports), takes no input. Raw result per command:
+  `/run/sectop-net/<name>.json` (argv, rc, out, err, ts), group `sectop`. Every half
+  firewall interval: nft table, wg handshakes + transfer. Every half SLOW: wg endpoints +
+  fwmark, nft set wg_fwmark. Not in the collector: ambient capabilities pass to every
+  child (capabilities(7)).
 - Program names: `ss -p` needs CAP_SYS_PTRACE (capabilities(7): /proc/pid/fd of other
   users). Too strong for a monitor -> `ss --cgroup` (see Firewall audit).
-- No network: `IPAddressDeny=any`, `RestrictAddressFamilies=AF_UNIX AF_NETLINK`.
+- No network in collector and net unit: `IPAddressDeny=any`,
+  `RestrictAddressFamilies=AF_UNIX AF_NETLINK`.
+- whois (2026-10-20): `sectop-whois.socket` (`/run/sectop-whois.sock`, root:sectop 0660,
+  `Accept=yes`) -> one `sectop-whois@.service` per lookup, `DynamicUser=yes`. Red Hat:
+  dynamic users fit when "the user identity is ephemeral, and no integration with other
+  services in the system is needed". Reads one IP, writes the RDAP JSON, exits.
+  Network allowed, nothing else. The UI only connects and reads.
+- Every part refuses to run as root.
+- Install (2026-10-20): code a service runs must not be writable by my user. install.sh
+  (sudo, from the repo): `git archive HEAD` -> `/usr/local/lib/sectop` (root-owned;
+  Silverblue: `/usr/local` -> `/var/usrlocal`), launcher `/usr/local/bin/sectop`, units in
+  `/etc/systemd/system`, `/etc/sysusers.d/sectop.conf`, restorecon. Tests and development
+  stay in the repo. Until now sudo ran code from my home as root: anything running as me
+  could change what root runs. See docs/install.md.
+- hostfw (hardening repo, 2026-10-20): `/run/hostfw` 0755, so the non-root collector reads
+  the rollback deadline (deadline + action, nothing secret).
 - `NoNewPrivileges=yes`, sandboxing options on ("as many of these options ... as is
   possible", systemd.exec(5)), checked with `systemd-analyze security <unit>` (Red Hat:
   results "should be considered hints").
-- SELinux: without a policy the service runs as `unconfined_service_t` (RHEL Using
+- SELinux: without a policy the services run as `unconfined_service_t` (RHEL Using
   SELinux, "Writing a custom SELinux policy"). Own policy (`sepolicy generate --init`)
   after the split works, built from its real behavior (AVC).
 - UI = my user, no sudo. Reads `/run/sectop/state.json`. One-way: the UI never writes
   to the collector (ack stays in the UI).
-- whois child stays separate: own user, no capabilities, not in the collector (no
-  network). Details in phase 3.
 
-Until then: `/etc/sectop/config.toml` `[modules.firewall] interval = 6.0`, fewer
-commands per tick (slow sources on their own interval).
+Until the split is installed: `/etc/sectop/config.toml` `[modules.firewall] interval =
+6.0`, fewer commands per tick (slow sources on their own interval).
 
 ## Actions (last phase)
 
