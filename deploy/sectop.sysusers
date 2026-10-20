@@ -1,0 +1,6 @@
+# sectop users and group (docs/architecture.md, Privilege split).
+# install.sh installs this as /etc/sysusers.d/sectop.conf and adds one line:
+#   m <my user> sectop        (the UI reads /run/sectop, connects to the whois socket)
+g sectop      -
+u sectop      -:sectop  "sectop collector"  -  -
+u sectop-net  -:sectop  "sectop net unit"   -  -

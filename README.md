@@ -24,12 +24,19 @@ Status: in progress (phase 3: privilege split, docs/architecture.md).
 - firewall: hostfw mode + counters, kernel log (HFW-*), programs, peers (remote IPs),
   WireGuard (docs/modules/firewall.md)
 
+## Install
+
+    sudo ./install.sh            # git HEAD -> /usr/local/lib/sectop, users, units
+    sudo ./install.sh --remove
+
+Parts: sectop-net.service (nft / wg, CAP_NET_ADMIN only), sectop.service (collector),
+sectop-whois.socket (RDAP), UI as my user. See docs/install.md.
+
 ## Run
 
     sectop [SCREEN]     # firewall | security | processes | 1-3
 
-Installed from the repo with install.sh (docs/install.md). Not from the repo with sudo:
-the services run root-owned code only.
+No sudo: collector, net unit and UI refuse to run as root.
 
 ## Tests
 

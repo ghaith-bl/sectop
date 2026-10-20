@@ -1,0 +1,16 @@
+# sectop whois: the UI (group sectop) connects, systemd starts one
+# sectop-whois@.service per connection. docs/architecture.md (Privilege split)
+[Unit]
+Description=sectop whois (RDAP) socket
+Documentation=file:/usr/local/lib/sectop/docs/install.md
+
+[Socket]
+ListenStream=/run/sectop-whois.sock
+SocketUser=root
+SocketGroup=sectop
+SocketMode=0660
+Accept=yes
+MaxConnections=4
+
+[Install]
+WantedBy=sockets.target

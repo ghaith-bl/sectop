@@ -1,0 +1,52 @@
+# sectop net unit: nft / wg need CAP_NET_ADMIN even to read. This unit holds it
+# and nothing else: fixed argv, no input, raw results to /run/sectop-net/.
+# docs/architecture.md (Privilege split), docs/install.md
+[Unit]
+Description=sectop net reader (nft / wg, CAP_NET_ADMIN only)
+Documentation=file:/usr/local/lib/sectop/docs/install.md
+After=hostfw.service
+
+[Service]
+Type=exec
+User=sectop-net
+Group=sectop
+ExecStart=/usr/bin/python3 -I -B /usr/local/lib/sectop/bin/sectop-net
+Restart=on-failure
+RestartSec=5s
+RuntimeDirectory=sectop-net
+RuntimeDirectoryMode=0750
+UMask=0027
+
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+DevicePolicy=closed
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+KeyringMode=private
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+IPAddressDeny=any
+MemoryMax=64M
+TasksMax=16
+
+[Install]
+WantedBy=multi-user.target

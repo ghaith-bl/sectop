@@ -1,0 +1,54 @@
+# sectop collector: modules + alert engine -> /run/sectop/state.json.
+# No capabilities, no network. Journal via group systemd-journal, nft / wg from
+# the net unit's files. docs/architecture.md (Privilege split), docs/install.md
+[Unit]
+Description=sectop collector (state for the sectop UI, no capabilities)
+Documentation=file:/usr/local/lib/sectop/docs/install.md
+Wants=sectop-net.service
+After=sectop-net.service
+
+[Service]
+Type=exec
+User=sectop
+Group=sectop
+SupplementaryGroups=systemd-journal
+ExecStart=/usr/bin/python3 -I -B /usr/local/lib/sectop/bin/sectop-collector
+Restart=on-failure
+RestartSec=5s
+RuntimeDirectory=sectop
+RuntimeDirectoryMode=0750
+UMask=0027
+
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+DevicePolicy=closed
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+KeyringMode=private
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+IPAddressDeny=any
+MemoryMax=128M
+TasksMax=32
+
+[Install]
+WantedBy=multi-user.target
