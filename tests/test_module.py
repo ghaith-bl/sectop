@@ -67,7 +67,8 @@ class TestValidate(unittest.TestCase):
 
     def test_top_level(self):
         self.assertInvalid([])
-        self.assertInvalid(snap(v=2))
+        self.assertInvalid(snap(v=2))            # v2 needs checks
+        self.assertInvalid(snap(v=3))
         self.assertInvalid(snap(v=True))
         self.assertInvalid(snap(v=1.0))
         self.assertInvalid(snap(status="error"))
@@ -202,6 +203,65 @@ class TestValidate(unittest.TestCase):
         s = snap()
         s["panels"][1]["rows"] = [{"cells": ["a", "b"]}] * 1000
         self.assertEqual(len(validate(s)["panels"][1]["rows"]), m.MAX_ROWS)
+
+
+def snap2(*checks):
+    return snap(v=2, checks=list(checks))
+
+
+class TestChecks(unittest.TestCase):
+    def assertInvalid(self, s):
+        with self.assertRaises(InvalidSnapshot):
+            validate(s)
+
+    def test_v1_has_no_checks(self):
+        out = validate(snap(checks=[{"key": "a", "sev": "crit", "title": "t"}]))
+        self.assertEqual((out["v"], out["checks"]), (1, []))   # ignored in v1
+
+    def test_good(self):
+        out = validate(snap2({"key": "handshake_stale:proton0", "sev": "crit", "title": "t",
+                              "x": 1},
+                             {"key": "out_leak:fe80::1%wlo1", "sev": "info", "title": "l",
+                              "detail": "d", "n": 7, "hold": 0}))
+        self.assertEqual(out["v"], 2)
+        self.assertEqual(out["checks"][0], {"key": "handshake_stale:proton0", "sev": "crit",
+                                             "title": "t", "detail": "", "n": 0})
+        self.assertEqual(out["checks"][1]["hold"], 0.0)
+        self.assertIsInstance(out["checks"][1]["hold"], float)
+        self.assertEqual(out["checks"][1]["n"], 7)
+        self.assertEqual(validate(snap2())["checks"], [])
+
+    def test_errors(self):
+        good = {"key": "a", "sev": "warn", "title": "t"}
+        for over in ({"key": ""}, {"key": "a b"}, {"key": "k" * 129}, {"key": 1},
+                     {"key": "a\nb"}, {"key": "caf\u00e9"}, {"sev": "ok"}, {"sev": None},
+                     {"title": None}, {"detail": 5}, {"n": True}, {"n": -1}, {"n": 1.0},
+                     {"n": m.MAX_N + 1}, {"hold": -1}, {"hold": m.MAX_HOLD + 1},
+                     {"hold": True}, {"hold": "60"}, {"hold": None}):
+            self.assertInvalid(snap2({**good, **over}))
+        for drop in ("key", "sev", "title"):
+            c = dict(good)
+            del c[drop]
+            self.assertInvalid(snap2(c))
+        self.assertInvalid(snap2("x"))
+        self.assertInvalid(snap(v=2, checks={}))
+        self.assertInvalid(snap2(good, dict(good)))          # duplicate key
+        self.assertInvalid(snap2({**good, "hold": float("inf")}))
+
+    def test_limits(self):
+        out = validate(snap2({"key": "k" * 128, "sev": "info", "title": "t" * 1000,
+                              "n": m.MAX_N, "hold": m.MAX_HOLD}))
+        c = out["checks"][0]
+        self.assertEqual((len(c["key"]), len(c["title"]), c["n"]), (128, m.MAX_STR, m.MAX_N))
+
+    def test_cut_keeps_worst(self):
+        checks = [{"key": f"i{i}", "sev": "info", "title": "t"} for i in range(55)]
+        checks += [{"key": f"c{i}", "sev": "crit", "title": "t"} for i in range(3)]
+        checks.insert(10, {"key": "w", "sev": "warn", "title": "t"})
+        keys = [c["key"] for c in validate(snap2(*checks))["checks"]]
+        self.assertEqual(len(keys), m.MAX_CHECKS)
+        self.assertEqual(keys[:4], ["c0", "c1", "c2", "w"])
+        self.assertEqual(keys[4:], [f"i{i}" for i in range(m.MAX_CHECKS - 4)])
 
 
 class TestCheckModule(unittest.TestCase):

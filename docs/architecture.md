@@ -68,18 +68,29 @@ parses network data. Blocks the UI up to 12 s (v1: no threads).
 
 Alert = state, not event.
 
-- Open while its condition is true, closed when false. No repeat every tick.
+- Open while its condition is true. No repeat every tick.
 - Key = module + rule + subject. Same key again -> count + last seen, no new alert.
-- Cooldown after close: a flapping condition does not reopen at once.
+- Hold after clear (2026-10-20): an alert keeps firing `hold` s (default 60) after its
+  check was last reported. A flapping condition stays one alert, no close / reopen.
+  Same idea as Prometheus `keep_firing_for` (alerting rules docs: "prevent situations
+  such as flapping alerts"). No delay before opening: a real problem shows at once.
 - Context decides severity. Example: out_leak before the first tunnel flow this boot =
   expected (pre-connect DoH fallback); after connect = crit. The out_leak box already
   shows this context (docs/modules/firewall.md); status follows in phase 2.
 - Noise list: `/etc/sectop/noise.toml` (root-owned, same file checks as config). Each entry:
   match, reason, expires. Expired entries stop matching. Examples: ACPI BIOS errors,
   NVRM lines from akmod-nvidia.
-- Ack: dims the alert, does not delete it. New count after ack shows again.
-- Who decides what: modules report current checks (key, sev, title, detail) each
-  collect; core alert engine does open / close / cooldown / ack / noise.
+- Ack: dims the alert, does not delete it. Higher count or severity after ack shows it
+  again.
+- Who decides what: modules report checks (key, sev, title, detail, n, hold) each
+  collect (docs/module-interface.md, Checks). Alert engine `core/alerts.py` does open /
+  hold / close / count / noise. Pure: checks + time in, alert state (plain JSON) out.
+- Where (2026-10-20): phase 2 in the one process, phase 3 in the collector service,
+  unchanged. Alerts go on while the UI is closed.
+- Ack lives in the UI, not in the engine: key + count + severity at ack. The channel
+  stays one-way (collector -> UI): the unprivileged UI never writes to the service that
+  holds CAP_NET_ADMIN. Phase 2: in memory (sectop still runs as root, no root writes
+  into my home). Phase 3: file in `$XDG_STATE_HOME/sectop/` (XDG Base Directory spec).
 
 ## Resources
 
@@ -141,6 +152,7 @@ Design (least privilege: NIST SP 800-53 / 800-171 AC-6, systemd.exec(5), capabil
 - `NoNewPrivileges=yes`, sandboxing options on ("as many of these options ... as is
   possible", systemd.exec(5)), checked with `systemd-analyze security <unit>`.
 - UI = my user, no sudo. Reads collector output (socket or /run file, group read).
+  One-way: the UI never writes to the collector (ack stays in the UI).
 - whois child stays separate: own user, no capabilities.
 
 Until then: `/etc/sectop/config.toml` `[modules.firewall] interval = 6.0`, fewer
@@ -156,11 +168,11 @@ Stop / restart a service, kill a process. Only after the privilege split:
   firewalld, hostfw, Proton daemon, sshd if present.
 - Every action logged to the journal.
 
-## Contract changes (Snapshot v2, planned)
+## Contract changes (Snapshot v2)
 
-- `checks`: current conditions for the alert engine (see Alerts).
-- Panel layout hint: width (half / full), min height.
-- `collect()` gets a context with `visible` (screen shown or not).
+- `checks`: conditions for the alert engine. Done (docs/module-interface.md, Checks).
+- Planned: panel layout hint, width (half / full), min height.
+- Planned: `collect()` gets a context with `visible` (screen shown or not).
 - v1 Snapshots keep working until all modules move to v2.
 
 ## Phases

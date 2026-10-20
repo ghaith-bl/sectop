@@ -4,6 +4,8 @@ v1: single thread. Each loop: collect modules that are due, draw,
 wait for a key (TICK_MS). Error / backoff / stale / slow rules are
 in docs/module-interface.md (Errors). Core is pure logic with an
 injected clock so the rules can be tested without a terminal.
+After each good collect the module's checks go to the alert engine
+(core/alerts.py, wall clock).
 
 Dev run (from repo root): sudo python3 -B -m core.app [SCREEN]
 SCREEN = name or number from core/screens.py, default 1.
@@ -17,6 +19,7 @@ import sys
 import time
 from dataclasses import dataclass
 
+from core import alerts as alertsmod
 from core import config as configmod
 from core import lookup as lookupmod
 from core import registry, render
@@ -65,10 +68,11 @@ def backoff(base: float, errors: int) -> float:
 
 
 class Core:
-    def __init__(self, loaded: list, clock=time.monotonic):
-        self.clock = clock
+    def __init__(self, loaded: list, clock=time.monotonic, wall=time.time):
+        self.clock, self.wall = clock, wall
         self.runs = [Run(ld, ld.interval, ld.interval) for ld in loaded]
         self.feed = collections.deque(maxlen=FEED_MAX)   # newest first
+        self.alerts = alertsmod.empty()                  # alert engine state
 
     def tick(self) -> bool:
         """Collect modules that are due. True if any was collected."""
@@ -94,6 +98,7 @@ class Core:
             r.snap, r.good_at = snap, end
             for ev in snap["events"]:
                 self.feed.appendleft({**ev, "src": r.loaded.name})
+            self.alerts = alertsmod.step(self.alerts, r.loaded.name, snap["checks"], self.wall())
         r.slow = end - start > r.base
         # A slow module waits a full interval after it ended,
         # so it cannot take every tick.

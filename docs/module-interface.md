@@ -42,7 +42,7 @@ def close(state: object) -> None: ...     # optional
 - External commands only via `core.run.run()`.
 - Module keeps its own history (spark series, counter deltas) in state.
 
-## Snapshot (v1)
+## Snapshot (v1, v2)
 
 ```json
 {
@@ -56,15 +56,17 @@ def close(state: object) -> None: ...     # optional
 
 | key | type | rule |
 |---|---|---|
-| v | int | 1 |
+| v | int | 1 or 2 |
 | status | str | ok, info, warn, crit, unknown |
 | summary | str | one line, module header |
 | panels | list | Panel, max 8 |
 | events | list | Event, new since last collect only, max 100 |
+| checks | list | v2 only, required. Check, max 50 (see Checks) |
 
 - Only dict, list, str, int, float, bool, None.
   Core checks with `json.dumps`. Needed for the later split
   (root collector service -> unprivileged UI).
+- v2 = v1 + `checks`. v1 still accepted (no checks) until all modules move to v2.
 
 ## Severity
 
@@ -123,6 +125,45 @@ spark (values max 120, numbers):
 - `msg`: one line.
 - Core adds `src` = module NAME. Shared feed, last 500, newest first.
   Shown in the events box of the module's screen (if that screen has one).
+
+## Checks (v2)
+
+Conditions that are true now. Core turns them into alerts (see Alerts).
+A condition that is not true any more is left out.
+
+```json
+{"key": "handshake_stale:proton0", "sev": "crit", "title": "proton0 handshake stale",
+ "detail": "last handshake 4m 10s ago, sending", "n": 0, "hold": 60}
+```
+
+| key | type | rule |
+|---|---|---|
+| key | str | rule + subject, 1..128 of `A-Z a-z 0-9 _ . : / @ % + -`, unique in the Snapshot |
+| sev | str | info, warn, crit (no ok: a check is a problem) |
+| title | str | one line |
+| detail | str | optional, default "" |
+| n | int | optional, default 0, max 10^9. New occurrences since the last collect (e.g. packets) |
+| hold | number | optional, seconds 0..3600, default 60. Alert keeps firing this long after the check is gone |
+
+- Max 50 per Snapshot. More: the worst 50 kept (severity, then module order).
+
+## Alerts (`core/alerts.py`)
+
+- Pure: `step(state, module, checks, now) -> new state`. No I/O, no clock, input not
+  changed. State = plain JSON, so the collector can hand it to the UI after the split.
+- `core/app.py` steps it after each successful collect of a module, `now` = wall clock.
+  A module that fails is not stepped: its alerts keep their state.
+- Alert key = `<module NAME>/<check key>`.
+- open: reported in the last step of its module. held: not reported any more, still
+  firing until `hold` s after it was last reported. closed: hold over.
+- Reported again while held = same alert (`since` kept). After closed = new firing
+  period (`since` = now), same record (`first`, `count` kept).
+- count: + max(n, 1) when the check turns true, + n while it stays true.
+- Latest sev / title / detail / hold win. A held alert keeps the last ones.
+- `active(state, now)`: open and held alerts, worst first, open before held, newest
+  `since` first, then key.
+- Records max 500: closed out first, then held, oldest last seen first. Open never.
+- Not here: ack (UI, docs/architecture.md, Alerts). Noise list: not yet.
 
 ## Errors (`core/app.py`)
 
@@ -214,12 +255,13 @@ spark (values max 120, numbers):
 ## Validation (`core/module.py`)
 
 - `validate()` returns a new Snapshot: known keys only, defaults filled
-  (`sev` ok, `unit` ""). Input not changed.
+  (`sev` ok, `unit` "", check `detail` "", check `n` 0). Input not changed.
 - Missing required key or wrong type -> `InvalidSnapshot`. Also: duplicate panel id,
-  table row cell count != columns, non-finite numbers, `v` not int 1.
+  table row cell count != columns, non-finite numbers, `v` not int 1 or 2,
+  duplicate check key.
 - Strings cut to 512 chars (last char `~`).
 - Lists cut: panels 8, kv items 50, columns 12 (more = invalid), rows 200 (first kept),
-  spark values 120 and events 100 (newest kept).
+  spark values 120 and events 100 (newest kept), checks 50 (worst kept).
 - `check_module()`: NAME, INTERVAL (number >= 1.0), init / collect callable,
   close callable if present. Else `ValueError`, module not loaded.
 

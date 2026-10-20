@@ -12,9 +12,11 @@ import re
 
 from core.sanitize import truncate
 
+VERSIONS = (1, 2)       # v2 = v1 + checks
 STATUSES = ("ok", "info", "warn", "crit", "unknown")
 SEVS = ("ok", "info", "warn", "crit")
 EVENT_SEVS = ("info", "warn", "crit")
+CHECK_SEVS = ("info", "warn", "crit")   # a check is a problem that is true now
 SEV_RANK = {"ok": 0, "info": 1, "warn": 2, "crit": 3}
 PANEL_TYPES = ("kv", "table", "spark")
 TONES = ("plain", "red", "blue", "yellow", "green")   # optional color hint, not severity
@@ -27,9 +29,13 @@ MAX_ROWS = 200
 MAX_DETAIL = 40          # k / v pairs per table row, shown on enter
 MAX_SPARK = 120
 MAX_EVENTS = 100
+MAX_CHECKS = 50
+MAX_N = 10 ** 9
+MAX_HOLD = 3600.0
 MIN_INTERVAL = 1.0
 
 NAME_RE = re.compile(r"[a-z0-9_]+")
+KEY_RE = re.compile(r"[A-Za-z0-9_.:/@%+-]{1,128}")    # check key: rule + subject
 
 
 class InvalidSnapshot(ValueError):
@@ -195,6 +201,39 @@ def _event(e, i: int) -> dict:
             "code": _str(e, "code", w), "msg": _str(e, "msg", w)}
 
 
+# --- checks (v2) ----------------------------------------------------------
+
+def _check(c, i: int, seen: set) -> dict:
+    w = f"checks[{i}]"
+    c = _dict(c, w)
+    key = c.get("key")
+    if not isinstance(key, str) or not KEY_RE.fullmatch(key):
+        raise InvalidSnapshot(f"{w}.key: 1..128 of A-Z a-z 0-9 _ . : / @ % + - required")
+    if key in seen:
+        raise InvalidSnapshot(f"{w}.key: duplicate {key!r}")
+    seen.add(key)
+    n = c.get("n", 0)
+    if type(n) is not int or not 0 <= n <= MAX_N:
+        raise InvalidSnapshot(f"{w}.n: int 0..{MAX_N} required")
+    out = {"key": key, "sev": _choice(c, "sev", CHECK_SEVS, w),
+           "title": _str(c, "title", w), "detail": _str(c, "detail", w, ""), "n": n}
+    if "hold" in c:
+        hold = c["hold"]
+        if not _is_num(hold) or not 0 <= hold <= MAX_HOLD:
+            raise InvalidSnapshot(f"{w}.hold: seconds 0..{MAX_HOLD:g} required")
+        out["hold"] = float(hold)
+    return out
+
+
+def _checks(snap: dict) -> list:
+    """All checks validated. Over MAX_CHECKS: the worst kept (stable sort)."""
+    seen: set = set()
+    checks = [_check(c, i, seen) for i, c in enumerate(_list(snap, "checks", "snapshot"))]
+    if len(checks) > MAX_CHECKS:
+        checks = sorted(checks, key=lambda c: -SEV_RANK[c["sev"]])[:MAX_CHECKS]
+    return checks
+
+
 # --- snapshot -------------------------------------------------------------
 
 def validate(snap) -> dict:
@@ -206,17 +245,19 @@ def validate(snap) -> dict:
 
     snap = _dict(snap, "snapshot")
     v = snap.get("v")
-    if type(v) is not int or v != 1:
-        raise InvalidSnapshot("v: 1 required")
+    if type(v) is not int or v not in VERSIONS:
+        raise InvalidSnapshot("v: 1 or 2 required")
 
     seen: set = set()
     panels = [_panel(p, i, seen)
               for i, p in enumerate(_list(snap, "panels", "snapshot")[:MAX_PANELS])]
     events = _list(snap, "events", "snapshot")[-MAX_EVENTS:]
+    checks = _checks(snap) if v == 2 else []
     return {
-        "v": 1,
+        "v": v,
         "status": _choice(snap, "status", STATUSES, "snapshot"),
         "summary": _str(snap, "summary", "snapshot"),
         "panels": panels,
         "events": [_event(e, i) for i, e in enumerate(events)],
+        "checks": checks,
     }

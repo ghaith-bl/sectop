@@ -126,11 +126,37 @@ class TestCore(unittest.TestCase):
         self.assertTrue(m["stale"])
         self.assertEqual(len(m["panels"]), 1)
 
+    def test_checks_go_to_alert_engine(self):
+        wall = Clock(1760950000.0)
+        v2 = {**snap(), "v": 2, "checks": [{"key": "k", "sev": "crit", "title": "t"}]}
+        c = Core([loaded(collect=Script(v2, {**snap(), "v": 2, "checks": []},
+                                        RuntimeError("boom")))],
+                 clock=Clock(), wall=wall)
+        c.tick()
+        self.assertEqual(c.alerts["alerts"]["a/k"]["last"], 1760950000.0)
+        self.assertTrue(c.alerts["alerts"]["a/k"]["true"])
+        c.clock.t += 2
+        wall.t += 2
+        c.tick()                                          # check gone -> held
+        self.assertFalse(c.alerts["alerts"]["a/k"]["true"])
+        kept = c.alerts
+        c.clock.t += 2
+        wall.t += 2
+        c.tick()                                          # error: not stepped
+        self.assertIs(c.alerts, kept)
+        self.assertEqual(Core([]).alerts, {"alerts": {}})
+
+    def test_v1_checks_ignored(self):
+        c = self.core(loaded(collect=Script({**snap(), "checks": [1]})))
+        c.tick()
+        self.assertEqual(c.alerts, {"alerts": {}})
+        self.assertIsNone(c.runs[0].error)
+
     def test_invalid_snapshot_is_error(self):
-        c = self.core(loaded(collect=Script({"v": 2})))
+        c = self.core(loaded(collect=Script({"v": 3})))
         c.tick()
         [m] = c.view()
-        self.assertEqual(m["flags"], ["error: InvalidSnapshot: v: 1 required"])
+        self.assertEqual(m["flags"], ["error: InvalidSnapshot: v: 1 or 2 required"])
         self.assertEqual(m["panels"], [])
 
     def test_backoff_and_reset(self):
