@@ -76,8 +76,8 @@ Who talks to what, both ways, on the firewall screen.
 
 Read-only, on key press only: `w` = RDAP lookup of the selected address
 (docs/module-interface.md, Screen). Not an action: changes nothing on the host. Runs in
-a child as user nobody (setpriv, no groups, no_new_privs), so the root process never
-parses network data. Blocks the UI up to 12 s (v1: no threads).
+sectop-whois@.service (socket, own dynamic user, see Privilege split), so neither the
+collector nor my user parses network data. Blocks the UI up to 12 s (v1: no threads).
 
 ## Security screen (2026-10-20)
 

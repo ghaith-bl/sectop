@@ -1,29 +1,25 @@
-"""whois for a public IP: RDAP (core/rdap.py) in a child process, unprivileged.
+"""whois for a public IP: asks the RDAP socket service (core/rdap.py).
 
-sectop runs as root. A lookup talks to the network and parses what comes
-back, so the child runs as user nobody: setpriv sets uid / gid, drops all
-groups and sets no_new_privs. It goes out via the tunnel like any program
-(audit shows it). Only on key press, one lookup per address per session
-(cache in core/ui.py). Blocks the UI up to TIMEOUT (core/app.py, the UI).
+The UI runs as my user and must not parse network data with my rights, and
+cannot switch to another user. So the lookup runs in sectop-whois@.service:
+one instance per connection to SOCKET, its own dynamic user, network and
+nothing else (docs/architecture.md, Privilege split). Here: connect, send
+the IP, read the one JSON line back, check it. It goes out via the tunnel
+like any program (audit shows it). Only on key press, one lookup per address
+per session (cache in core/ui.py). Blocks the UI up to TIMEOUT (core/app.py,
+the UI).
 """
 
 import ipaddress
 import json
-import os
-import pwd
+import socket
+import time
 
-from core.run import _unsafe
-from core.run import run as _run
-
-SETPRIV = "/usr/bin/setpriv"
-PYTHON = "/usr/bin/python3"
-USER = "nobody"
-FALLBACK_ID = 65534      # overflow uid / gid if there is no nobody entry
+SOCKET = "/run/sectop-whois.sock"
 TIMEOUT = 12.0
 MAX_FIELDS = 20
 MAX_VALUE = 200
-MAX_CHILD = 65536
-CHILD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rdap.py")
+MAX_ANSWER = 65536
 
 
 def public(ip: str) -> bool:
@@ -31,27 +27,6 @@ def public(ip: str) -> bool:
         return ipaddress.ip_address(ip).is_global
     except ValueError:
         return False
-
-
-def ids(user: str = USER) -> tuple:
-    try:
-        pw = pwd.getpwnam(user)
-    except KeyError:
-        return FALLBACK_ID, FALLBACK_ID
-    return pw.pw_uid, pw.pw_gid
-
-
-def argv(ip: str, uid: int, gid: int, source: str, python: str = PYTHON) -> list:
-    return [SETPRIV, f"--reuid={uid}", f"--regid={gid}", "--clear-groups", "--no-new-privs",
-            "--", python, "-I", "-c", source, ip]
-
-
-def _child(path: str) -> str:
-    with open(path, "rb") as f:
-        data = f.read(MAX_CHILD + 1)
-    if len(data) > MAX_CHILD or not data.isascii():
-        raise ValueError("not a small ASCII file")
-    return data.decode("ascii")
 
 
 def _err(text: str) -> list:
@@ -77,35 +52,51 @@ def _fields(out: str) -> list:
     return pairs
 
 
-def lookup(ip: str, run=_run, user_ids=ids, child: str = CHILD, python: str = PYTHON) -> list:
+def ask(path: str, ip: str, timeout: float = TIMEOUT, clock=time.monotonic) -> str:
+    """One request on the unix socket -> the answer text. Whole exchange within timeout."""
+    deadline = clock() + timeout
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(timeout)
+        s.connect(path)
+        s.sendall(ip.encode("ascii") + b"\n")
+        s.shutdown(socket.SHUT_WR)
+        buf = bytearray()
+        while True:
+            left = deadline - clock()
+            if left <= 0:
+                raise TimeoutError("timed out")
+            s.settimeout(left)
+            chunk = s.recv(MAX_ANSWER)
+            if not chunk:
+                break
+            buf += chunk
+            if len(buf) > MAX_ANSWER:
+                raise ValueError("answer larger than 64 KiB")
+    return buf.decode("utf-8", errors="replace")
+
+
+def lookup(ip: str, ask=ask, path: str = SOCKET) -> list:
     """-> [(key, value)] for the detail view. A problem comes back as one 'whois' pair."""
     if not public(ip):
         return _err("not a public address: no whois")
     try:
-        bad = _unsafe(python)
+        out = ask(path, ip, TIMEOUT)
     except FileNotFoundError:
-        bad = "not found"
-    if bad:
-        return _err(f"{python}: {bad}")
-    try:
-        source = _child(child)
-    except (OSError, ValueError) as e:
-        return _err(f"rdap.py: {e}")
-    uid, gid = user_ids()
-    if uid == 0 or gid == 0:
-        return _err(f"user {USER} maps to root: refused")
-    res = run(argv(ip, uid, gid, source, python), timeout=TIMEOUT)
-    if res.timed_out:
+        return _err(f"{path} missing: sectop-whois.socket not running? (docs/install.md)")
+    except PermissionError:
+        return _err(f"{path}: permission denied: my user in group sectop? "
+                    "(log in again after install)")
+    except TimeoutError:
         return _err(f"timeout after {TIMEOUT:g} s")
-    if res.rc == 127:
-        return _err(f"{SETPRIV} not found")
-    if res.rc == 126:
-        return _err(f"{SETPRIV} not trusted")
-    if res.rc != 0:
-        last = [ln for ln in res.err.splitlines() if ln.strip()]
-        return _err(f"rc {res.rc}: {last[-1] if last else 'no output'}")
+    except ConnectionRefusedError:
+        return _err(f"{path}: connection refused: sectop-whois.socket stopped?")
+    except OSError as e:
+        return _err(f"{path}: {e.strerror or e}")
+    except ValueError as e:
+        return _err(f"bad service answer: {e}")
     try:
-        pairs = _fields(res.out)
+        pairs = _fields(out)
     except ValueError as e:                       # JSONDecodeError too
-        return _err(f"bad child output: {e}")
-    return pairs + [("via", f"RDAP as {USER} (uid {uid}), timeout {TIMEOUT:g} s")]
+        return _err(f"bad service answer: {e}")
+    return pairs + [("via", f"RDAP by sectop-whois.service (own dynamic user), "
+                            f"timeout {TIMEOUT:g} s")]

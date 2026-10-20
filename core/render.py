@@ -28,7 +28,6 @@ import unicodedata
 from dataclasses import dataclass
 
 from core.lookup import TIMEOUT as LOOKUP_TIMEOUT
-from core.lookup import USER as LOOKUP_USER
 from core.lookup import public
 from core.module import SEV_RANK
 from core.sanitize import TRUNC, display, mask_ips
@@ -66,7 +65,7 @@ HELP = (
     ("g G  Home End", "first / last line"),
     ("enter", "detail of the selected line (pauses while open, real IPs)"),
     ("/", "filter the focused table: all words match, !word must not"),
-    ("w", f"whois of the selected IP (RDAP as user {LOOKUP_USER}, via the tunnel)"),
+    ("w", "whois of the selected IP (RDAP by sectop-whois.service, via the tunnel)"),
     ("a", "ack the alerts in the alert bar (dims them; a higher count or severity "
           "shows them again)"),
     ("Esc", "clear the filter of the focused table"),
@@ -556,7 +555,7 @@ def _whois(ui, ip: str) -> list:
         return [("whois", f"{ip}: not a public address, no whois")]
     if getattr(ui, "lookup", None) == ip:
         return [("whois", f"{ip}: looking up (RDAP, up to {LOOKUP_TIMEOUT:g} s) ...")]
-    return [("whois", f"{ip}: press w (RDAP as user {LOOKUP_USER}, via the tunnel)")]
+    return [("whois", f"{ip}: press w (RDAP by sectop-whois.service, via the tunnel)")]
 
 
 # --- grid -----------------------------------------------------------------

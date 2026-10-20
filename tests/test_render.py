@@ -259,7 +259,7 @@ class TestBoxes(unittest.TestCase):
 
     def test_whois_in_detail(self):
         f = self.whois_frame()
-        self.assertTrue(find(f.lines, " whois     149.112.112.11: press w (RDAP as user nobody"))
+        self.assertTrue(find(f.lines, " whois     149.112.112.11: press w (RDAP by sectop-whois"))
         self.assertEqual(f.boxes[0].ip, "149.112.112.11")             # detail box carries it
         f = self.whois_frame(lookup="149.112.112.11")
         self.assertTrue(find(f.lines, "149.112.112.11: looking up (RDAP, up to 12 s) ..."))

@@ -3,12 +3,14 @@ import io
 import ipaddress
 import json
 import os
+import socket
 import tempfile
+import threading
+import time
 import unittest
 import urllib.error
 
 from core import lookup, rdap
-from core.run import Result
 
 BOOT4 = {"services": [
     [["41.0.0.0/8"], ["https://rdap.afrinic.net/rdap/", "http://rdap.afrinic.net/rdap/"]],
@@ -134,24 +136,25 @@ class TestRdap(unittest.TestCase):
         cm.exception.close()                    # Python 3.14: ResourceWarning if left open
 
 
-class Run:
-    def __init__(self, res):
-        self.res, self.calls = res, []
+class Ask:
+    def __init__(self, answer):
+        self.answer, self.calls = answer, []
 
-    def __call__(self, argv, timeout):
-        self.calls.append((argv, timeout))
-        return self.res
+    def __call__(self, path, ip, timeout):
+        self.calls.append((path, ip, timeout))
+        if isinstance(self.answer, BaseException):
+            raise self.answer
+        return self.answer
 
 
 def ok(doc):
-    return Result(0, json.dumps(doc) + "\n", "", False, False)
+    return json.dumps(doc) + "\n"
 
 
 class TestLookup(unittest.TestCase):
-    def go(self, res, ip="8.8.8.8", **kw):
-        run = Run(res)
-        kw.setdefault("user_ids", lambda: (99, 99))
-        return lookup.lookup(ip, run=run, **kw), run.calls
+    def go(self, answer, ip="8.8.8.8"):
+        ask = Ask(answer)
+        return lookup.lookup(ip, ask=ask), ask.calls
 
     def test_public(self):
         self.assertTrue(lookup.public("8.8.8.8"))
@@ -159,37 +162,32 @@ class TestLookup(unittest.TestCase):
         for ip in ("10.2.0.1", "100.85.0.1", "fe80::1", "fdeb:446c:912d:8da::2", "x", ""):
             self.assertFalse(lookup.public(ip), ip)
 
-    def test_argv_and_result(self):
+    def test_request_and_result(self):
         pairs, calls = self.go(ok({"ok": True, "fields": [["name", "GOGL"], ["org", "Google"]]}))
-        [(argv, timeout)] = calls
-        self.assertEqual(timeout, lookup.TIMEOUT)
-        self.assertEqual(argv[:9], ["/usr/bin/setpriv", "--reuid=99", "--regid=99",
-                                    "--clear-groups", "--no-new-privs", "--", "/usr/bin/python3",
-                                    "-I", "-c"])
-        self.assertIn("def main(", argv[9])                          # rdap.py source, not a path
-        self.assertEqual(argv[10], "8.8.8.8")
+        self.assertEqual(calls, [("/run/sectop-whois.sock", "8.8.8.8", lookup.TIMEOUT)])
         self.assertEqual(pairs[:2], [("name", "GOGL"), ("org", "Google")])
-        self.assertTrue(pairs[2][1].startswith("RDAP as nobody (uid 99)"))
+        self.assertTrue(pairs[2][1].startswith("RDAP by sectop-whois.service"))
 
-    def test_private_not_run(self):
+    def test_private_not_asked(self):
         pairs, calls = self.go(ok({}), ip="10.2.0.1")
         self.assertEqual((pairs, calls), ([("whois", "not a public address: no whois")], []))
 
     def test_errors(self):
         cases = (
-            (Result(-9, "", "", True, False), "timeout after 12 s"),
-            (Result(127, "", "not found", False, False), "/usr/bin/setpriv not found"),
-            (Result(126, "", "refused", False, False), "/usr/bin/setpriv not trusted"),
-            (Result(1, "", "setpriv: setresuid failed\n", False, False),
-             "rc 1: setpriv: setresuid failed"),
-            (Result(0, "garbage\n", "", False, False), "bad child output: "),
-            (Result(0, "", "", False, False), "bad child output: no JSON object"),
+            (FileNotFoundError(2, "No such file"), "/run/sectop-whois.sock missing"),
+            (PermissionError(13, "Permission denied"), "/run/sectop-whois.sock: permission"),
+            (TimeoutError("timed out"), "timeout after 12 s"),
+            (ConnectionRefusedError(111, "Connection refused"), "/run/sectop-whois.sock: conn"),
+            (OSError(5, "Input/output error"), "/run/sectop-whois.sock: Input/output error"),
+            (ValueError("answer larger than 64 KiB"), "bad service answer: answer larger"),
+            ("garbage\n", "bad service answer: "),
+            ("", "bad service answer: no JSON object"),
             (ok({"ok": False, "error": "URLError: boom"}), "URLError: boom"),
-            (ok({"ok": True, "fields": "x"}), "bad child output: fields: list required"),
-            (ok({"ok": True, "fields": [["a", 1]]}), "bad child output: fields: [str, str]"),
+            (ok({"ok": True, "fields": "x"}), "bad service answer: fields: list required"),
+            (ok({"ok": True, "fields": [["a", 1]]}), "bad service answer: fields: [str, str]"),
         )
-        for res, want in cases:
-            pairs, _ = self.go(res)
+        for answer, want in cases:
+            pairs, _ = self.go(answer)
             self.assertTrue(pairs[0][1].startswith(want), (pairs, want))
             self.assertEqual(pairs[0][0], "whois")
 
@@ -199,29 +197,74 @@ class TestLookup(unittest.TestCase):
         self.assertEqual(len(pairs), lookup.MAX_FIELDS + 1)          # + via
         self.assertEqual((len(pairs[0][0]), len(pairs[0][1])), (40, lookup.MAX_VALUE))
 
-    def test_refuses_root_and_untrusted(self):
-        pairs, calls = self.go(ok({}), user_ids=lambda: (0, 0))
-        self.assertEqual((pairs[0][1], calls), ("user nobody maps to root: refused", []))
-        with tempfile.TemporaryDirectory() as d:
-            py = os.path.join(d, "python3")
-            with open(py, "w") as f:
-                f.write("x")
-            os.chmod(py, 0o777)
-            pairs, calls = self.go(ok({}), python=py)
-            self.assertEqual(calls, [])
-            self.assertIn("python3: ", pairs[0][1])
-            pairs, _ = self.go(ok({}), python=os.path.join(d, "missing"))
-            self.assertTrue(pairs[0][1].endswith("missing: not found"))
-            child = os.path.join(d, "rdap.py")
-            with open(child, "wb") as f:
-                f.write("x = '\u00e9'\n".encode())
-            pairs, calls = self.go(ok({}), child=child)
-            self.assertEqual((pairs[0][1], calls), ("rdap.py: not a small ASCII file", []))
 
-    def test_ids(self):
-        self.assertEqual(lookup.ids("no-such-user-sectop"), (65534, 65534))
-        uid, gid = lookup.ids("root")
-        self.assertEqual((uid, gid), (0, 0))
+class TestSocket(unittest.TestCase):
+    """ask() against a real unix socket, the service side played by rdap.main()."""
+
+    def serve(self, handler):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "w.sock")
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(srv.close)
+        srv.bind(path)
+        srv.listen(1)
+
+        def run():
+            conn, _ = srv.accept()
+            with conn:
+                handler(conn)
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        self.addCleanup(t.join, 5)
+        return path
+
+    def test_roundtrip_with_rdap_main(self):
+        def handler(conn):
+            stdin = conn.makefile("rb")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rdap.main([], get=lambda url: {rdap.BOOT[4]: BOOT4}.get(url, ARIN), stdin=stdin)
+            conn.sendall(out.getvalue().encode())
+
+        path = self.serve(handler)
+        pairs = lookup.lookup("8.8.8.8", path=path)
+        self.assertEqual(pairs[0], ("name", "GOGL"))
+        self.assertEqual(pairs[-2][0], "source")
+
+    def test_too_large_and_timeout(self):
+        path = self.serve(lambda conn: conn.sendall(b"x" * (lookup.MAX_ANSWER + 10)))
+        with self.assertRaises(ValueError):
+            lookup.ask(path, "8.8.8.8", 5.0)
+        ev = threading.Event()
+        path = self.serve(lambda conn: ev.wait(5))
+        self.addCleanup(ev.set)                          # runs before the join (LIFO)
+        t0 = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            lookup.ask(path, "8.8.8.8", 0.3)
+        self.assertLess(time.monotonic() - t0, 2.0)
+
+    def test_missing_socket(self):
+        with self.assertRaises(FileNotFoundError):
+            lookup.ask("/nonexistent/w.sock", "8.8.8.8", 1.0)
+
+
+class TestRequest(unittest.TestCase):
+    def test_request(self):
+        self.assertEqual(rdap.request(io.BytesIO(b"8.8.8.8\n")), "8.8.8.8")
+        self.assertEqual(rdap.request(io.BytesIO(b" 2607:6bc0::10 ")), "2607:6bc0::10")
+        with self.assertRaises(ValueError):
+            rdap.request(io.BytesIO(b"1" * 100 + b"\n"))
+        with self.assertRaises(ValueError):                         # UnicodeDecodeError
+            rdap.request(io.BytesIO(b"\xff\n"))
+
+    def test_main_from_stdin(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rdap.main([], get=lambda url: {}, stdin=io.BytesIO(b"10.0.0.1\n"))
+        self.assertEqual(json.loads(out.getvalue()),
+                         {"ok": False, "error": "ValueError: not a public address"})
 
 
 if __name__ == "__main__":

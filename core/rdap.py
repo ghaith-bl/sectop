@@ -1,9 +1,12 @@
 """RDAP lookup of one IP address: who holds it (the modern WHOIS).
 
-Runs as a child of sectop, as an unprivileged user: core/lookup.py starts it
-with setpriv and passes this file's text with `python3 -I -c`. So data from
-the network is never parsed by the root process. Prints one line of JSON:
+Runs as sectop-whois@.service, one instance per connection to
+/run/sectop-whois.sock (socket activation, Accept=yes), as its own dynamic
+user with network and nothing else (docs/architecture.md, Privilege split).
+stdin and stdout are the connection: reads one line (the IP, max 64 bytes),
+prints one line of JSON and exits:
 {"ok": true, "fields": [[key, value], ...]} or {"ok": false, "error": "..."}.
+By hand: python3 -I core/rdap.py 8.8.8.8
 
 RFC 9224: IANA bootstrap files map address blocks to the RDAP server of a
 registry (RIR). RFC 9083: JSON of an IP network object. Stdlib only.
@@ -20,6 +23,7 @@ BOOT = {4: "https://data.iana.org/rdap/ipv4.json", 6: "https://data.iana.org/rda
 TIMEOUT = 4.0            # per request; bootstrap + query (+ redirect) stay below 12 s
 MAX_BODY = 1 << 20
 MAX_VALUE = 200
+MAX_LINE = 64            # the request: one IP address
 ACCEPT = "application/rdap+json, application/json"
 
 
@@ -141,10 +145,19 @@ def pick(doc: dict) -> list:
     return out
 
 
-def main(argv=None, get=fetch) -> int:
+def request(stdin) -> str:
+    """The IP from the connection: one line, max MAX_LINE bytes, ASCII."""
+    line = stdin.readline(MAX_LINE + 1)
+    if len(line) > MAX_LINE:
+        raise ValueError("request longer than 64 bytes")
+    return line.decode("ascii").strip()
+
+
+def main(argv=None, get=fetch, stdin=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     try:
-        ip = ipaddress.ip_address(argv[0] if argv else "")
+        text = argv[0] if argv else request(stdin or sys.stdin.buffer)
+        ip = ipaddress.ip_address(text)
         if not ip.is_global:
             raise ValueError("not a public address")
         base = base_url(get(BOOT[ip.version]), ip)
@@ -153,10 +166,11 @@ def main(argv=None, get=fetch) -> int:
         url = base + ("" if base.endswith("/") else "/") + "ip/" + str(ip)
         result = {"ok": True, "fields": pick(get(url)) + [("source", url)]}
     except (OSError, ValueError, KeyError, TypeError) as e:     # URLError, HTTPError: OSError
+        # UnicodeDecodeError of the request is a ValueError
         result = {"ok": False, "error": f"{type(e).__name__}: {e}"[:MAX_VALUE]}
         if isinstance(e, urllib.error.HTTPError):
             e.close()                  # holds the response body; not left to the gc
-    print(json.dumps(result))
+    print(json.dumps(result), flush=True)
     return 0
 
 

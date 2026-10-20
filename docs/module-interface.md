@@ -247,15 +247,16 @@ A condition that is not true any more is left out.
   RFC 9083 answer), the modern WHOIS. Public addresses only. Detail shows `whois` then
   name, handle, range, cidr, type, country, parent, org, abuse, dates, remark, whois
   server, source URL, or the error.
-  - Child process, never root: `setpriv --reuid=<nobody> --regid=<nobody> --clear-groups
-    --no-new-privs -- /usr/bin/python3 -I -c <core/rdap.py text> <ip>` via `run()`
-    (python3 checked like run() binaries). Network data is parsed only in the child;
-    core reads one JSON line (max 20 fields, values cut to 200).
+  - Socket service, never my user: the UI connects to `/run/sectop-whois.sock`
+    (root:sectop 0660), sends the IP line, reads one JSON line (max 64 KiB, max 20
+    fields, values cut to 200). systemd starts one `sectop-whois@.service` per connection
+    (`Accept=yes`): `python3 -I -B core/rdap.py`, stdin / stdout = the connection, own
+    dynamic user, network and nothing else. Network data is parsed only there.
   - HTTPS only (redirects to other schemes refused), 4 s per request, body max 1 MiB,
-    whole lookup max 12 s. No proxy (run() env).
+    whole lookup max 12 s (UI side; the unit has `RuntimeMaxSec=15`).
   - Blocks the UI while it runs, after a frame that says `looking up`. Only on key press,
     one lookup per address per session (last 100 kept). Goes out via the tunnel like
-    any program (audit shows the flows, uid of nobody).
+    any program (audit shows the flows, uid of the dynamic user).
 - Pause (`p`): the screen keeps the view from the moment of pausing, collecting goes on.
   Resume shows the current view.
 - Keys: `1-9` screen; `tab` / right / `l` next box, `shift-tab` / left / `h` previous box;
