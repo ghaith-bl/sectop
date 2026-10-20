@@ -7,6 +7,7 @@ wg endpoints + fwmark, nft wg_fwmark set, ip default routes. Files:
 /etc/hostfw/mode, /run/hostfw/rollback, /proc/uptime. At start: one boot
 journal scan (leak lines, first tunnel flow).
 Audit box: every HFW line (allowed + blocked, in + out), program from ss.
+Snapshot v2: problems are checks with keys (core/alerts.py keeps the alerts).
 See docs/modules/firewall.md.
 """
 
@@ -17,7 +18,7 @@ import re
 import stat
 import time
 
-from core.module import worst
+from core.module import SEV_RANK, worst
 from core.run import run as _run
 from modules.firewall import conns, journal, nft, vpn
 
@@ -28,7 +29,7 @@ TIMEOUT = 1.0            # per command, keeps a full tick below INTERVAL
 BOOT_TIMEOUT = 5.0       # boot journal scan, once in init()
 SLOW = 30.0              # endpoint, live fwmark, wg_fwmark set, default routes: rarely change
 HS_STALE = 180           # WireGuard rejects keys after 180 s
-HOLD = 60.0              # seconds a new blocked packet keeps its severity in status
+HOLD = 60.0              # seconds the alert (and the counter row color) stays after new packets
 SPARK = 120
 MAX_PEERS = 200          # remote addresses kept, least recently seen out first
 MAX_SOCKS = 10           # open sockets listed in a peer's detail
@@ -79,6 +80,8 @@ CONTEXT_NOTE = {
                      "started: tunnel state at that time unknown",
     "unknown": "first tunnel flow unknown (boot scan failed)",
 }
+CONTEXT_SEV = {"out_leak": "crit, info pre-connect",            # counter detail text
+               "in_vpn": "warn, info for late replies from known peers"}
 # what each hostfw counter matches (silverblue-cis-hardening firewall/docs/rules.md)
 MATCH = {
     "out_dns_vpn": "tcp/udp 53, 853 to 10.2.0.1 via proton0",
@@ -159,7 +162,7 @@ class State:
         self.since = int(wall())
         self.prev = None               # counters of last tick
         self.prev_tx = None
-        self.held = {}                 # kind -> mono time until its sev is held
+        self.held = {}                 # kind -> (mono time, sev): counter row color until then
         self.blocked = collections.deque(maxlen=SPARK)
         self.flows = {}                # audit flow key -> Flow, oldest first
         self.peers = {}                # remote address -> Peer, least recently seen first
@@ -269,6 +272,30 @@ def _remote(e) -> str | None:
     return _ip(e.fields.get("SRC" if e.dir == "in" else "DST", ""))
 
 
+def _chk(checks: list, key: str, sev: str, title: str, detail: str = "", n: int = 0,
+         hold: float | None = None) -> None:
+    """Add a check (Snapshot v2): a problem that is true now."""
+    c = {"key": key, "sev": sev, "title": title, "detail": detail, "n": n}
+    if hold is not None:
+        c["hold"] = hold
+    checks.append(c)
+
+
+def _merge(checks: list) -> list:
+    """One check per key (the same source can fail twice in a tick): the worse
+    severity keeps its title and detail, n adds up. Input dicts not changed."""
+    out = {}
+    for c in checks:
+        old = out.get(c["key"])
+        if old is None:
+            out[c["key"]] = dict(c)
+            continue
+        if SEV_RANK[c["sev"]] > SEV_RANK[old["sev"]]:
+            old.update(sev=c["sev"], title=c["title"], detail=c["detail"])
+        old["n"] += c["n"]
+    return list(out.values())
+
+
 # --- sources --------------------------------------------------------------
 
 def _hostfw(st: State, checks: list) -> tuple:
@@ -281,7 +308,7 @@ def _hostfw(st: State, checks: list) -> tuple:
     res = st.cmd("nft", "-j", "-t", "list", "table", *TABLE)
     if res.rc != 0:
         msg = "missing" if nft.missing(res.err) else _fail(res)
-        checks.append(("crit", f"table {msg}"))
+        _chk(checks, "table", "crit", f"table {msg}")
         items.append(_item("table", msg, "crit"))
         return items, None, "-"
     counters = nft.counters(res.out)
@@ -291,7 +318,7 @@ def _hostfw(st: State, checks: list) -> tuple:
     live = nft.mode(res.out)
     sev = {"enforce": "ok", "observe": "warn"}.get(live, "warn")
     if sev != "ok":
-        checks.append((sev, f"mode {live}"))
+        _chk(checks, "mode", sev, f"mode {live}")
     items.append(_item("mode", live, sev, "green"))
 
     try:
@@ -301,20 +328,20 @@ def _hostfw(st: State, checks: list) -> tuple:
                            "green" if boot == live else ""))
     except (OSError, ValueError) as e:
         items.append(_item("boot mode", str(e), "warn"))
-        checks.append(("warn", "boot mode unreadable"))
+        _chk(checks, "boot_mode", "warn", "boot mode unreadable", str(e))
 
     try:
         rb = _read(st.rollback_file, st.owner)
     except (OSError, ValueError) as e:
         items.append(_item("rollback", str(e), "warn"))
-        checks.append(("warn", "rollback file unreadable"))
+        _chk(checks, "rollback_file", "warn", "rollback file unreadable", str(e))
     else:
         if rb is None:
             items.append(_item("rollback", "-"))
         else:
             text, armed = _rollback_state(rb, st.wall())
             if armed:
-                checks.append(("info", "rollback armed"))
+                _chk(checks, "rollback", "info", "rollback armed", text)
             items.append(_item("rollback", text, "info"))
     return items, counters, live
 
@@ -354,11 +381,12 @@ def _counter_detail(st: State, name: str, nbytes: int, live: str) -> list:
     verdict = _verdict(name, live)
     sev = kind_sev(name)
     if name in SEV and SEV[name] is None:
-        new = "never raises status (noise)"
+        new = "no alert (noise)"
     elif sev is None:
-        new = "never raises status (allowed traffic)"
+        new = "no alert (allowed traffic)"
     else:
-        new = f"{sev} in status for {st.hold:g} s after each tick with new packets"
+        new = (f"alert new:{name} ({CONTEXT_SEV.get(name, sev)}), kept {st.hold:g} s "
+               "after the last tick with new packets")
     out = [("meaning", st.comments.get(name, "-")), ("match", MATCH.get(name, "-")),
            ("verdict", f"{verdict}  {VERDICT_NOTE[verdict]}"), ("new packets", new),
            ("log", _log_note(name)), ("bytes", str(nbytes)),
@@ -377,42 +405,93 @@ def _recent(st: State, entries: list) -> None:
         q.appendleft((e.ts, journal.summary(e)))
 
 
-def _counters(st: State, counters: dict | None, now: float, live: str = "?") -> tuple:
-    """-> (table panel or None, totals, deltas). Updates held severities."""
+def _deltas(st: State, counters: dict | None) -> tuple:
+    """-> (totals, new packets per counter since the last tick)."""
     if counters is None:
-        return None, {}, {}
+        return {}, {}
     prev = st.prev or {}
     deltas = {}
     for name, (pkts, _b) in counters.items():
         old = prev.get(name, (pkts, 0))[0] if st.prev is not None else pkts
         deltas[name] = pkts - old if pkts >= old else pkts      # reset -> count again
     st.prev = counters
-    for name, d in deltas.items():
-        if d > 0 and kind_sev(name):
-            st.held[name] = now + st.hold
+    return {n: c[0] for n, c in counters.items()}, deltas
 
+
+def _counter_panel(st: State, counters: dict | None, deltas: dict, now: float,
+                   live: str = "?") -> dict | None:
+    """Counter rows keep the severity of their last new packets for `hold` s
+    (st.held, set by _new_checks): display only, the alert engine holds alerts."""
+    if counters is None:
+        return None
     rows = []
     for name, (pkts, nbytes) in counters.items():
         if pkts == 0:
             continue                                          # zero counters hidden
-        sev = kind_sev(name) if st.held.get(name, 0) > now else None
+        until, sev = st.held.get(name, (0, None))
+        sev = sev if until > now else None
         rows.append({"cells": [name, str(pkts), f"+{deltas[name]}" if deltas[name] else "",
                                _human(nbytes)], "sev": sev or "ok",
                      "tone": _tone(_verdict(name, live)),
                      "detail": _counter_detail(st, name, nbytes, live)})
     zero = len(counters) - len(rows)
     title = "hostfw counters" + (f"  ({zero} zero hidden)" if zero else "")
-    panel = {"id": "counters", "title": title, "type": "table",
-             "columns": ["counter", "pkts", "new", "bytes"], "rows": rows}
-    return panel, {n: c[0] for n, c in counters.items()}, deltas
+    return {"id": "counters", "title": title, "type": "table",
+            "columns": ["counter", "pkts", "new", "bytes"], "rows": rows}
 
 
-def _held_checks(st: State, now: float, checks: list) -> None:
-    for name, until in list(st.held.items()):
+def _leak_ctx(st: State, up: bool) -> str:
+    """Context of a live out_leak (same rule as the out_leak box)."""
+    if up:
+        return "tunnel up"
+    return "pre-connect" if st.tunnel_first is None else "tunnel down"
+
+
+def _in_vpn(st: State, entries: list, cs: list) -> tuple:
+    """Severity of new in_vpn packets this tick -> (sev, note).
+
+    info: every in_vpn line is from a peer this host talked to (an allowed flow
+    logged, or a socket open now): late replies after a flow closed. warn: any
+    other source, or no line this tick (rate limit / lag: source unknown).
+    """
+    srcs = {str(a) for e in entries if e.kind == "in_vpn"
+            if (a := _addr(e.fields.get("SRC", ""))) is not None}
+    if not srcs:
+        return "warn", "no log line this tick: source unknown"
+    known = {ip for ip, p in st.peers.items() if p.new}
+    known |= {str(a) for c in cs if (a := _addr(conns.split(c.peer)[0])) is not None}
+    unknown = sorted(srcs - known)
+    if not unknown:
+        return "info", f"late replies from {len(srcs)} peer(s) this host talked to"
+    more = f" +{len(unknown) - 3}" if len(unknown) > 3 else ""
+    return "warn", "from " + ", ".join(unknown[:3]) + more
+
+
+def _new_checks(st: State, deltas: dict, up: bool, vpn_in: tuple, now: float,
+                checks: list) -> str:
+    """One check per deny kind with new packets this tick (n = packets, hold =
+    st.hold). Context decides out_leak / in_vpn severity. -> worst sev (spark)."""
+    sevs = []
+    for name, d in deltas.items():
+        sev = kind_sev(name)
+        if d <= 0 or sev is None:
+            continue
+        title, detail = f"new {name}", f"+{d} pkt this tick; {MATCH.get(name, name)}"
+        if name == "out_leak":
+            ctx = _leak_ctx(st, up)
+            sev = "info" if ctx == "pre-connect" else "crit"
+            title += f" ({ctx})"
+            detail += f"; {CONTEXT_NOTE[ctx]}"
+        elif name == "in_vpn":
+            sev, note = vpn_in
+            detail += f"; {note}"
+        st.held[name] = (now + st.hold, sev)
+        _chk(checks, f"new:{name}", sev, title, detail, n=d, hold=st.hold)
+        sevs.append(sev)
+    for name, (until, _sev) in list(st.held.items()):
         if until <= now:
             del st.held[name]
-            continue
-        checks.append((kind_sev(name), f"new {name}"))
+    return worst(*sevs)
 
 
 def _events(st: State, checks: list, items: list) -> tuple:
@@ -426,7 +505,7 @@ def _events(st: State, checks: list, items: list) -> tuple:
     res = st.cmd(*argv)
     cut = res.timed_out or res.truncated
     if res.rc != 0 and not cut:
-        checks.append(("warn", "log reader error"))
+        _chk(checks, "log_reader", "warn", "log reader error", _fail(res))
         items.append(_item("log reader", _fail(res), "warn"))
         return [], []
     entries, cursor, bad = journal.parse(res.out)
@@ -539,12 +618,13 @@ def _flow_row(st: State, key: tuple, fl: Flow) -> dict:
     return row
 
 
-def _vpn(st: State, checks: list, wall: float) -> tuple:
-    """Every tick: handshake + transfer. -> (kv items, summary text, tunnel up)."""
+def _vpn(st: State, checks: list, wall: float, ks_new: int = 0) -> tuple:
+    """Every tick: handshake + transfer. -> (kv items, summary text, tunnel up).
+    ks_new: kill switch drops this tick (context of a stale handshake)."""
     t = st.tunnel
     res = st.cmd("wg", "show", t, "latest-handshakes")
     if res.rc != 0:
-        checks.append(("warn", f"{t} down"))
+        _chk(checks, f"tunnel_down:{t}", "warn", f"{t} down", _fail(res))
         st.prev_tx = None
         return [_item("tunnel", f"{t} down ({_fail(res)})", "warn")], f"{t} down", False
     hs = vpn.handshake(res.out)
@@ -559,13 +639,17 @@ def _vpn(st: State, checks: list, wall: float) -> tuple:
         sev = "warn" if sending else "info"
         items.append(_item("handshake", "never", sev))
         if sev != "ok":
-            checks.append((sev, "no handshake"))
+            _chk(checks, f"no_handshake:{t}", sev, "no handshake",
+                 "tx growing" if sending else "idle")
         hs_text = "hs never"
     else:
         age = max(0, wall - hs)
         if age > HS_STALE and sending:
             items.append(_item("handshake", f"{_age(age)} ago, sending", "crit"))
-            checks.append(("crit", "handshake stale"))
+            detail = f"last handshake {_age(age)} ago, tx growing (keys rejected after 180 s)"
+            if ks_new:
+                detail += f"; kill switch dropped +{ks_new} pkt this tick (fail closed)"
+            _chk(checks, f"handshake_stale:{t}", "crit", "handshake stale", detail)
         elif age > HS_STALE:
             items.append(_item("handshake", f"{_age(age)} ago (idle)"))
         else:
@@ -617,7 +701,7 @@ def _fwmark(st: State, mark, tunnel_up: bool, checks: list) -> dict | None:
     res = st.cmd("nft", "-j", "list", "set", *TABLE, "wg_fwmark")
     if res.rc != 0:
         if tunnel_up:
-            checks.append(("crit", "wg_fwmark set missing"))
+            _chk(checks, "fwmark_set", "crit", "wg_fwmark set missing", _fail(res))
             return _item("fwmark", f"set: {_fail(res)}", "crit")
         return None
     elems = nft.set_elems(res.out)
@@ -625,10 +709,10 @@ def _fwmark(st: State, mark, tunnel_up: bool, checks: list) -> dict | None:
         return _item("fwmark", "set " + (", ".join(hex(e) for e in elems) or "empty"))
     if mark is not None and mark in elems:
         return _item("fwmark", f"{hex(mark)} (in set)", tone="green")
-    checks.append(("crit", "fwmark mismatch"))
     live = hex(mark) if mark is not None else "off"
-    return _item("fwmark", f"live {live}, set {', '.join(hex(e) for e in elems) or 'empty'}",
-                 "crit")
+    text = f"live {live}, set {', '.join(hex(e) for e in elems) or 'empty'}"
+    _chk(checks, "fwmark", "crit", "fwmark mismatch", text)
+    return _item("fwmark", text, "crit")
 
 
 def _routes(st: State, checks: list) -> list:
@@ -638,7 +722,7 @@ def _routes(st: State, checks: list) -> list:
         key = f"default v{fam[1]}"
         if res.rc != 0:
             items.append(_item(key, _fail(res), "warn"))
-            checks.append(("warn", f"{key} unknown"))
+            _chk(checks, f"route_unknown:v{fam[1]}", "warn", f"{key} unknown", _fail(res))
             continue
         rts = vpn.routes(res.out)
         if not rts:
@@ -650,8 +734,9 @@ def _routes(st: State, checks: list) -> list:
         elif dev == st.tunnel:
             items.append(_item(key, dev, tone="green"))
         else:
-            items.append(_item(key, f"{dev} via {gw or '-'} metric {metric}", "warn"))
-            checks.append(("warn", f"{key} not kill switch"))
+            text = f"{dev} via {gw or '-'} metric {metric}"
+            items.append(_item(key, text, "warn"))
+            _chk(checks, f"route:v{fam[1]}", "warn", f"{key} not kill switch", text)
     return items
 
 
@@ -756,7 +841,7 @@ def _conns(st: State, checks: list) -> tuple:
     """-> (open sockets, error or '')."""
     res = st.cmd("ss", "-tunapH", "state", "established")
     if res.rc != 0:
-        checks.append(("warn", "ss error"))
+        _chk(checks, "ss", "warn", "ss error", _fail(res))
         return [], _fail(res)
     return conns.parse(res.out), ""
 
@@ -884,8 +969,9 @@ def _safe(fn, what: str, checks: list, default):
     try:
         return fn()
     except (ValueError, KeyError, TypeError, IndexError) as e:
-        checks.append(("warn", f"{what} parse error"))
-        return default(f"{type(e).__name__}: {e}")
+        err = f"{type(e).__name__}: {e}"
+        _chk(checks, f"parse:{what}", "warn", f"{what} parse error", err)
+        return default(err)
 
 
 # --- module API -----------------------------------------------------------
@@ -928,12 +1014,11 @@ def collect(st: State) -> dict:
     events, entries = _safe(lambda: _events(st, checks, fw_items), "journal", checks,
                             lambda e: _note(fw_items, "log reader", e, ([], [])))
     _recent(st, entries)
-    table, totals, deltas = _safe(lambda: _counters(st, counters, now, live), "counters", checks,
-                                  lambda e: (None, {}, {}))
-    _held_checks(st, now, checks)
+    totals, deltas = _safe(lambda: _deltas(st, counters), "counters", checks,
+                           lambda e: ({}, {}))
 
     vpn_items, vpn_text, up = _safe(
-        lambda: _vpn(st, checks, wall), "wg", checks,
+        lambda: _vpn(st, checks, wall, deltas.get("out_ks", 0)), "wg", checks,
         lambda e: ([_item("tunnel", e, "warn")], f"{st.tunnel} ?", False))
     if st.slow_at is None or now >= st.slow_at or up != st.slow_up:
         st.slow = _slow(st, up)
@@ -946,20 +1031,27 @@ def collect(st: State) -> dict:
     if deltas:
         st.blocked.append(blocked)
 
+    # the leak box sets the first tunnel flow: before the out_leak context
+    leak = _safe(lambda: _leak_box(st, entries, up, totals.get("out_leak"), live),
+                 "leak", checks,
+                 lambda e: {"id": "leak", "title": f"out_leak: {e}", "type": "table",
+                            "columns": list(LEAK_COLUMNS), "rows": [], "sev": "warn"})
+    cs, ss_err = _safe(lambda: _conns(st, checks), "ss", checks, lambda e: ([], e))
+    vpn_in = _safe(lambda: _in_vpn(st, entries, cs), "in_vpn", checks,
+                   lambda e: ("warn", e))
+    spark_sev = _new_checks(st, deltas, up, vpn_in, now, checks)
+    table = _safe(lambda: _counter_panel(st, counters, deltas, now, live), "counters", checks,
+                  lambda e: None)
+
     panels.append({"id": "hostfw", "title": "hostfw", "type": "kv", "items": fw_items,
                    "sev": worst(*(i["sev"] for i in fw_items))})
     panels.append({"id": "vpn", "title": "vpn", "type": "kv", "items": vpn_items,
                    "sev": worst(*(i["sev"] for i in vpn_items))})
     if table:
         panels.append(table)
-    panels.append(_safe(lambda: _leak_box(st, entries, up, totals.get("out_leak"), live),
-                        "leak", checks,
-                        lambda e: {"id": "leak", "title": f"out_leak: {e}", "type": "table",
-                                   "columns": list(LEAK_COLUMNS), "rows": [], "sev": "warn"}))
+    panels.append(leak)
     panels.append({"id": "blocked", "title": "blocked / tick", "type": "spark",
-                   "values": list(st.blocked), "unit": "pkt",
-                   "sev": "warn" if blocked else "ok"})
-    cs, ss_err = _safe(lambda: _conns(st, checks), "ss", checks, lambda e: ([], e))
+                   "values": list(st.blocked), "unit": "pkt", "sev": spark_sev})
     panels.append(_safe(lambda: _audit(st, entries, cs, live), "audit", checks,
                         lambda e: {"id": "audit", "title": f"audit: {e}", "type": "table",
                                    "columns": list(AUDIT_COLUMNS), "rows": [], "sev": "warn"}))
@@ -967,10 +1059,12 @@ def collect(st: State) -> dict:
                         lambda e: {"id": "peers", "title": f"peers: {e}", "type": "table",
                                    "columns": list(PEER_COLUMNS), "rows": [], "sev": "warn"}))
 
-    status = worst(*(s for s, _ in checks))
-    leak = totals.get("out_leak")
-    summary = " | ".join([live, vpn_text, f"leak {leak if leak is not None else '?'}"])
-    problems = [t for s, t in checks if s in ("warn", "crit")]
+    checks = _merge(checks)
+    status = worst(*(c["sev"] for c in checks))
+    n_leak = totals.get("out_leak")
+    summary = " | ".join([live, vpn_text, f"leak {n_leak if n_leak is not None else '?'}"])
+    problems = [c["title"] for c in checks if c["sev"] in ("warn", "crit")]
     if problems:
         summary += " | " + ", ".join(problems[:3])
-    return {"v": 1, "status": status, "summary": summary, "panels": panels, "events": events}
+    return {"v": 2, "status": status, "summary": summary, "panels": panels, "events": events,
+            "checks": checks}

@@ -70,25 +70,44 @@ Log kind = counter name: `HFW-OUT-LEAK` -> `out_leak`, `HFW-FWD-VM-LAN` -> `fwd_
 | hidden | in_noise (counter only, no event, no audit row) |
 | ok | out_dns_vpn, out_wg, out_probe, out_router_admin, out_lan_allow, out_new, fwd_vm_new (allowed) |
 
-- Status comes from counter deltas, not totals: totals since boot include the
+- Alerts come from counter deltas, not totals: totals since boot include the
   pre-connect window. First tick never alarms.
-- New packets keep their kind's severity in status for `hold` s (default 60).
+- New packets of a deny kind = check `new:<kind>`, n = packets this tick, hold = `hold` s
+  (default 60). The alert engine keeps the alert `hold` s after the last tick with new
+  packets (docs/module-interface.md, Alerts). Module status = this tick only. Counter rows
+  keep the kind's color for `hold` s (display).
+- Context decides (2026-10-20):
+  - out_leak: crit, info while `pre-connect` (tunnel down, no tunnel flow yet this boot).
+    Same context as the out_leak box (live rule). Title `new out_leak (<context>)`.
+  - in_vpn: warn, info when every in_vpn line of the tick is from a peer this host talked
+    to (an allowed flow logged, or a socket open now): late replies after a flow closed.
+    No line this tick (rate limit, lag) -> warn, source unknown.
 - Counter lower than last tick (table reloaded) -> its new value counts as new.
 
-Checks:
+Checks (Snapshot v2, key = rule + subject, `t` = tunnel name):
 
-| check | sev |
-|---|---|
-| table missing / nft error | crit |
-| fwmark live not in `wg_fwmark` set (tunnel up) | crit |
-| handshake > 180 s while tx grows | crit |
-| handshake > 180 s, idle | ok (shown "idle") |
-| handshake never, tx grows / idle | warn / info |
-| mode observe / unknown | warn |
-| tunnel down | warn |
-| lowest-metric default route not kill switch or tunnel | warn |
-| log reader / ss / ip error, parse error, mode file unreadable | warn |
-| rollback armed (deadline in the future) | info |
+| key | check | sev |
+|---|---|---|
+| `table` | table missing / nft error | crit |
+| `fwmark_set` | `wg_fwmark` set missing (tunnel up) | crit |
+| `fwmark` | fwmark live not in `wg_fwmark` set (tunnel up) | crit |
+| `handshake_stale:t` | handshake > 180 s while tx grows | crit |
+| - | handshake > 180 s, idle | none (shown "idle") |
+| `no_handshake:t` | handshake never, tx grows / idle | warn / info |
+| `new:<kind>` | new packets of a deny kind (Severity) | kind / context |
+| `mode` | mode observe / unknown | warn |
+| `tunnel_down:t` | tunnel down | warn |
+| `route:v4`, `route:v6` | lowest-metric default route not kill switch or tunnel | warn |
+| `route_unknown:v4`, `..v6` | ip error | warn |
+| `log_reader`, `ss`, `boot_mode`, `rollback_file` | source error, file unreadable | warn |
+| `parse:<source>` | parse error (nft, journal, counters, wg, fwmark, routes, ...) | warn |
+| `rollback` | rollback armed (deadline in the future) | info |
+
+- Same key twice in a tick (one source failing in two places): one check, the worse
+  severity wins, n adds up.
+- handshake stale detail: age, and `kill switch dropped +N pkt this tick (fail closed)`
+  when out_ks grew (WireGuard transport routed to the dummy after a network change,
+  firewall/docs/observe-log.md 2026-10-19).
 
 Handshake: WireGuard does not handshake on an idle tunnel, so age alone is not a
 failure. Keys are rejected after 180 s, so age > 180 s with traffic going out = broken.
@@ -97,14 +116,15 @@ failure. Keys are rejected after 180 s, so age > 180 s with traffic going out = 
 
 hostfw (kv), vpn (kv), hostfw counters (table: pkts, new this tick, bytes; zero counters
 hidden, count in the title), out_leak (table, see below), blocked / tick (spark, deny
-kinds except hidden), audit (table, see below), peers (table, see below).
+kinds except hidden; severity = worst `new:<kind>` check of the tick), audit (table, see
+below), peers (table, see below).
 
 - Colors (`tone`): audit, out_leak and counter rows by verdict: allow blue, drop (kill
   switch) red, block yellow, zone / pass / deny plain. Healthy kv values green (table
   loaded, mode enforce, boot mode = live, log reader ok, tunnel up, handshake fresh,
   fwmark in set, default route = kill switch / tunnel). Problems keep their severity color.
 - hostfw `log reader` = sectop's own kernel log reader (ok / behind / error), not a log view.
-  System journal view: security screen (phase 3).
+  System journal view: security screen (phase 4).
 - vpn `recv / sent` = bytes received / sent through the tunnel since it came up
   (`wg show transfer`, summed over peers, 1000-based units). Reset on every reconnect.
 
@@ -141,7 +161,8 @@ Title: `peers <addresses>  <sockets> open`, `(ss: <error>)` if ss failed.
 ## Counter detail
 
 `enter` on a counter row: meaning (hostfw rule comment), match (from hostfw
-`docs/rules.md`, kept in `MATCH`), verdict, what new packets do to status, log rate,
+`docs/rules.md`, kept in `MATCH`), verdict, what new packets do (alert key, severity,
+hold; `no alert` for allowed and hidden kinds), log rate,
 exact bytes, since (table load), then the last 10 log lines of that kind since sectop
 started (also in_noise, which is hidden elsewhere). out_dns_vpn / out_wg / out_probe are
 counted only, never logged: no lines.
@@ -168,7 +189,7 @@ Leak lines of this boot, newest first, last 8 shown (100 kept). Title: `out_leak
 
 - Row detail: meaning of the context, time after boot, then the audit detail of the line.
 - Limit: hostfw reloaded mid-boot -> `HFW-OUT-NEW` starts later, older leaks may show
-  `pre-connect`. Status still comes from counter deltas (Severity).
+  `pre-connect`. Alerts still come from counter deltas (Severity).
 
 Screen: firewall (`core/screens.py`), no events box: the audit box shows the same lines.
 

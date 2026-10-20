@@ -362,21 +362,92 @@ class TestCollect(Base):
         leak = next(r for r in rows if r["cells"][0] == "out_leak")
         self.assertEqual((leak["cells"], leak["sev"]), (["out_leak", "4", "", "240"], "ok"))
 
-    def test_new_leak_held(self):
-        self.collect()
+    def check(self, snap, key):
+        return next((c for c in snap["checks"] if c["key"] == key), None)
+
+    def leak_row(self, snap):
+        return next(r for r in self.panel(snap, "counters")["rows"] if r["cells"][0] == "out_leak")
+
+    def test_new_leak_check(self):
+        s = self.collect()
+        self.assertEqual((s["v"], s["checks"]), (2, []))             # healthy: no checks
         self.tick()
         self.bump("out_leak", 2)
         s = self.collect()
         self.assertEqual(s["status"], "crit")
         self.assertIn("new out_leak", s["summary"])
-        rows = next(p for p in s["panels"] if p["id"] == "counters")["rows"]
-        leak = next(r for r in rows if r["cells"][0] == "out_leak")
-        self.assertEqual((leak["cells"][2], leak["sev"]), ("+2", "crit"))
+        c = self.check(s, "new:out_leak")
+        self.assertEqual((c["sev"], c["title"], c["n"], c["hold"]),
+                         ("crit", "new out_leak (tunnel up)", 2, 60.0))
+        self.assertTrue(c["detail"].startswith("+2 pkt this tick; anything else leaving"))
+        self.assertEqual((self.leak_row(s)["cells"][2], self.leak_row(s)["sev"]), ("+2", "crit"))
         self.assertEqual(self.panel(s, "leak")["title"], "out_leak 6")    # counter total
         self.tick(30)
-        self.assertEqual(self.collect()["status"], "crit")   # still held
-        self.tick(31)
-        self.assertEqual(self.collect()["status"], "ok")     # hold over
+        s = self.collect()
+        self.assertEqual((s["status"], s["checks"]), ("ok", []))      # this tick only: the
+        self.assertEqual(self.leak_row(s)["sev"], "crit")             # engine holds the alert,
+        self.tick(31)                                                 # the row keeps its color
+        self.assertEqual(self.leak_row(self.collect())["sev"], "ok")
+        self.assertEqual(self.st.held, {})
+
+    def test_leak_context(self):
+        down = ("wg latest-handshakes", "wg transfer", "wg endpoints", "wg fwmark")
+        for first, sev, ctx in ((None, "info", "pre-connect"), (1.0, "crit", "tunnel down")):
+            with self.subTest(ctx=ctx):
+                self.setUp()
+                for key in down:
+                    self.host.set(key, NO_DEV)
+                self.st.tunnel_first = first
+                self.collect()
+                self.tick()
+                self.bump("out_leak", 1)
+                s = self.collect()
+                c = self.check(s, "new:out_leak")
+                self.assertEqual((c["sev"], c["title"]), (sev, f"new out_leak ({ctx})"))
+                self.assertIn(fw.CONTEXT_NOTE[ctx], c["detail"])
+                self.assertEqual(self.leak_row(s)["sev"], sev)
+                spark = self.panel(s, "blocked")["sev"]
+                self.assertEqual(spark, sev)
+
+    def in_vpn(self, src):
+        text = fix("journal.json").replace("SRC=198.51.100.7", f"SRC={src}")
+        self.collect()
+        self.tick()
+        self.bump("in_vpn", 1)
+        self.host.set("journalctl", ok(text))
+        return self.check(self.collect(), "new:in_vpn")
+
+    def test_in_vpn_unknown_source(self):
+        c = self.in_vpn("198.51.100.7")
+        self.assertEqual(c["sev"], "warn")
+        self.assertTrue(c["detail"].endswith("; from 198.51.100.7"))
+
+    def test_in_vpn_late_reply(self):
+        c = self.in_vpn("203.0.113.10")                      # brave has a socket open to it
+        self.assertEqual(c["sev"], "info")
+        self.assertIn("late replies from 1 peer(s)", c["detail"])
+        self.setUp()
+        self.st.peers["192.0.2.9"] = fw.Peer(1.0)
+        self.st.peers["192.0.2.9"].new = 1                   # an allowed flow was logged
+        self.assertEqual(self.in_vpn("192.0.2.9")["sev"], "info")
+
+    def test_in_vpn_no_line(self):
+        self.collect()
+        self.tick()
+        self.bump("in_vpn", 1)
+        c = self.check(self.collect(), "new:in_vpn")
+        self.assertEqual(c["sev"], "warn")
+        self.assertIn("source unknown", c["detail"])
+
+    def test_merge(self):
+        a = {"key": "x", "sev": "warn", "title": "w", "detail": "", "n": 1}
+        b = {"key": "x", "sev": "crit", "title": "c", "detail": "d", "n": 2}
+        merged = fw._merge([a, b, {**a, "key": "y"}])
+        self.assertEqual(merged[0], {"key": "x", "sev": "crit", "title": "c", "detail": "d",
+                                     "n": 3})
+        self.assertEqual(a["n"], 1)                          # input not changed
+        self.assertEqual([c["key"] for c in fw._merge([b, a])], ["x"])
+        self.assertEqual(fw._merge([b, a])[0]["title"], "c")
 
     def test_severity_kinds(self):
         for name, sev in (("out_dns", "warn"), ("in_vpn", "warn"), ("out_ks", "info"),
@@ -397,7 +468,15 @@ class TestCollect(Base):
         for name in ("out_ks", "in_noise", "out_wg", "out_dns", "out_new"):
             self.bump(name, 3)
         s = self.collect()
-        self.assertEqual(next(p for p in s["panels"] if p["id"] == "blocked")["values"], [0, 6])
+        spark = next(p for p in s["panels"] if p["id"] == "blocked")
+        self.assertEqual((spark["values"], spark["sev"]), ([0, 6], "warn"))   # out_dns: warn
+        self.tick()
+        self.bump("out_ks", 1)
+        spark = next(p for p in self.collect()["panels"] if p["id"] == "blocked")
+        self.assertEqual((spark["values"][-1], spark["sev"]), (1, "info"))    # out_ks only
+        self.tick()
+        self.assertEqual(next(p for p in self.collect()["panels"]
+                              if p["id"] == "blocked")["sev"], "ok")
 
     def test_counter_reset(self):
         self.collect()
@@ -449,6 +528,8 @@ class TestCollect(Base):
         self.host.set("nft list table", NO_TABLE)
         s = self.collect()
         self.assertEqual(s["status"], "crit")
+        self.assertEqual([(c["key"], c["sev"], c["title"]) for c in s["checks"]],
+                         [("table", "crit", "table missing")])
         self.assertEqual(self.items(s, "hostfw")["table"], ("missing", "crit"))
         self.assertTrue(s["summary"].startswith("- | proton0 up"))
         self.assertIn("leak ?", s["summary"])
@@ -592,19 +673,22 @@ class TestCollect(Base):
             ("meaning", "host traffic hitting the kill switch"),
             ("match", "host traffic routed to the kill switch dummy (pvpnksintrf0/1)"),
             ("verdict", "drop  kill switch: always dropped"),
-            ("new packets", "info in status for 60 s after each tick with new packets"),
+            ("new packets", "alert new:out_ks (info), kept 60 s after the last tick with new "
+                            "packets"),
             ("log", "10/min burst 20: lines are samples, the counter is exact"),
             ("bytes", "7640"), ("since", "hostfw table load (a reload resets it)")])
         self.assertEqual(d[7:], [("", ""), ("last lines", "1 since sectop started"),
                                  ("t17", "icmpv6 fe80::1 -> ff02::1:ff00:1 pvpnksintrf0 type 135")])
         noise = dict(self.counter_detail(s, "in_noise"))
         self.assertEqual(noise["last lines"], "2 since sectop started")     # hidden kind kept here
-        self.assertEqual(noise["new packets"], "never raises status (noise)")
+        self.assertEqual(noise["new packets"], "no alert (noise)")
         self.assertEqual(noise["verdict"].split()[0], "zone")
         wg = dict(self.counter_detail(s, "out_wg"))
         self.assertEqual(wg["log"], "counted only, not logged")
         self.assertNotIn("last lines", wg)
-        self.assertEqual(wg["new packets"], "never raises status (allowed traffic)")
+        self.assertEqual(wg["new packets"], "no alert (allowed traffic)")
+        self.assertIn("(crit, info pre-connect)", dict(self.counter_detail(s, "out_leak"))[
+            "new packets"])
         self.assertEqual(dict(self.counter_detail(s, "in_vpn"))["last lines"],
                          "1 since sectop started")
 
@@ -694,6 +778,7 @@ class TestCollect(Base):
             self.host.set(key, NO_DEV)
         s = self.collect()
         self.assertEqual(s["status"], "warn")
+        self.assertEqual([c["key"] for c in s["checks"]], ["tunnel_down:proton0"])
         self.assertIn("proton0 down", s["summary"])
         v = self.items(s, "vpn")
         self.assertEqual(v["tunnel"], ("proton0 down (Unable to access interface: No such device)",
@@ -720,6 +805,14 @@ class TestCollect(Base):
         s = self.collect()
         self.assertEqual(self.items(s, "vpn")["handshake"], ("5m ago, sending", "crit"))
         self.assertEqual(s["status"], "crit")
+        c = self.check(s, "handshake_stale:proton0")
+        self.assertEqual((c["sev"], c["title"]), ("crit", "handshake stale"))
+        self.assertNotIn("kill switch", c["detail"])
+        self.tick()
+        self.host.set("wg transfer", ok("k\t19542372\t3300000\n"))
+        self.bump("out_ks", 4)                                 # transport to the dummy
+        c = self.check(self.collect(), "handshake_stale:proton0")
+        self.assertTrue(c["detail"].endswith("kill switch dropped +4 pkt this tick (fail closed)"))
 
     def test_handshake_never(self):
         self.host.set("wg latest-handshakes", ok("k\t0\n"))
@@ -741,6 +834,7 @@ class TestCollect(Base):
         s = self.collect()
         self.assertEqual(s["status"], "warn")
         self.assertIn("wg parse error", s["summary"])
+        self.assertEqual(sorted(c["key"] for c in s["checks"]), ["parse:routes", "parse:wg"])
         v = self.items(s, "vpn")
         self.assertEqual(v["tunnel"], ("ValueError: wg: no peer in latest-handshakes", "warn"))
         self.assertTrue(v["routes"][0].startswith("JSONDecodeError"))
