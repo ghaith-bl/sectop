@@ -1,9 +1,11 @@
 """firewall: hostfw + Proton WireGuard status for sectop.
 
-Sources (fixed argv, via core.run.run): nft counters / enforce chain /
-wg_fwmark set, kernel journal (HFW- lines, cursor), ss, wg per-field
-subcommands, ip default routes. Files: /etc/hostfw/mode, /run/hostfw/rollback,
-/proc/uptime. At start: one boot journal scan (leak lines, first tunnel flow).
+Sources (fixed argv, via core.run.run). Every tick: nft table without set
+elements (counters + enforce chain), kernel journal (HFW- lines, cursor),
+wg handshakes + transfer, ss. Every SLOW s or when the tunnel goes up / down:
+wg endpoints + fwmark, nft wg_fwmark set, ip default routes. Files:
+/etc/hostfw/mode, /run/hostfw/rollback, /proc/uptime. At start: one boot
+journal scan (leak lines, first tunnel flow).
 Audit box: every HFW line (allowed + blocked, in + out), program from ss.
 See docs/modules/firewall.md.
 """
@@ -24,6 +26,7 @@ INTERVAL = 2.0
 
 TIMEOUT = 1.0            # per command, keeps a full tick below INTERVAL
 BOOT_TIMEOUT = 5.0       # boot journal scan, once in init()
+SLOW = 30.0              # endpoint, live fwmark, wg_fwmark set, default routes: rarely change
 HS_STALE = 180           # WireGuard rejects keys after 180 s
 HOLD = 60.0              # seconds a new blocked packet keeps its severity in status
 SPARK = 120
@@ -167,6 +170,9 @@ class State:
         self.tunnel_first = None       # epoch of the first HFW-OUT-NEW line this boot
         self.boot = None               # boot time, epoch (from /proc/uptime)
         self.boot_note = ""            # boot scan problem, shown in the out_leak title
+        self.slow_at = None            # mono time the slow sources are due again
+        self.slow_up = None            # tunnel state at the last slow refresh
+        self.slow = (None, [], [])     # last slow result: endpoint item, items, checks
 
     def cmd(self, *argv, timeout=TIMEOUT):
         return self.run([self.bins[argv[0]], *argv[1:]], timeout=timeout)
@@ -266,9 +272,13 @@ def _remote(e) -> str | None:
 # --- sources --------------------------------------------------------------
 
 def _hostfw(st: State, checks: list) -> tuple:
-    """-> (kv items, counters or None, live mode)."""
+    """-> (kv items, counters or None, live mode).
+
+    One nft call: the whole table without set elements (-t) has the counters
+    and the enforce chain. Set elements (Proton entry IPs: thousands) are not needed.
+    """
     items = []
-    res = st.cmd("nft", "-j", "list", "counters", "table", *TABLE)
+    res = st.cmd("nft", "-j", "-t", "list", "table", *TABLE)
     if res.rc != 0:
         msg = "missing" if nft.missing(res.err) else _fail(res)
         checks.append(("crit", f"table {msg}"))
@@ -278,13 +288,11 @@ def _hostfw(st: State, checks: list) -> tuple:
     st.comments = nft.comments(res.out)
     items.append(_item("table", "loaded", tone="green"))
 
-    res = st.cmd("nft", "-j", "list", "chain", *TABLE, "enforce")
-    live = nft.mode(res.out) if res.rc == 0 else "unknown"
+    live = nft.mode(res.out)
     sev = {"enforce": "ok", "observe": "warn"}.get(live, "warn")
     if sev != "ok":
         checks.append((sev, f"mode {live}"))
-    items.append(_item("mode", live if res.rc == 0 else f"unknown ({_fail(res)})", sev,
-                       "green"))
+    items.append(_item("mode", live, sev, "green"))
 
     try:
         boot = _read(st.mode_file, st.owner)
@@ -532,13 +540,13 @@ def _flow_row(st: State, key: tuple, fl: Flow) -> dict:
 
 
 def _vpn(st: State, checks: list, wall: float) -> tuple:
-    """-> (kv items, summary text, fwmark or None, tunnel up)."""
+    """Every tick: handshake + transfer. -> (kv items, summary text, tunnel up)."""
     t = st.tunnel
     res = st.cmd("wg", "show", t, "latest-handshakes")
     if res.rc != 0:
         checks.append(("warn", f"{t} down"))
         st.prev_tx = None
-        return [_item("tunnel", f"{t} down ({_fail(res)})", "warn")], f"{t} down", None, False
+        return [_item("tunnel", f"{t} down ({_fail(res)})", "warn")], f"{t} down", False
     hs = vpn.handshake(res.out)
     items = [_item("tunnel", f"{t} up", tone="green")]
 
@@ -546,10 +554,6 @@ def _vpn(st: State, checks: list, wall: float) -> tuple:
     rx, tx = vpn.transfer(res.out) if res.rc == 0 else (None, None)
     sending = tx is not None and st.prev_tx is not None and tx > st.prev_tx
     st.prev_tx = tx
-
-    res = st.cmd("wg", "show", t, "endpoints")
-    ep = vpn.endpoint(res.out) if res.rc == 0 else _fail(res)
-    items.append(_item("endpoint", ep, ip=_ip(conns.split(ep)[0]) if res.rc == 0 else None))
 
     if hs == 0:
         sev = "warn" if sending else "info"
@@ -569,10 +573,44 @@ def _vpn(st: State, checks: list, wall: float) -> tuple:
         hs_text = f"hs {_age(age)}"
     if rx is not None:                 # since the tunnel came up: received / sent
         items.append(_item("recv / sent", f"{_human(rx)}B / {_human(tx)}B"))
+    return items, f"{t} up | {hs_text}", True
 
-    res = st.cmd("wg", "show", t, "fwmark")
-    mark = vpn.fwmark(res.out) if res.rc == 0 else None
-    return items, f"{t} up | {hs_text}", mark, True
+
+def _endpoint(st: State) -> dict:
+    res = st.cmd("wg", "show", st.tunnel, "endpoints")
+    if res.rc != 0:
+        return _item("endpoint", _fail(res))
+    ep = vpn.endpoint(res.out)
+    return _item("endpoint", ep, ip=_ip(conns.split(ep)[0]))
+
+
+def _live_mark(st: State):
+    res = st.cmd("wg", "show", st.tunnel, "fwmark")
+    return vpn.fwmark(res.out) if res.rc == 0 else None
+
+
+def _slow(st: State, up: bool) -> tuple:
+    """Rarely changing sources: endpoint, fwmark (live + set), default routes.
+
+    Run every SLOW s and when the tunnel goes up / down (collect). Their items
+    and checks are kept and shown every tick until the next run.
+    -> (endpoint item or None, items, checks).
+    """
+    checks, items, ep, mark, bad = [], [], None, None, []
+    if up:
+        ep = _safe(lambda: _endpoint(st), "wg", checks,
+                   lambda e: _item("endpoint", e, "warn"))
+        mark = _safe(lambda: _live_mark(st), "wg", checks, bad.append)
+    if bad:                            # live fwmark unreadable: no mismatch claim
+        items.append(_item("fwmark", f"live: {bad[0]}", "warn"))
+    else:
+        fm = _safe(lambda: _fwmark(st, mark, up, checks), "fwmark", checks,
+                   lambda e: _item("fwmark", e, "warn"))
+        if fm:
+            items.append(fm)
+    items += _safe(lambda: _routes(st, checks), "routes", checks,
+                   lambda e: [_item("routes", e, "warn")])
+    return ep, items, checks
 
 
 def _fwmark(st: State, mark, tunnel_up: bool, checks: list) -> dict | None:
@@ -894,15 +932,15 @@ def collect(st: State) -> dict:
                                   lambda e: (None, {}, {}))
     _held_checks(st, now, checks)
 
-    vpn_items, vpn_text, mark, up = _safe(
+    vpn_items, vpn_text, up = _safe(
         lambda: _vpn(st, checks, wall), "wg", checks,
-        lambda e: ([_item("tunnel", e, "warn")], f"{st.tunnel} ?", None, False))
-    fm = _safe(lambda: _fwmark(st, mark, up, checks), "fwmark", checks,
-               lambda e: _item("fwmark", e, "warn"))
-    if fm:
-        vpn_items.append(fm)
-    vpn_items += _safe(lambda: _routes(st, checks), "routes", checks,
-                       lambda e: [_item("routes", e, "warn")])
+        lambda e: ([_item("tunnel", e, "warn")], f"{st.tunnel} ?", False))
+    if st.slow_at is None or now >= st.slow_at or up != st.slow_up:
+        st.slow = _slow(st, up)
+        st.slow_at, st.slow_up = now + SLOW, up
+    ep, slow_items, slow_checks = st.slow
+    checks += slow_checks
+    vpn_items = vpn_items[:1] + ([ep] if ep else []) + vpn_items[1:] + slow_items
 
     blocked = sum(d for n, d in deltas.items() if kind_sev(n))
     if deltas:

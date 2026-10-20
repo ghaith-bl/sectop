@@ -25,8 +25,17 @@ def fail(err="", rc=1):
     return Result(rc, "", err, False, False)
 
 
-NO_TABLE = fail("Error: No such file or directory\nlist counters table inet hostfw\n")
+NO_TABLE = fail("Error: No such file or directory\nlist table inet hostfw\n")
 NO_DEV = fail("Unable to access interface: No such device\n")
+
+
+def table(chain="nft-enforce.json"):
+    """`nft -j -t list table inet hostfw` answer from the counter + chain fixtures:
+    metainfo, enforce chain (+ rule), counters. Keeps the counter values of the tests.
+    The real host output (nft-table-terse.json) is tested in TestNft."""
+    counters = json.loads(fix("nft-counters.json"))["nftables"]
+    enforce = json.loads(fix(chain))["nftables"]
+    return json.dumps({"nftables": counters[:1] + enforce[1:] + counters[1:]})
 
 
 class TestNft(unittest.TestCase):
@@ -52,6 +61,24 @@ class TestNft(unittest.TestCase):
         self.assertEqual(nft.mode(json.dumps(doc)), "unknown")
         doc["nftables"].append(doc["nftables"][2])
         self.assertEqual(nft.mode(json.dumps(doc)), "unknown")
+
+    def test_table_terse(self):
+        # `nft -j -t list table inet hostfw` from my host, 2026-10-20: no set elements
+        text = fix("nft-table-terse.json")
+        c = nft.counters(text)
+        self.assertEqual(len(c), 19)
+        self.assertEqual((list(c)[0], c["out_leak"], c["out_new"]),
+                         ("out_dns_vpn", (4, 240), (335, 110636)))
+        self.assertEqual(nft.comments(text)["out_leak"], "host to internet outside the tunnel")
+        self.assertEqual(nft.mode(text), "enforce")                 # deny / ks rules ignored
+        doc = json.loads(text)
+        self.assertFalse(any("elem" in it["set"] for it in doc["nftables"] if "set" in it))
+        doc["nftables"] = [it for it in doc["nftables"]
+                           if it.get("rule", {}).get("chain") != "enforce"]
+        self.assertEqual(nft.mode(json.dumps(doc)), "observe")
+        doc["nftables"] = [it for it in doc["nftables"]
+                           if it.get("chain", {}).get("name") != "enforce"]
+        self.assertEqual(nft.mode(json.dumps(doc)), "unknown")      # chain gone
 
     def test_comments(self):
         c = nft.comments(fix("nft-counters.json"))
@@ -233,8 +260,7 @@ class Host:
     def __init__(self):
         self.calls = []
         self.answers = {}
-        self.set("nft list counters", ok(fix("nft-counters.json")))
-        self.set("nft list chain", ok(fix("nft-enforce.json")))
+        self.set("nft list table", ok(table()))
         self.set("nft list set", ok(fix("nft-wg-fwmark.json")))
         self.set("journalctl", ok(""))
         self.set("ss", ok(fix("ss.txt")))
@@ -287,19 +313,19 @@ class Base(unittest.TestCase):
         self.wall += sec
 
     def bump(self, name, by):
-        doc = json.loads(self.host.answers["nft list counters"].out)
+        doc = json.loads(self.host.answers["nft list table"].out)
         for it in doc["nftables"]:
             c = it.get("counter")
             if c and c["name"] == name:
                 c["packets"] += by
-        self.host.set("nft list counters", ok(json.dumps(doc)))
+        self.host.set("nft list table", ok(json.dumps(doc)))
 
     def add_counters(self, *names):
-        doc = json.loads(self.host.answers["nft list counters"].out)
+        doc = json.loads(self.host.answers["nft list table"].out)
         for n in names:
             doc["nftables"].append({"counter": {"family": "inet", "name": n, "table": "hostfw",
                                                 "handle": 900, "packets": 0, "bytes": 0}})
-        self.host.set("nft list counters", ok(json.dumps(doc)))
+        self.host.set("nft list table", ok(json.dumps(doc)))
 
     def panel(self, snap, pid):
         return next(p for p in snap["panels"] if p["id"] == pid)
@@ -376,11 +402,11 @@ class TestCollect(Base):
     def test_counter_reset(self):
         self.collect()
         self.tick()
-        doc = json.loads(fix("nft-counters.json"))
+        doc = json.loads(table())
         for it in doc["nftables"]:
             if "counter" in it:
                 it["counter"]["packets"] = 1 if it["counter"]["name"] == "out_leak" else 0
-        self.host.set("nft list counters", ok(json.dumps(doc)))
+        self.host.set("nft list table", ok(json.dumps(doc)))
         s = self.collect()                                    # 4 -> 1: reload, count 1
         self.assertEqual(s["status"], "crit")
 
@@ -420,7 +446,7 @@ class TestCollect(Base):
         self.assertEqual(s["status"], "warn")
 
     def test_table_missing(self):
-        self.host.set("nft list counters", NO_TABLE)
+        self.host.set("nft list table", NO_TABLE)
         s = self.collect()
         self.assertEqual(s["status"], "crit")
         self.assertEqual(self.items(s, "hostfw")["table"], ("missing", "crit"))
@@ -430,7 +456,7 @@ class TestCollect(Base):
         self.assertIn("vpn", [p["id"] for p in s["panels"]])     # other sources still shown
 
     def test_observe(self):
-        self.host.set("nft list chain", ok(fix("nft-observe.json")))
+        self.host.set("nft list table", ok(table("nft-observe.json")))
         s = self.collect()
         self.assertEqual(s["status"], "warn")
         self.assertEqual(self.items(s, "hostfw")["mode"], ("observe", "warn"))
@@ -472,7 +498,7 @@ class TestCollect(Base):
         self.assertEqual((row["cells"][1:3], row["sev"]), (["1", "+1"], "info"))
 
     def audit(self, chain="nft-enforce.json"):
-        self.host.set("nft list chain", ok(fix(chain)))
+        self.host.set("nft list table", ok(table(chain)))
         self.host.set("journalctl", ok(fix("journal-audit.json")))
         self.st.hms = lambda ts: f"t{int(ts) % 100}"
         self.st.stamp = lambda ts: f"T{ts:.3f}"
@@ -542,7 +568,7 @@ class TestCollect(Base):
                             if "tone" in i))
 
     def test_no_tone_on_problems(self):
-        self.host.set("nft list chain", ok(fix("nft-observe.json")))
+        self.host.set("nft list table", ok(table("nft-observe.json")))
         self.host.set("wg fwmark", ok("0x1\n"))
         s = self.collect()
         hostfw = {i["k"]: i for i in self.panel(s, "hostfw")["items"]}
@@ -677,6 +703,7 @@ class TestCollect(Base):
     def test_fwmark_mismatch(self):
         for out in ("0x1\n", "off\n"):
             with self.subTest(out=out):
+                self.setUp()                                    # fresh: fwmark is a slow source
                 self.host.set("wg fwmark", ok(out))
                 s = self.collect()
                 self.assertEqual(s["status"], "crit")
@@ -792,7 +819,7 @@ class TestCollect(Base):
         peers = self.panel(s, "peers")["rows"]
         self.assertTrue(all(r["ip"] == r["cells"][0] for r in peers))
         self.host.set("wg endpoints", ok("k\t(none)\n"))
-        self.tick()
+        self.tick(fw.SLOW)                                      # endpoint: slow source
         vpn_items = {i["k"]: i for i in self.panel(self.collect(), "vpn")["items"]}
         self.assertNotIn("ip", vpn_items["endpoint"])
 
@@ -816,12 +843,16 @@ class TestCollect(Base):
         for bad in ("127.0.0.53", "::1", "ff02::1", "255.255.255.255", "0.0.0.0", "x"):
             self.assertIsNone(fw._addr(bad), bad)
 
+    def argvs(self):
+        out = [" ".join([os.path.basename(c[0])] + c[1:]) for c in self.host.calls]
+        self.host.calls.clear()
+        return out
+
     def test_commands(self):
         self.collect()
-        argvs = [" ".join([os.path.basename(c[0])] + c[1:]) for c in self.host.calls]
+        argvs = self.argvs()
         self.assertEqual(argvs, [
-            "nft -j list counters table inet hostfw",
-            "nft -j list chain inet hostfw enforce",
+            "nft -j -t list table inet hostfw",
             f"journalctl _TRANSPORT=kernel -o json --output-fields=MESSAGE -q --no-pager "
             f"--since=@{self.st.since}",
             "wg show proton0 latest-handshakes",
@@ -834,6 +865,60 @@ class TestCollect(Base):
             "ss -tunapH state established",
         ])
         self.assertFalse(any("dump" in a for a in argvs))           # never prints private key
+
+    def test_commands_per_tick(self):
+        fast = ["nft", "journalctl", "wg latest-handshakes", "wg transfer", "ss"]
+        words = lambda: [a.split()[0] if a.split()[0] != "wg" else "wg " + a.split()[3]
+                         for a in self.argvs()]
+        self.collect()
+        self.assertEqual(len(words()), 10)                          # first tick: all sources
+        for _ in range(int(fw.SLOW // 2) - 1):
+            self.tick()
+            self.collect()
+            self.assertEqual(words(), fast)                         # 5 commands per tick
+        self.tick()
+        self.collect()
+        self.assertEqual(len(words()), 10)                          # SLOW s later: all again
+
+    def test_slow_refresh_on_tunnel_change(self):
+        self.collect()
+        self.tick()
+        for key in ("wg latest-handshakes", "wg transfer"):
+            self.host.set(key, NO_DEV)
+        self.argvs()
+        s = self.collect()                                          # up -> down: refresh now
+        self.assertEqual([a for a in self.argvs() if not a.startswith(("journalctl", "ss"))], [
+            "nft -j -t list table inet hostfw", "wg show proton0 latest-handshakes",
+            "nft -j list set inet hostfw wg_fwmark",
+            "ip -j -4 route show default", "ip -j -6 route show default"])
+        v = self.items(s, "vpn")
+        self.assertNotIn("endpoint", v)
+        self.assertEqual(v["fwmark"], ("set 0xea13b2c", "ok"))
+        self.tick()
+        self.host.set("wg latest-handshakes", ok(fix("wg-handshakes.txt")))
+        self.host.set("wg transfer", ok(fix("wg-transfer.txt")))
+        s = self.collect()                                          # down -> up: refresh now
+        self.assertEqual(self.items(s, "vpn")["fwmark"], ("0xea13b2c (in set)", "ok"))
+        self.assertIn("wg show proton0 endpoints", self.argvs())
+
+    def test_slow_checks_kept(self):
+        self.host.set("ip -4", ok('[{"dst":"default","gateway":"192.168.8.1","dev":"wlo1",'
+                                  '"metric":600}]'))
+        self.assertEqual(self.collect()["status"], "warn")
+        self.tick()
+        self.argvs()
+        s = self.collect()                                          # no ip call this tick
+        self.assertFalse(any(a.startswith("ip ") for a in self.argvs()))
+        self.assertEqual(s["status"], "warn")
+        self.assertEqual(self.items(s, "vpn")["default v4"],
+                         ("wlo1 via 192.168.8.1 metric 600", "warn"))
+
+    def test_fwmark_unreadable(self):
+        self.host.set("wg fwmark", ok("garbage\n"))
+        s = self.collect()
+        self.assertEqual(s["status"], "warn")                       # no mismatch claim
+        self.assertTrue(self.items(s, "vpn")["fwmark"][0].startswith("live: ValueError"))
+        self.assertIn("wg parse error", s["summary"])
 
 
 def jline(cur, ts, msg):

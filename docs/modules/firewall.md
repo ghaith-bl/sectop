@@ -8,15 +8,31 @@ commands, applies rules, builds the Snapshot.
 
 All via `core.run.run()`, timeout 1.0 s each, binaries from `/usr/bin` (fallback `/usr/sbin`).
 
+Every tick (5 commands):
+
 | what | argv |
 |---|---|
-| counters | `nft -j list counters table inet hostfw` |
-| live mode | `nft -j list chain inet hostfw enforce` |
-| fwmark set | `nft -j list set inet hostfw wg_fwmark` |
+| counters + live mode | `nft -j -t list table inet hostfw` |
 | log lines | `journalctl _TRANSPORT=kernel -o json --output-fields=MESSAGE -q --no-pager --after-cursor=<c>` |
-| tunnel | `wg show proton0 latest-handshakes`, `transfer`, `endpoints`, `fwmark` |
-| routes | `ip -j -4 route show default`, `ip -j -6 route show default` |
+| tunnel | `wg show proton0 latest-handshakes`, `transfer` |
 | open sockets (peers, prog) | `ss -tunapH state established` |
+
+Slow (every 30 s, and at once when the tunnel goes up / down):
+
+| what | argv |
+|---|---|
+| endpoint, live fwmark | `wg show proton0 endpoints`, `fwmark` (tunnel up only) |
+| fwmark set | `nft -j list set inet hostfw wg_fwmark` |
+| routes | `ip -j -4 route show default`, `ip -j -6 route show default` |
+
+- Why: sectop v1 runs as root from my login, so every command is an audit record
+  (rule `root_cmds`, ~7 journal entries each). Was 11 commands per tick. See
+  docs/architecture.md, Privilege split.
+- `-t` (nft(8): "Omit contents of sets"): counters and the enforce chain without the
+  set elements (Proton entry IPs: thousands). wg_fwmark elements come from the slow set call.
+- Mode from the table: only rules of chain `enforce` count; no chain `enforce` = unknown.
+- Slow items and their checks are kept and shown every tick until the next slow run.
+  A changed endpoint, fwmark or default route shows within 30 s (a reconnect at once).
 
 Once in `init()` (boot scan, timeout 5 s each, see out_leak box):
 
@@ -224,5 +240,8 @@ not armed, no check. `hostfw status` asks systemd for the timer, so it is always
 - journal.json: real OUT-KS / IN-NOISE lines, 3 fields kept, cursors rewritten.
   OUT-LEAK, OUT-DNS, IN-VPN and the non-HFW line are synthetic (format from real logs).
 - nft-observe.json: nft-enforce.json without the reject rule.
+- nft-table-terse.json: `nft -j -t list table inet hostfw`, 2026-10-20, as is (no set
+  elements, nothing to replace). Collect tests build the table answer from
+  nft-counters.json + nft-enforce.json / nft-observe.json (same shape, known values).
 - journal-audit.json: synthetic, one line per kind (format from hostfw.nft log rules),
   OUT-NEW tcp line = brave flow in ss.txt.

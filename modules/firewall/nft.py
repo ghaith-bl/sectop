@@ -15,7 +15,8 @@ def _count(x) -> bool:
 
 
 def counters(text: str) -> dict:
-    """`list counters table inet hostfw` -> {name: (packets, bytes)}, nft order."""
+    """`list counters table inet hostfw` or `-t list table inet hostfw`
+    -> {name: (packets, bytes)}, nft order."""
     out = {}
     for it in _items(text):
         c = it.get("counter")
@@ -29,7 +30,7 @@ def counters(text: str) -> dict:
 
 
 def comments(text: str) -> dict:
-    """`list counters table inet hostfw` -> {name: comment} (rule meaning)."""
+    """Same output as counters() -> {name: comment} (rule meaning)."""
     out = {}
     for it in _items(text):
         c = it.get("counter")
@@ -40,11 +41,18 @@ def comments(text: str) -> dict:
 
 
 def mode(text: str) -> str:
-    """`list chain inet hostfw enforce` -> observe | enforce | unknown.
+    """`list chain inet hostfw enforce` or `-t list table inet hostfw`
+    -> observe | enforce | unknown.
 
-    hostfw contract: empty chain = observe, one reject rule = enforce.
+    hostfw contract: chain `enforce` empty = observe, one reject rule = enforce.
+    Only rules of chain `enforce` count. No chain `enforce` in the output = unknown.
     """
-    rules = [it["rule"] for it in _items(text) if isinstance(it.get("rule"), dict)]
+    items = _items(text)
+    chains = {c.get("name") for c in (it.get("chain") for it in items) if isinstance(c, dict)}
+    if "enforce" not in chains:
+        return "unknown"
+    rules = [it["rule"] for it in items
+             if isinstance(it.get("rule"), dict) and it["rule"].get("chain") == "enforce"]
     if not rules:
         return "observe"
     expr = rules[0].get("expr")
