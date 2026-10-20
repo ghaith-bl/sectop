@@ -16,6 +16,11 @@ calls done(). Results are kept per address for the session.
 Filter: / starts typing a filter for the focused table / events box. Every
 key is text until enter (keep) or Esc (back to the old filter). The filter
 applies while typing. Esc outside typing clears the focused box's filter.
+
+Ack: a acks every engine alert in the last alert bar (Frame.alerts): key ->
+(count, sev) at ack. render.acked() dims it until its count or severity
+rises. Kept here, not in core: the channel stays one-way (docs/architecture.md).
+Phase 2: memory only (sectop still runs as root).
 """
 
 import curses
@@ -47,6 +52,8 @@ class UI:
     typing: str | None = None                    # filter being typed (None = not typing)
     whois: dict = field(default_factory=dict)    # ip -> [(key, value)], oldest first
     lookup: str | None = None                    # ip waiting for a lookup (core runs it)
+    acks: dict = field(default_factory=dict)     # alert key -> (count, sev) at ack
+    bar: tuple = ()                              # (key, count, sev) in the last alert bar
     boxes: tuple = ()                            # BoxInfo of the last frame
     _auto_pause: bool = False                    # pause came from opening detail
     _typing_box: str | None = None
@@ -55,6 +62,7 @@ class UI:
     def update(self, frame) -> None:
         """Take what the renderer resolved (focus, cursor, scroll)."""
         self.boxes = frame.boxes
+        self.bar = frame.alerts
         for b in frame.boxes:
             self.sel[b.key], self.scroll[b.key], self.anchor[b.key] = b.sel, b.off, b.ident
         if frame.focus is not None and not self.overlay:
@@ -83,6 +91,8 @@ class UI:
             self._auto_pause = False
         elif k in (ord("w"), ord("W")):
             self._whois()
+        elif k in (ord("a"), ord("A")):
+            self._ack()
         elif self.overlay:
             if k in BACK_KEYS + ENTER_KEYS + (ord("q"), ord("Q"), ord("?")):
                 self._close()
@@ -113,6 +123,11 @@ class UI:
         else:
             self._move_key(k)
         return True
+
+    def _ack(self) -> None:
+        """Ack the alerts in the bar. Acks of alerts no longer in it are dropped
+        (one that comes back has a higher count: it shows again anyway)."""
+        self.acks = {key: (count, sev) for key, count, sev in self.bar}
 
     def done(self, ip: str, pairs: list) -> None:
         """Lookup finished (core/app.py)."""

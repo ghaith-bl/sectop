@@ -71,7 +71,9 @@ def close(state: object) -> None: ...     # optional
 ## Severity
 
 `ok < info < warn < crit`. `unknown` = no valid data.
-Module sets status. Core overrides only for stale / error (see Errors).
+v1: module sets status. v2: header status = worst open / held alert of the module
+(not noise), so header and alert bar agree; the Snapshot `status` is the module's view of
+this tick. Core overrides both for stale / error (see Errors).
 
 ## Panels
 
@@ -186,8 +188,15 @@ A condition that is not true any more is left out.
 - Start screen: `sectop [SCREEN]`, name or number, default 1. Unknown -> usage, rc 2.
 - Lines, top to bottom:
   - tabs, PAUSED, mask state, clock
-  - alert bar: modules on any screen with status crit, warn or unknown, worst first.
-    Not while waiting for the first collect. (Phase 2: alert engine.)
+  - alert bar (`core/render.py` `_alerts`), alerts from all screens:
+    - engine alerts (Alerts, `active()`) with sev warn / crit, not noise:
+      `TAG title` + ` xN` when count > 1. Held alert (condition gone, within hold): dim title.
+    - module problems the engine does not cover: status unknown (not loaded, stale,
+      error), crit / warn of a v1 module: `TAG name`. Not while waiting for the first collect.
+    - Not acked first, then acked (dim tag). Each group: crit, warn, unknown, engine
+      order inside.
+    - Right: `N alerts  K acked  I info  Z noise` (info and noise alerts are counted, not
+      listed). Too long: alerts cut (`~`), counts stay.
   - one header per module on this screen: `[STATUS] name  summary  | flags`
   - box grid
   - key help
@@ -241,8 +250,12 @@ A condition that is not true any more is left out.
   Resume shows the current view.
 - Keys: `1-9` screen; `tab` / right / `l` next box, `shift-tab` / left / `h` previous box;
   down / up / `j` `k` line; `space` `PgDn` / `PgUp` page; `g` `G` / `Home` `End` first / last;
-  `enter` detail; `/` filter; `Esc` clear filter; `w` whois; `p` pause; `m` mask; `?` help;
-  `q` quit.
+  `enter` detail; `/` filter; `Esc` clear filter; `w` whois; `a` ack; `p` pause; `m` mask;
+  `?` help; `q` quit.
+- Ack (`a`, also in help / detail, not while typing a filter): every engine alert in the
+  alert bar is acked: key -> (count, sev) at ack (`core/ui.py`). Shown dim, last, until
+  its count or severity rises. Acks of alerts no longer in the bar are dropped. Phase 2:
+  memory only (sectop still runs as root, no file in my home).
   In help / detail: `Esc` `q` `enter` `?` close, line keys scroll. Esc delay 25 ms.
 - Redraw: full after a collect (not while paused) or a key (incl. resize); between those
   only the clock line, once a second.

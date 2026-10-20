@@ -15,6 +15,7 @@ Status: in progress (phase 2: alert engine, docs/architecture.md). Runs in dev m
   (see docs/module-interface.md)
 - v1 runs as root. Phase 3: non-root collector service, UI as my user
   (docs/architecture.md, Privilege split)
+- alert bar on every screen (alert engine, warn / crit), key a acks what it shows
 - public IPs masked by default, toggle with key m. The detail view (enter) shows them
 - w: whois (RDAP) of the selected IP, in a child process as user nobody
 

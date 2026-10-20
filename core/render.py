@@ -8,7 +8,7 @@ Width is counted in terminal cells (wide chars = 2, combining marks = 0).
 
 Screen, top to bottom:
     tabs, pause, mask, clock
-    alert bar (problems from all screens)
+    alert bar (alert engine: problems from all screens, see _alerts)
     one header per module on this screen
     box grid (panels packed left to right, then events), or one overlay
     box (help, detail of the selected line)
@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from core.lookup import TIMEOUT as LOOKUP_TIMEOUT
 from core.lookup import USER as LOOKUP_USER
 from core.lookup import public
+from core.module import SEV_RANK
 from core.sanitize import TRUNC, display, mask_ips
 
 TAGS = {"ok": "OK", "info": "INFO", "warn": "WARN", "crit": "CRIT",
@@ -44,6 +45,7 @@ TABLE_MIN = 24                               # table content width
 SPARK_W = 40                                 # spark content width
 GRID_MIN = 4                                 # narrower: no boxes
 ALERT_RANK = {"crit": 0, "warn": 1, "unknown": 2}
+BAR_SEVS = ("warn", "crit")                  # info alerts: counted, not in the bar
 SEL = "sel "                                 # style prefix: reverse video
 BOLD = "bold "                               # style prefix: bold (warn line with a tone)
 # tone colors: soft on 256-color terminals (xterm palette), basic colors otherwise
@@ -65,6 +67,8 @@ HELP = (
     ("enter", "detail of the selected line (pauses while open, real IPs)"),
     ("/", "filter the focused table: all words match, !word must not"),
     ("w", f"whois of the selected IP (RDAP as user {LOOKUP_USER}, via the tunnel)"),
+    ("a", "ack the alerts in the alert bar (dims them; a higher count or severity "
+          "shows them again)"),
     ("Esc", "clear the filter of the focused table"),
     ("p", "pause / resume the screen (data is still collected)"),
     ("m", "mask public IPs on / off"),
@@ -72,7 +76,7 @@ HELP = (
     ("q", "quit"),
 )
 FOOTER = ("1-{n} screen  tab <- -> box  up down j k select  enter detail  / filter  "
-          "w whois  p pause  m mask  ? help  q quit")
+          "w whois  a ack  p pause  m mask  ? help  q quit")
 TYPING = "  enter apply  esc cancel  (all words match, !word must not)"
 FILTER_MAX = 60
 
@@ -97,6 +101,7 @@ class Frame:
     lines: list         # each: list of (text, style)
     boxes: tuple        # BoxInfo, in screen order
     focus: str | None = None
+    alerts: tuple = ()  # (key, count, sev) of the engine alerts in the bar (ack key)
 
 
 # --- cells ----------------------------------------------------------------
@@ -235,19 +240,64 @@ def _tabs(screens, ui, width: int, now, tsfmt) -> list:
     return _right(width, ui.mask, parts, right + [(tail + " ", "dim")])
 
 
-def _alerts(view: list, mask: bool, width: int) -> list:
-    """Phase 1: modules with a problem status, worst first; details are in the
-    module header on its screen. Phase 2: alert engine."""
-    items = [m for m in view if m["status"] in ALERT_RANK and not m.get("waiting")]
-    items.sort(key=lambda m: ALERT_RANK[m["status"]])
-    if not items:
-        return _line(width, mask, (" no alerts", "dim"))
-    parts = []
-    for i, m in enumerate(items):
-        parts += [("    " if i else " ", "plain"), (TAGS[m["status"]], m["status"]),
-                  (f" {m['name']}", "plain")]
+def acked(a: dict, acks: dict) -> bool:
+    """Acked and nothing new since: same or lower count and severity."""
+    ack = acks.get(a["key"])
+    return (ack is not None and a["count"] <= ack[0]
+            and SEV_RANK[a["sev"]] <= SEV_RANK[ack[1]])
+
+
+def _alerts(view: list, alerts: list, acks: dict, mask: bool, width: int) -> tuple:
+    """Alert bar -> (line, shown engine alerts as (key, count, sev)).
+
+    Items: engine alerts (core/alerts.py active(): warn / crit, not noise) and
+    module problems the engine does not cover (status unknown: not loaded,
+    stale, error; crit / warn of a v1 module). Not acked first, then acked
+    (dim). Each group: crit, warn, unknown, engine order inside. A held alert
+    (condition gone, kept for its hold time) has a dim title. Right side:
+    counts, incl. info and noise alerts, which are not in the bar.
+    """
+    items = []                                  # (acked, rank, parts)
+    shown = []
+    for a in alerts:
+        if a["noise"] is not None or a["sev"] not in BAR_SEVS:
+            continue
+        ack = acked(a, acks)
+        title = a["title"] + (f" x{a['count']}" if a["count"] > 1 else "")
+        dim = ack or a["state"] != "open"
+        items.append((ack, ALERT_RANK[a["sev"]],
+                      [("dim" if ack else a["sev"], TAGS[a["sev"]]),
+                       ("dim" if dim else "plain", f" {title}")]))
+        shown.append((a["key"], a["count"], a["sev"]))
+    for m in view:
+        st = m["status"]
+        if m.get("waiting") or st not in ALERT_RANK or (m.get("engine") and st != "unknown"):
+            continue
+        items.append((False, ALERT_RANK[st], [(st, TAGS[st]), ("plain", f" {m['name']}")]))
+    items.sort(key=lambda it: (it[0], it[1]))   # stable: engine order inside a rank
+
     n = len(items)
-    return _right(width, mask, parts, [(f"{n} alert{'s' if n != 1 else ''} ", "dim")])
+    k = sum(1 for it in items if it[0])
+    info = sum(1 for a in alerts if a["noise"] is None and a["sev"] == "info")
+    noise = sum(1 for a in alerts if a["noise"] is not None)
+    right = f"{n} alert{'s' if n != 1 else ''}" if n else ""
+    for count, word in ((k, "acked"), (info, "info"), (noise, "noise")):
+        if count:
+            right += ("  " if right else "") + f"{count} {word}"
+    parts = []
+    for i, (_ack, _rank, its) in enumerate(items):
+        parts.append(("   " if i else " ", "plain"))
+        parts += [(t, s) for s, t in its]
+    if not parts:
+        parts = [(" no alerts", "dim")]
+    if not right:
+        return _line(width, mask, *parts), tuple(shown)
+    rp = [(right + " ", "dim")]
+    room = width - _len(rp) - 1
+    if room < 12:                               # too narrow for both: alerts first
+        return _line(width, mask, *parts), tuple(shown)
+    left = _line(room, mask, *parts)
+    return left + [(" " * (width - _len(left) - _len(rp)), "plain")] + rp, tuple(shown)
 
 
 def _header(m: dict, width: int, mask: bool) -> list:
@@ -705,8 +755,9 @@ def _hi(line: list) -> list:
 # --- layout ---------------------------------------------------------------
 
 def layout(screens, view: list, feed: list, ui, width: int, height: int,
-           now: float | None = None, tsfmt=_ts) -> Frame:
-    """Frame for the current screen: at most height lines of at most width cells."""
+           now: float | None = None, tsfmt=_ts, alerts=()) -> Frame:
+    """Frame for the current screen: at most height lines of at most width cells.
+    alerts: core/alerts.py active() (the alert bar)."""
     if width <= 0 or height <= 0:
         return Frame([], ())
     mask = ui.mask
@@ -714,10 +765,11 @@ def layout(screens, view: list, feed: list, ui, width: int, height: int,
     by_name = {m["name"]: m for m in view}
     mods = [by_name[n] for n in scr.modules if n in by_name]
 
-    top = [_tabs(screens, ui, width, now, tsfmt), _alerts(view, mask, width)]
+    bar, shown = _alerts(view, list(alerts), getattr(ui, "acks", {}), mask, width)
+    top = [_tabs(screens, ui, width, now, tsfmt), bar]
     top += [_header(m, width, mask) for m in mods]
     if len(top) >= height:
-        return Frame(top[:height], ())
+        return Frame(top[:height], (), alerts=shown)
     room = height - len(top)
     footer = [_footer(len(screens), width, ui)] if room >= 4 else []
     room -= len(footer)
@@ -731,7 +783,7 @@ def layout(screens, view: list, feed: list, ui, width: int, height: int,
         boxes = [over]
     grid, infos, focus = _grid(boxes, ui, width, room, mask, tsfmt,
                                getattr(scr, "focus", None))
-    return Frame(top + grid + footer, infos, focus)
+    return Frame(top + grid + footer, infos, focus, shown)
 
 
 # --- curses ---------------------------------------------------------------
@@ -803,10 +855,11 @@ def draw_top(stdscr, screens, ui, now: float) -> None:
     stdscr.refresh()
 
 
-def draw(stdscr, screens, view: list, feed: list, ui, now: float | None = None) -> Frame:
+def draw(stdscr, screens, view: list, feed: list, ui, now: float | None = None,
+         alerts=()) -> Frame:
     h, w = stdscr.getmaxyx()
     # w - 1: writing the last cell of a line can raise in curses.
-    frame = layout(screens, view, feed, ui, w - 1, h, now)
+    frame = layout(screens, view, feed, ui, w - 1, h, now, alerts=alerts)
     stdscr.erase()
     for y, line in enumerate(frame.lines):
         _paint(stdscr, y, line)

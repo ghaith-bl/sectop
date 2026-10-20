@@ -95,10 +95,27 @@ class TestKeys(unittest.TestCase):
 
     def test_update(self):
         u = UI(3)
-        frame = Frame([], (BoxInfo("m/a", 9, 4, sel=2, off=1, ident="t"),), focus="m/a")
+        frame = Frame([], (BoxInfo("m/a", 9, 4, sel=2, off=1, ident="t"),), focus="m/a",
+                      alerts=(("fw/a", 2, "warn"),))
         u.update(frame)
         self.assertEqual((u.sel["m/a"], u.scroll["m/a"], u.anchor["m/a"]), (2, 1, "t"))
         self.assertEqual((u.focus[0], u.boxes), ("m/a", frame.boxes))
+        self.assertEqual(u.bar, (("fw/a", 2, "warn"),))
+
+    def test_ack(self):
+        u = ui(help=True)
+        u.bar = (("fw/a", 2, "warn"), ("fw/b", 1, "crit"))
+        u.acks = {"fw/gone": (1, "warn")}
+        u.key(ord("a"))                                    # works in overlay too
+        self.assertEqual(u.acks, {"fw/a": (2, "warn"), "fw/b": (1, "crit")})
+        self.assertTrue(u.help)
+        u.bar = ()
+        u.key(ord("A"))
+        self.assertEqual(u.acks, {})
+        u = ui(focus={0: "m/b"})
+        u.key(ord("/"))
+        u.key(ord("a"))                                    # typing: text, not ack
+        self.assertEqual((u.typing, u.acks), ("a", {}))
 
     def test_detail(self):
         u = ui(focus={0: "m/b"})

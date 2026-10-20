@@ -1,3 +1,4 @@
+import datetime
 import types
 import unittest
 from unittest import mock
@@ -5,6 +6,7 @@ from unittest import mock
 from core import app
 from core.app import Core, Quit, backoff
 from core.config import ConfigError
+from core.noise import Entry
 from core.registry import Loaded
 
 
@@ -146,6 +148,31 @@ class TestCore(unittest.TestCase):
         self.assertIs(c.alerts, kept)
         self.assertEqual(Core([]).alerts, {"alerts": {}})
 
+    def test_v2_status_from_engine(self):
+        wall = Clock(1760950000.0)
+        checks = [{"key": "a", "sev": "warn", "title": "t"}, {"key": "b", "sev": "crit",
+                                                             "title": "u"}]
+        v2 = {**snap(status="ok"), "v": 2, "checks": checks}
+        c = Core([loaded(collect=Script(v2, {**v2, "checks": []}))], clock=Clock(), wall=wall,
+                 noise=(Entry("a/b", "known", datetime.date(2999, 1, 1)),))
+        c.tick()
+        [m] = c.view()
+        self.assertEqual((m["status"], m["engine"]), ("warn", True))   # b is noise
+        c.clock.t += 2
+        wall.t += 2
+        c.tick()                                         # checks gone: held, still warn
+        self.assertEqual(c.view()[0]["status"], "warn")
+        wall.t += 60
+        self.assertEqual(c.view()[0]["status"], "ok")    # hold over
+        c.clock.t += 7
+        self.assertEqual(c.view()[0]["status"], "unknown")   # stale beats the engine
+
+    def test_v1_status_from_snapshot(self):
+        c = self.core(loaded(collect=Script(snap("crit"))))
+        c.tick()
+        [m] = c.view()
+        self.assertEqual((m["status"], m["engine"]), ("crit", False))
+
     def test_v1_checks_ignored(self):
         c = self.core(loaded(collect=Script({**snap(), "checks": [1]})))
         c.tick()
@@ -246,18 +273,33 @@ class TestSource(unittest.TestCase):
         core = Core([loaded(collect=s)], clock=clock)
         ui = types.SimpleNamespace(paused=False)
         core.tick()
-        view, feed, frozen = app.source(core, ui, None)
-        self.assertEqual((view[0]["summary"], len(feed), frozen), ("one", 1, None))
+        view, feed, alerts, frozen = app.source(core, ui, None)
+        self.assertEqual((view[0]["summary"], len(feed), alerts, frozen), ("one", 1, [], None))
         ui.paused = True
-        view, feed, frozen = app.source(core, ui, frozen)
+        view, feed, alerts, frozen = app.source(core, ui, frozen)
         clock.t += 2
         core.tick()                                      # still collects while paused
         self.assertEqual(len(s.calls), 2)
-        view, feed, frozen = app.source(core, ui, frozen)
+        view, feed, alerts, frozen = app.source(core, ui, frozen)
         self.assertEqual((view[0]["summary"], len(feed)), ("one", 1))
         ui.paused = False
-        view, feed, frozen = app.source(core, ui, frozen)
+        view, feed, alerts, frozen = app.source(core, ui, frozen)
         self.assertEqual((view[0]["summary"], len(feed), frozen), ("two", 2, None))
+
+    def test_alerts_frozen_while_paused(self):
+        clock, wall = Clock(), Clock(1760950000.0)
+        crit = {**snap(), "v": 2, "checks": [{"key": "k", "sev": "crit", "title": "t"}]}
+        core = Core([loaded(collect=Script(crit, {**snap(), "v": 2, "checks": []}))],
+                    clock=clock, wall=wall)
+        ui = types.SimpleNamespace(paused=True)
+        core.tick()
+        _v, _f, alerts, frozen = app.source(core, ui, None)
+        clock.t += 2
+        wall.t += 120                                    # past the hold
+        core.tick()
+        self.assertEqual(app.source(core, ui, frozen)[2], alerts)
+        ui.paused = False
+        self.assertEqual(app.source(core, ui, frozen)[2], [])
 
 
 class TestLookupStep(unittest.TestCase):

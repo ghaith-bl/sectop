@@ -35,9 +35,9 @@ can decide from what is on screen. Read-only until the privilege split (phase 3)
   replaces it.
 
 Keys now: `1-3` screen, `tab` / arrows box, `j/k` / arrows select line, `PgDn/PgUp` page,
-`enter` detail, `/` filter, `Esc` clear filter, `w` whois, `p` pause, `m` mask, `?` help,
-`q` quit.
-Planned: `a` ack alert, `t` capture (from detail).
+`enter` detail, `/` filter, `Esc` clear filter, `w` whois, `a` ack, `p` pause, `m` mask,
+`?` help, `q` quit.
+Planned: `t` capture (from detail).
 
 ## Firewall audit
 
@@ -83,7 +83,10 @@ Alert = state, not event.
   and shown as noise, never dropped. Same idea as an Alertmanager silence (matchers,
   reason, end time). Examples: ACPI BIOS errors, NVRM lines from akmod-nvidia (logs).
 - Ack: dims the alert, does not delete it. Higher count or severity after ack shows it
-  again.
+  again. Key `a` acks every alert in the bar (2026-10-20). A per-alert list: later, if
+  needed.
+- Bar: warn / crit only. Info alerts (e.g. out_ks drops) and noise alerts are counted on
+  the right, not listed.
 - Who decides what: modules report checks (key, sev, title, detail, n, hold) each
   collect (docs/module-interface.md, Checks). Alert engine `core/alerts.py` does open /
   hold / close / count / noise. Pure: checks + time in, alert state (plain JSON) out.

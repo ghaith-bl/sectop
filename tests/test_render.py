@@ -37,10 +37,17 @@ def text(line):
     return "".join(t for t, _ in line)
 
 
-def frame(view=None, feed=(), ui=None, width=100, height=40, now=None):
+def frame(view=None, feed=(), ui=None, width=100, height=40, now=None, alerts=()):
     view = [mod()] if view is None else view
     ui = ui or UI(len(SCR))
-    return layout(SCR, view, list(feed), ui, width, height, now=now, tsfmt=lambda ts: "12:00:00")
+    return layout(SCR, view, list(feed), ui, width, height, now=now, tsfmt=lambda ts: "12:00:00",
+                  alerts=alerts)
+
+
+def alert(key, sev, title, count=1, state="open", noise=None):
+    """Shape of core/alerts.py active() items (only what the bar reads)."""
+    return {"key": key, "module": key.split("/")[0], "sev": sev, "title": title,
+            "count": count, "state": state, "noise": noise}
 
 
 def lay(*a, **kw):
@@ -101,9 +108,59 @@ class TestTop(unittest.TestCase):
                 mod(name="c", status="crit"), mod(name="d", status="off"),
                 mod(name="e", status="warn"), mod(name="f", status="unknown", waiting=True)]
         bar = text(lay(view)[1])
-        self.assertTrue(bar.startswith(" CRIT c    WARN e    ?? a"))
+        self.assertTrue(bar.startswith(" CRIT c   WARN e   ?? a"))
         self.assertTrue(bar.endswith("3 alerts "))
         self.assertEqual(text(lay([mod(status="ok")])[1]), " no alerts")
+
+    def test_engine_alerts(self):
+        al = [alert("fw/h", "crit", "handshake stale"),
+              alert("fw/in", "warn", "new in_vpn", count=3),
+              alert("fw/ks", "info", "new out_ks"),
+              alert("fw/x", "crit", "silenced", noise="proton ndp"),
+              alert("fw/old", "warn", "new out_dns", state="held")]
+        view = [mod(engine=True, status="crit"), mod(name="sys", status="unknown")]
+        f = frame(view, alerts=al)
+        bar = text(f.lines[1])
+        self.assertTrue(bar.startswith(" CRIT handshake stale   WARN new in_vpn x3   "
+                                       "WARN new out_dns   ?? sys"))
+        self.assertTrue(bar.endswith("4 alerts  1 info  1 noise "))
+        self.assertNotIn("CRIT firewall", bar)          # engine module: alerts, not its name
+        self.assertEqual(part(f.lines[1:2], "new out_dns"), (" new out_dns", "dim"))   # held
+        self.assertEqual(part(f.lines[1:2], "new in_vpn"), (" new in_vpn x3", "plain"))
+        self.assertEqual(f.alerts, (("fw/h", 1, "crit"), ("fw/in", 3, "warn"),
+                                    ("fw/old", 1, "warn")))
+
+    def test_acked_alerts(self):
+        al = [alert("fw/h", "crit", "handshake stale"), alert("fw/in", "warn", "new in_vpn")]
+        ui = UI(len(SCR))
+        ui.acks = {"fw/h": (1, "crit")}
+        f = frame([mod(engine=True)], ui=ui, alerts=al)
+        bar = text(f.lines[1])
+        self.assertTrue(bar.startswith(" WARN new in_vpn   CRIT handshake stale"))  # acked last
+        self.assertTrue(bar.endswith("2 alerts  1 acked "))
+        self.assertEqual(part(f.lines[1:2], "CRIT"), ("CRIT", "dim"))
+        al[0]["count"] = 2                               # new count: shows again
+        self.assertTrue(text(lay([mod(engine=True)], ui=ui, alerts=al)[1]).startswith(" CRIT"))
+
+    def test_acked(self):
+        a = alert("k", "warn", "t", count=2)
+        self.assertTrue(render.acked(a, {"k": (2, "warn")}))
+        self.assertTrue(render.acked(a, {"k": (5, "crit")}))
+        self.assertFalse(render.acked(a, {"k": (1, "warn")}))     # count rose
+        self.assertFalse(render.acked(a, {"k": (2, "info")}))     # severity rose
+        self.assertFalse(render.acked(a, {}))
+
+    def test_bar_counts_stay_when_long(self):
+        al = [alert(f"fw/{i}", "warn", f"problem number {i}") for i in range(20)]
+        bar = text(frame([mod(engine=True)], alerts=al, width=80).lines[1])
+        self.assertEqual(cols(bar), 80)
+        self.assertTrue(bar.endswith(" 20 alerts "))
+        self.assertIn("~", bar)                          # alerts cut, counts kept
+
+    def test_no_alerts_but_info(self):
+        bar = text(lay([mod(engine=True, status="ok")], alerts=[alert("k", "info", "t")])[1])
+        self.assertTrue(bar.startswith(" no alerts"))
+        self.assertTrue(bar.endswith("1 info "))
 
     def test_header(self):
         lines = lay()
@@ -122,6 +179,7 @@ class TestTop(unittest.TestCase):
     def test_footer(self):
         lines = lay()
         self.assertTrue(text(lines[-1]).startswith(" 1-2 screen  tab <- -> box"))
+        self.assertIn("  a ack  ", text(lines[-1]))
 
 
 class TestBoxes(unittest.TestCase):

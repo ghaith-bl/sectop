@@ -24,7 +24,7 @@ from core import config as configmod
 from core import lookup as lookupmod
 from core import noise as noisemod
 from core import registry, render
-from core.module import validate
+from core.module import validate, worst
 from core.sanitize import display
 from core.screens import SCREENS, find, names
 from core.ui import UI
@@ -107,9 +107,19 @@ class Core:
         nxt = start + r.interval
         r.due = nxt if nxt > end else end + r.interval
 
-    def view(self) -> list:
-        """One dict per module, for render.layout()."""
+    def active(self) -> list:
+        """Open and held alerts for the screen (core/alerts.py, wall clock, noise list)."""
+        return alertsmod.active(self.alerts, self.wall(), self.noise)
+
+    def view(self, alerts: list | None = None) -> list:
+        """One dict per module, for render.layout(). A v2 module's status is the
+        worst of its open / held alerts (not noise), so header and alert bar agree."""
         now = self.clock()
+        alerts = self.active() if alerts is None else alerts
+        sev = {}
+        for a in alerts:
+            if a["noise"] is None:
+                sev[a["module"]] = worst(sev.get(a["module"], "ok"), a["sev"])
         out = []
         for r in self.runs:
             ld = r.loaded
@@ -120,7 +130,11 @@ class Core:
                 m.update(status="unknown", summary="not loaded", flags=["failed: " + ld.error])
             else:
                 old = r.good_at is None or now - r.good_at > STALE_FACTOR * r.base
-                m["status"] = "unknown" if old else r.snap["status"]
+                m["engine"] = r.snap is not None and r.snap["v"] == 2
+                if old:
+                    m["status"] = "unknown"
+                else:
+                    m["status"] = sev.get(ld.name, "ok") if m["engine"] else r.snap["status"]
                 m["summary"] = r.snap["summary"] if r.snap else "waiting"
                 m["waiting"] = r.snap is None and r.error is None
                 if r.error:
@@ -139,13 +153,15 @@ class Core:
 
 
 def source(core: Core, ui: UI, frozen):
-    """What to draw: live view + feed, or the copy taken when pause started.
-    Collecting goes on while paused. -> (view, feed, frozen)."""
+    """What to draw: live view + feed + alerts, or the copy taken when pause
+    started. Collecting goes on while paused. -> (view, feed, alerts, frozen)."""
     if not ui.paused:
-        return core.view(), list(core.feed), None
+        alerts = core.active()
+        return core.view(alerts), list(core.feed), alerts, None
     if frozen is None:
-        frozen = (core.view(), list(core.feed))
-    return frozen[0], frozen[1], frozen
+        alerts = core.active()
+        frozen = (core.view(alerts), list(core.feed), alerts)
+    return frozen[0], frozen[1], frozen[2], frozen
 
 
 def step_lookup(ui: UI, lookup=lookupmod.lookup) -> bool:
@@ -169,8 +185,8 @@ def _ui(stdscr, core: Core, ui: UI) -> None:
             dirty = True
         now = time.time()
         if dirty:
-            view, feed, frozen = source(core, ui, frozen)
-            ui.update(render.draw(stdscr, SCREENS, view, feed, ui, now))
+            view, feed, alerts, frozen = source(core, ui, frozen)
+            ui.update(render.draw(stdscr, SCREENS, view, feed, ui, now, alerts))
             dirty, shown = False, int(now)
         elif int(now) != shown:
             render.draw_top(stdscr, SCREENS, ui, now)
