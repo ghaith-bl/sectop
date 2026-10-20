@@ -118,7 +118,8 @@ Audit records in the journal (host sample 2026-10-20: 2 sudo calls, 195 entries)
 - Via sudo: the command's ppid is the sudo monitor (fork, no execve, gone at once), and
   `use_pty` gives the command a new pty. Join: `root_cmds` argv == USER_CMD `cmd`, same
   ses, within 5 s -> via `sudo <tty of the sudo launch>`. Else parent = exe of an execve
-  already seen (pid), else `/proc/<ppid>/comm`, else `?`.
+  already seen (pid), else `ppid <n>`. No `/proc` lookup (2026-10-20): read seconds
+  later, the pid may be reused -> wrong parent. `ProtectProc=invisible` stays.
 - `unix_chkpwd` under sudo (2 per password prompt): folded into that sudo row.
 - Launch without a root child (sudo -k / -l, sudoedit, denied sudo, setuid helpers):
   own row, dim. Nothing hidden.
@@ -155,16 +156,31 @@ Audit records in the journal (host sample 2026-10-20: 2 sudo calls, 195 entries)
   Boot 2026-10-20: 38 autoloads ok; 37 failed loads of `nvidia` by kmod, auid 60578
   (GDM greeter, systemd.io UIDS-GIDS: 60578-60705) and 1000, dGPU off (Integrated).
   Noise entry until akmod-nvidia is removed.
+- Blocked load (CIS `install <mod> /bin/false`, e.g. `modprobe sctp`): no init_module
+  call, so no `kernel_modules` record. Shown in the modules group from the root command
+  (modprobe / insmod / rmmod argv) and its result.
 - AVC: audit AVC / USER_AVC. Group: comm, scontext type, tcontext type, tclass, perms.
   `permissive=1` -> warn, else info.
+  Journal, last 200 (2026-10-14 .. 10-20): 2 groups. `tuned` -> `chcon` capability2
+  mac_admin (permissive=0), 156, at boot and later. `lsblk` in `bootupd_t` connectto
+  `systemd_machined_t` (permissive=1 on an enforcing host = permissive domain, check:
+  `sudo semanage permissive -l`), 44, at boot. Noise entries with reason + expiry, no
+  rule change.
+- Audit entries carry `_PID`, `_COMM` (from the record), never `_SYSTEMD_CGROUP` /
+  `_SYSTEMD_UNIT` / `_UID` (fixture avc 2026-10-20, 200 of 200).
 - Kernel log: `_TRANSPORT=kernel`, PRIORITY <= 4, minus `HFW-*` (firewall screen).
+  Boot 2026-10-20 (5.3 h): 196 lines, ~39 groups. `NVRM` 84 (akmod-nvidia, dGPU off) and
+  ACPI BIOS errors ~70 at boot: noise entries. `nvidia: loading out-of-tree module
+  taints kernel` = the O taint.
 - USB: "New USB device found" -> idVendor:idProduct + Product -> info.
 
 ### Program card (phase 4)
 
 `enter` on a program: everything sectop can tie to it.
 - Identity = cgroup app id / unit (Firewall audit, program name). Process -> cgroup:
-  `/proc/<pid>/cgroup` while it runs.
+  `/proc/<pid>/cgroup` while it runs. Audit entries have no cgroup (see Kernel), so this
+  needs `/proc` of other users: `ProtectProc=default` for sectop.service in this step,
+  with this reason in the commit.
 - Network flows; root commands / setuid launches with a parent in it; polkit requests
   from it; its AVC denials; its journal warnings / errors (`_SYSTEMD_USER_UNIT`,
   `_SYSTEMD_UNIT`).
@@ -210,7 +226,9 @@ Target: < 1% CPU, < 30 MiB RSS.
 
 - Read files where a file exists (`/proc`, `/sys/class/hwmon`, `/sys/class/thermal`,
   `/sys/fs/selinux/enforce`, `/proc/sys`). No subprocess for those.
-- One journal reader shared by network and logs modules.
+- One journal reader for the whole collector (firewall + security), not one per module.
+  Measured 2026-10-20: one `journalctl` run = ~30 ms CPU (user ~7, sys ~25), 3 runs. A
+  poll every 2 s = ~1.5% of a core by itself.
 - Hidden screen: only alert-relevant data, longer interval. Heavy detail (process table)
   only while visible.
 - Slow checks on their own interval:
@@ -250,6 +268,10 @@ Target: < 1% CPU, < 30 MiB RSS.
 - Noise list applies. Grouping and noise rules are tested with fixtures from my host.
 - Own entries (sectop units, `SYSLOG_IDENTIFIER=sectop`): tagged `own`, shown and
   filterable, never dropped.
+- Audit keys outside commands / modules (2026-10-20): watch keys (identity, scope,
+  MAC-policy, logins, session, time-change, system-locale, perm_chng, usermod,
+  privileged, sudo_log_file) and volume keys (mounts, delete, perm_mod, access) -> this
+  box, grouped by key + exe. No box of their own.
 - Noise candidate 2026-10-20: `pam_systemd(sudo:session): Failed to check if
   /run/user/0/bus exists` (PRIORITY 4, every sudo).
 - Audit volume 2026-10-20: key `mounts` (CIS rule) = 99% `exe=/usr/bin/bwrap` (2922 of
@@ -342,6 +364,40 @@ Stop / restart a service, kill a process. Only after the privilege split:
   firewalld, hostfw, Proton daemon, sshd if present.
 - Every action logged to the journal.
 
+## Look (2026-10-20)
+
+Modern, clear tables. Phase 4 step 2, every screen.
+
+- Boxes: rounded corners (U+256D U+256E U+2570 U+256F), title left with row count,
+  filter / follow state right.
+- Table header: bold + underline. Text columns left, numbers right (column hint
+  `align`). Two spaces between columns.
+- Severity: own first column, one glyph per level (crit, warn, info, noise) + color.
+  Row text stays default color. WCAG 2.2, 1.4.1 Use of Color: color is not the only
+  means.
+- Time: age in rows (`12s`, `4m`, `2h`), full local time in the detail.
+- Colors: one accent for focus + selection, severity colors only for severity.
+
+## Phase 4 plan (2026-10-20)
+
+Best practice decides (Red Hat for the host). Fixtures from my host first
+(`tests/journal_fixture.py`).
+
+- Screen 2 modules: `security` (commands, auth, kernel, logs: all from the journal) and
+  `posture` (own module, every 300 s: other sources, slow, its errors do not stop the
+  other boxes).
+- Order:
+  1. Journal reader in core (see Resources): firewall moves to it. Audit events by
+     `_AUDIT_ID`, EXECVE / USER_CMD parsing. Poll or follow (`journalctl -f`, owned by
+     core): from the measured CPU of sectop.service.
+  2. Look
+  3. commands box + watch.toml
+  4. auth box
+  5. kernel box
+  6. posture module + posture.toml
+  7. logs box: groups, noise on groups, audit keys
+  8. program card
+
 ## Contract changes (Snapshot v2)
 
 - `checks`: conditions for the alert engine. Done (docs/module-interface.md, Checks).
@@ -358,5 +414,5 @@ Stop / restart a service, kill a process. Only after the privilege split:
    2026-10-20: the logs screen reads the audit log and must not show sectop's own commands.
    Then: own SELinux policy for the collector.
 4. Logs + posture, and system (read-only). Both required, order free. Security screen:
-   commands, auth, kernel, posture, logs; program card.
+   commands, auth, kernel, posture, logs; program card. See Phase 4 plan.
 5. Actions.
