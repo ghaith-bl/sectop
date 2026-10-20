@@ -315,7 +315,7 @@ not armed, no check. `hostfw status` asks systemd for the timer, so it is always
   nft-counters.json + nft-enforce.json / nft-observe.json (same shape, known values).
 - journal-audit.json: synthetic, one line per kind (format from hostfw.nft log rules),
   OUT-NEW tcp line = brave flow in ss.txt.
-- ss-cgroup.txt: ss.txt lines with the cgroup paths my host printed 2026-10-20
-  (`ss --cgroup` as my user: NetworkManager, systemd-resolved, chronyd, Brave scope);
-  vte-spawn and unreachable lines synthetic. To be replaced by a full capture at the live
-  test.
+- ss-cgroup.txt: `ss -tunaH --cgroup state established` as my user, 2026-10-20 (live
+  test of the split): NetworkManager, Brave and Telegram (Flatpak scopes). Public IPs
+  replaced with RFC 5737 ranges. Other unit kinds (vte-spawn, getty, session, escaped
+  names, unreachable) are tested with paths in test_firewall.py (TestCgroup).

@@ -201,13 +201,17 @@ class TestCgroup(unittest.TestCase):
     """ss --cgroup: program = innermost systemd unit (no CAP_SYS_PTRACE)."""
 
     def test_fixture(self):
+        # `ss -tunaH --cgroup state established` as my user, 2026-10-20 (public IPs masked)
         cs = conns.parse(fix("ss-cgroup.txt"))
-        self.assertEqual([c.procs for c in cs],
-                         [("NetworkManager",), ("com.brave.Browser",), ("com.brave.Browser",),
-                          ("systemd-resolved",), ("chronyd",), ("vte-spawn",), ()])
+        self.assertEqual(len(cs), 14)
+        self.assertEqual(cs[0], conns.Conn("udp", "192.168.8.102%wlo1:68", "192.168.8.1:67",
+                                           ("NetworkManager",)))
+        self.assertEqual([c.procs[0] for c in cs[1:]],
+                         ["com.brave.Browser"] * 4 + ["org.telegram.desktop"] * 2
+                         + ["com.brave.Browser"] * 7)
         idx = conns.index(cs)
-        self.assertEqual(idx[("tcp", "10.2.0.2", "33146", "198.51.100.20", "443")],
-                         ("com.brave.Browser",))
+        self.assertEqual(idx[("tcp", "10.2.0.2", "48372", "192.0.2.91", "443")],
+                         ("org.telegram.desktop",))
 
     def test_program(self):
         app = "/user.slice/user-1000.slice/user@1000.service/app.slice/"
