@@ -64,12 +64,14 @@ install_code() {   # $1 = repo, $2 = login user
   rm -rf "$DEST.old" "$TMP"
   trap - EXIT
   relabel "$DEST"
+  install -d -m 0755 "$(dirname "$BIN")"
   ln -sfn "$DEST/bin/sectop" "$BIN"
   relabel "$BIN"
   log "code: $DEST ($(sudo -u "$user" git -C "$repo" log -1 --format='%h %s'))"
 }
 
 install_users() {  # $1 = login user
+  install -d -m 0755 "$(dirname "$SYSUSERS")"   # Silverblue: /etc/sysusers.d does not exist
   { cat "$DEST/deploy/sectop.sysusers"
     printf 'm %s sectop\n' "$1"
   } > "$SYSUSERS.tmp"

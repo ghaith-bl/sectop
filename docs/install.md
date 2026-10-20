@@ -21,6 +21,8 @@ sectop runs as separate parts (docs/architecture.md, Privilege split):
 - `/usr/local/bin/sectop` -> `/usr/local/lib/sectop/bin/sectop` (symlink).
 - `/etc/sysusers.d/sectop.conf` = deploy/sectop.sysusers + `m <my user> sectop`, then
   `systemd-sysusers`: group sectop, system users sectop and sectop-net (no login, home /).
+  `/etc/sysusers.d` is created first: Silverblue does not have it (first install
+  2026-10-20 stopped there: "No such file or directory").
 - `/etc/sectop`: 0755, `*.toml` 0644 root:root (read by the sectop users; no secrets).
 - Units from deploy/ -> `/etc/systemd/system`, daemon-reload, enable, restart:
   sectop-net.service, sectop.service, sectop-whois.socket.

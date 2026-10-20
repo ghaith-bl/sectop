@@ -136,6 +136,15 @@ class TestInstallScript(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(os.access(p, os.X_OK))
 
+    def test_creates_dirs_it_writes_to(self):
+        """Silverblue has no /etc/sysusers.d (2026-10-20 install: 'No such file')."""
+        with open(os.path.join(ROOT, "install.sh"), encoding="ascii") as f:
+            text = f.read()
+        for var, write in (("SYSUSERS", '> "$SYSUSERS.tmp"'), ("BIN", 'ln -sfn')):
+            mkdir = f'install -d -m 0755 "$(dirname "${var}")"'
+            self.assertIn(mkdir, text, var)
+            self.assertLess(text.index(mkdir), text.index(write), var)
+
     def test_installs_every_unit(self):
         with open(os.path.join(ROOT, "install.sh"), encoding="ascii") as f:
             text = f.read()
