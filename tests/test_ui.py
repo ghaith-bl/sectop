@@ -283,6 +283,105 @@ class TestFilter(unittest.TestCase):
         self.assertTrue(u.mask)
 
 
+class TestDetailFind(unittest.TestCase):
+    """/ n N in a detail. The renderer resolves the jump (tests/test_render.py,
+    TestDetailLoop); here: what the keys set and what they leave alone."""
+
+    def detail(self, **kw):
+        u = ui(detail="m/b", **kw)
+        u.boxes = (BoxInfo("detail", 30, 10, cursor=False),)
+        return u
+
+    def typed(self, text, **kw):
+        u = self.detail(**kw)
+        u.key(ord("/"))
+        for ch in text:
+            u.key(ord(ch))
+        return u
+
+    def test_type_applies_live(self):
+        u = self.detail()
+        u.key(ord("/"))
+        self.assertEqual(u.typing, "")
+        self.assertEqual((u.find, u.seek), ("", None))
+        u.key(ord("1"))
+        self.assertEqual((u.find, u.seek, u.mark), ("1", "first", None))
+        for ch in ".2 n":                                  # n, space, q ... are text here
+            u.key(ord(ch))
+        self.assertTrue(u.key(ord("q")))
+        self.assertEqual((u.typing, u.find), ("1.2 nq", "1.2 nq"))
+        u.key(curses.KEY_BACKSPACE)
+        u.key(127)
+        self.assertEqual(u.find, "1.2 ")
+        u.key(10)
+        self.assertEqual((u.typing, u.find, u.detail), (None, "1.2 ".strip(), "m/b"))
+
+    def test_esc_restores_old_and_keeps_the_detail(self):
+        u = self.typed("abc")
+        u.key(10)
+        u.key(ord("/"))
+        self.assertEqual(u.typing, "abc")                  # edit starts from it
+        u.key(ord("x"))
+        u.key(ESC)
+        self.assertEqual((u.typing, u.find, u.seek, u.detail), (None, "abc", "first", "m/b"))
+
+    def test_empty_search_does_not_seek(self):
+        u = self.typed("a")
+        u.update(Frame([], (BoxInfo("detail", 30, 10, cursor=False),)))
+        u.key(127)
+        self.assertEqual((u.find, u.seek), ("", None))
+        u = self.typed("   ")
+        u.key(10)
+        self.assertEqual((u.find, u.seek), ("", None))
+
+    def test_next_previous_need_a_search(self):
+        u = self.detail()
+        u.key(ord("n"))
+        u.key(ord("N"))
+        self.assertIsNone(u.seek)
+        u = self.typed("a")
+        u.key(10)
+        u.update(Frame([], (BoxInfo("detail", 30, 10, cursor=False),)))
+        u.key(ord("n"))
+        self.assertEqual(u.seek, "next")
+        u.key(ord("N"))
+        self.assertEqual(u.seek, "prev")
+
+    def test_update_takes_the_mark_and_clears_the_ask(self):
+        u = self.typed("a")
+        u.key(10)
+        self.assertEqual(u.seek, "first")
+        u.update(Frame([], (BoxInfo("detail", 30, 10, cursor=False, mark=7),)))
+        self.assertEqual((u.mark, u.seek), (7, None))
+        u.key(ord("j"))                                    # a scroll by hand: no current match
+        self.assertIsNone(u.mark)
+
+    def test_close_forgets_the_search(self):
+        u = self.typed("a")
+        u.key(10)
+        u.mark = 3
+        u.key(ESC)
+        self.assertEqual((u.detail, u.find, u.mark, u.seek), (None, "", None, None))
+
+    def test_not_in_help_or_outside(self):
+        u = ui(help=True)
+        u.boxes = (BoxInfo("help", 30, 10, cursor=False),)
+        u.key(ord("/"))
+        u.key(ord("n"))
+        self.assertEqual((u.typing, u.find, u.seek), (None, "", None))
+        u = ui(focus={0: "m/a"})                           # n outside a detail: nothing
+        u.key(ord("n"))
+        self.assertEqual((u.find, u.seek), ("", None))
+
+    def test_open_starts_at_a_one_word_filter(self):
+        for filt, want in (("1.2.3.4", "1.2.3.4"), ("1.2.3.4 !curl", "1.2.3.4"),
+                           ("!curl 1.2.3.4", "1.2.3.4"), ("a b", ""), ("!curl", ""), ("", "")):
+            u = ui(focus={0: "m/b"}, filters={"m/b": filt} if filt else {})
+            u.key(10)
+            self.assertEqual((u.detail, u.find), ("m/b", want), filt)
+            self.assertEqual(u.seek, "first" if want else None, filt)
+
+
 class TestWhois(unittest.TestCase):
     def test_w_opens_detail_and_asks(self):
         u = ui(focus={0: "m/b"})

@@ -244,6 +244,20 @@ A condition that is not true any more is left out.
   Real IPs: the detail is opened on purpose, so it is not masked. While mask is on the
   title says `real IPs shown` (screenshots of the detail show them).
   Opening it pauses; closing resumes (unless paused before).
+  Scroll: the line keys (`j` `k` / arrows, `space` `PgDn` / `PgUp`, `g` `G` / `Home` `End`);
+  the footer lists them. Help scrolls the same way. 2026-10-22: a detail longer than the
+  box could not be scrolled (every frame took the first line as the anchor and went back
+  to it); the overlay text has no row identity now, tests run key, layout and update
+  together (`TestDetailLoop`).
+  Search (`/` in a detail): lines whose key + value contain the text (case-insensitive,
+  searched on the pair, so a wrap never cuts a match) are bold, the view jumps to the first
+  one, applied while typing. `enter` keeps it, `Esc` goes back to the text before (and its
+  first match), empty text = no search. `n` / `N`: next / previous match, wraps; with no
+  current match (scrolled by hand) from the top line. The current match is reverse. Title:
+  `/ <text>  <n>/<matches>` or `no match`. Opened from a table with exactly one positive
+  filter word (`!words` ignored), the detail starts at the first line with it. The UI asks
+  (`ui.seek`), the renderer moves (it knows the wrapped lines) and reports the current
+  match (`BoxInfo.mark`, a pair index: stable when the width changes). Max 60 chars.
 - whois (`w`, `core/lookup.py`, `core/rdap.py`): on a line with `ip` (or in its detail)
   opens the detail and looks the address up with RDAP (RFC 9224 bootstrap from IANA,
   RFC 9083 answer), the modern WHOIS. Public addresses only. Detail shows `whois` then
@@ -263,8 +277,9 @@ A condition that is not true any more is left out.
   Resume shows the current view.
 - Keys: `1-9` screen; `tab` / right / `l` next box, `shift-tab` / left / `h` previous box;
   down / up / `j` `k` line; `space` `PgDn` / `PgUp` page; `g` `G` / `Home` `End` first / last;
-  `enter` detail; `/` filter; `Esc` clear filter; `f` follow; `x` hide; `w` whois; `a` ack;
-  `p` pause; `m` mask; `?` help; `q` quit.
+  `enter` detail; `/` filter (in a detail: search, `n` `N` next / previous match);
+  `Esc` clear filter; `f` follow; `x` hide; `w` whois; `a` ack; `p` pause; `m` mask;
+  `?` help; `q` quit.
 - Follow (`f`, on a row with `filter`): that filter on every other filterable box of the
   screen; `f` again (all of them on it): cleared. Hide (`x`, filter of one word): adds
   `!word` to every filterable box of the screen (once; skipped when it would pass 60

@@ -17,6 +17,12 @@ Filter: / starts typing a filter for the focused table / events box. Every
 key is text until enter (keep) or Esc (back to the old filter). The filter
 applies while typing. Esc outside typing clears the focused box's filter.
 
+Detail search: / in a detail types a text; the detail shows the lines that contain it
+in bold and jumps to the first one (applied while typing; enter keeps it, Esc goes
+back to the text before). n / N: next / previous match. Opened from a table with a
+one-word filter, the detail starts at the first line with that word. The renderer
+resolves the jump (ui.seek -> BoxInfo.mark): it knows where the wrapped lines are.
+
 Follow / hide (rows with a `filter`, e.g. programs): f sets that filter on
 the other filterable boxes of the screen (f again: clears them). x adds
 !filter (one word) to every filterable box of the screen. Both are plain
@@ -54,7 +60,10 @@ class UI:
     scroll: dict = field(default_factory=dict)   # box key -> first visible body line
     anchor: dict = field(default_factory=dict)   # box key -> row id / text of the selected line
     filters: dict = field(default_factory=dict)  # box key -> filter text
-    typing: str | None = None                    # filter being typed (None = not typing)
+    typing: str | None = None                    # filter / search being typed (None = not typing)
+    find: str = ""                               # detail search text
+    seek: str | None = None                      # detail search move asked: first / next / prev
+    mark: int | None = None                      # detail search: current match (pair index)
     whois: dict = field(default_factory=dict)    # ip -> [(key, value)], oldest first
     lookup: str | None = None                    # ip waiting for a lookup (core runs it)
     acks: dict = field(default_factory=dict)     # alert key -> (count, sev) at ack
@@ -70,6 +79,9 @@ class UI:
         self.bar = frame.alerts
         for b in frame.boxes:
             self.sel[b.key], self.scroll[b.key], self.anchor[b.key] = b.sel, b.off, b.ident
+            if b.key == "detail":
+                self.mark = b.mark
+        self.seek = None                         # the frame did the move
         if frame.focus is not None and not self.overlay:
             self.focus[self.screen] = frame.focus
 
@@ -101,6 +113,12 @@ class UI:
         elif self.overlay:
             if k in BACK_KEYS + ENTER_KEYS + (ord("q"), ord("Q"), ord("?")):
                 self._close()
+            elif k == ord("/") and self.detail is not None:
+                self._typing_box, self._typing_old = "detail", self.find
+                self.typing = self.find
+            elif k in (ord("n"), ord("N")) and self.detail is not None:
+                if self.find.strip():
+                    self.seek = "next" if k == ord("n") else "prev"
             else:
                 self._move_key(k)
         elif k in (ord("q"), ord("Q")):
@@ -183,9 +201,9 @@ class UI:
     def _type(self, k: int) -> None:
         key = self._typing_box
         if k == ESC:
-            self._set_filter(key, self._typing_old)
+            self._apply(key, self._typing_old)
         elif k in ENTER_KEYS:
-            self._set_filter(key, self.typing.strip())
+            self._apply(key, self.typing.strip())
         else:
             if k in BACKSPACE:
                 self.typing = self.typing[:-1]
@@ -193,9 +211,21 @@ class UI:
                 self.typing += chr(k)
             else:
                 return
-            self._set_filter(key, self.typing)
+            self._apply(key, self.typing)
             return
         self.typing = self._typing_box = None
+
+    def _apply(self, key: str, text: str) -> None:
+        """Typed text -> the filter of a box, or the search of the detail."""
+        if key == "detail":
+            self._set_find(text)
+        else:
+            self._set_filter(key, text)
+
+    def _set_find(self, text: str) -> None:
+        self.find = text
+        self.mark = None
+        self.seek = "first" if text.strip() else None
 
     def _set_filter(self, key: str, text: str) -> None:
         if text.strip():
@@ -220,11 +250,14 @@ class UI:
         self.detail = b.key
         self.sel["detail"] = self.scroll["detail"] = 0
         self.anchor.pop("detail", None)
+        words = [w for w in self.filters.get(b.key, "").split() if not w.startswith("!")]
+        self._set_find(words[0] if len(words) == 1 else "")   # land on the filtered line
         if not self.paused:                      # freeze while reading the detail
             self.paused = self._auto_pause = True
 
     def _close(self) -> None:
         self.help, self.detail = False, None
+        self._set_find("")
         if self._auto_pause:
             self.paused = self._auto_pause = False
 
@@ -253,3 +286,4 @@ class UI:
         else:                                    # overlay text: scroll
             top = max(0, b.lines - b.page)
             self.scroll[b.key] = self.sel[b.key] = min(max(b.off + step, 0), top)
+            self.mark = None                     # no current match after a manual scroll

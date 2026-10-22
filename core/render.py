@@ -20,6 +20,12 @@ row (row id, else line text) when new lines arrive above it (anchor).
 
 Filter: a table / events box shows only lines that match ui.filters[key]
 (words all match, !word must not; cells, row detail, raw and masked text).
+
+Detail search: the detail overlay shows the lines that contain ui.find in bold
+(case-insensitive, searched on key + value, so a wrap never cuts a match). The
+current match (ui.mark = its pair index) is in reverse video. ui.seek asks for
+a move (first / next / prev); the renderer resolves it, because only it knows
+where the wrapped lines are. The frame reports the new mark (BoxInfo.mark).
 """
 
 import curses
@@ -62,9 +68,11 @@ HELP = (
     ("shift-tab  left  h", "previous box"),
     ("down up  j k", "select line"),
     ("space PgDn / PgUp", "one page"),
-    ("g G  Home End", "first / last line"),
+    ("g G  Home End", "first / last line (in help / detail: top / end)"),
     ("enter", "detail of the selected line (pauses while open, real IPs)"),
     ("/", "filter the focused table: all words match, !word must not"),
+    ("/  (in a detail)", "search its lines: jumps to the first match, enter keeps it"),
+    ("n  N  (in a detail)", "next / previous match"),
     ("w", "whois of the selected IP (RDAP by sectop-whois.service, via the tunnel)"),
     ("a", "ack the alerts in the alert bar (dims them; a higher count or severity "
           "shows them again)"),
@@ -81,6 +89,10 @@ HELP = (
 FOOTER = ("1-{n} screen  tab <- -> box  up down j k select  enter detail  / filter  "
           "w whois  a ack  p pause  m mask  ? help  q quit")
 TYPING = "  enter apply  esc cancel  (all words match, !word must not)"
+TYPING_FIND = "  enter keep  esc cancel  (any case, text of a line)"
+FOOTER_DETAIL = (" up down PgUp PgDn scroll  g G Home End top / end  / search  n N match  "
+                 "w whois  Esc close")
+FOOTER_HELP = " up down PgUp PgDn scroll  g G Home End top / end  Esc close"
 FILTER_MAX = 60
 
 _ATTR = {}                                   # style -> curses attr, set in setup()
@@ -98,6 +110,7 @@ class BoxInfo:
     filterable: bool = False   # table / events: / filters it
     ip: str | None = None      # address of the selected line (w = whois)
     pick: str | None = None    # row filter of the selected line (f follow, x hide)
+    mark: int | None = None    # detail search: pair index of the current match
 
 
 @dataclass(frozen=True)
@@ -315,8 +328,14 @@ def _header(m: dict, width: int, mask: bool) -> list:
 
 def _footer(n_screens: int, width: int, ui=None) -> list:
     typing = getattr(ui, "typing", None)
+    detail = getattr(ui, "detail", None) is not None
     if typing is not None:
-        return _line(width, False, (" / ", "focus"), (typing + "_", "plain"), (TYPING, "dim"))
+        return _line(width, False, (" / ", "focus"), (typing + "_", "plain"),
+                     (TYPING_FIND if detail else TYPING, "dim"))
+    if detail:
+        return _line(width, False, (FOOTER_DETAIL, "dim"))
+    if getattr(ui, "help", False):
+        return _line(width, False, (FOOTER_HELP, "dim"))
     return _line(width, False, (" " + FOOTER.format(n=n_screens), "dim"))
 
 
@@ -352,6 +371,10 @@ class _Box:
         self.least = 0                       # content width it can shrink to
         self.filt = ""                       # table / feed filter
         self.view = []                       # table rows / events after the filter
+        self.find = ""                       # detail search text
+        self.seek = None                     # detail search: first / next / prev asked
+        self.mark = None                     # detail search: current match (pair index)
+        self.found = ()                      # detail search: (pair, first line, end) per match
 
     @property
     def filterable(self) -> bool:
@@ -420,7 +443,9 @@ class _Box:
         if self.kind == "feed":
             return [], [_event(e, w, mask, tsfmt) for e in self.view] or dash
         if self.kind == "detail":                # opened on purpose: real IPs, no mask
-            return [], _detail(d, w, False) or dash
+            lines, owner = _detail_rows(d, w, False)
+            self.found = _found(d, owner, self.find) if self.find.strip() else ()
+            return [], lines or dash
         return [], [_line(w, mask, (t, "dim")) for t in d] or dash
 
     def pairs(self, i: int, tsfmt) -> list:
@@ -469,20 +494,39 @@ class _Box:
         return len(self.data["rows"] if self.kind == "table" else self.data)
 
 
-def _detail(pairs: list, w: int, mask: bool) -> list:
-    """key  value lines, long values wrapped under the value column."""
+def _detail_rows(pairs: list, w: int, mask: bool) -> tuple:
+    """key  value lines, long values wrapped under the value column.
+    -> (lines, owner): owner[i] = index of the pair that line i belongs to."""
     keys = [display(k, mask) for k, _ in pairs]
     kw = min(KEY_MAX, max((cols(k) for k in keys), default=0))
-    out = []
-    for k, (_, v) in zip(keys, pairs):
+    out, owner = [], []
+    for n, (k, (_, v)) in enumerate(zip(keys, pairs)):
         if not k and not v:
             out.append([])
+            owner.append(n)
             continue
         pieces = wrap(display(v, mask), max(1, w - kw - 2))
         for j, piece in enumerate(pieces):
             key = pad(k, kw) + "  " if j == 0 else " " * (kw + 2)
             out.append(_line(w, mask, (key, "dim"), (piece, "plain")))
-    return out
+            owner.append(n)
+    return out, owner
+
+
+def _found(pairs: list, owner: list, query: str) -> tuple:
+    """Pairs of a detail that contain query (case-insensitive, key + value as shown).
+    -> (pair index, first line, end line) each; a pair that wraps keeps all its lines."""
+    q = query.lower()
+    hit = {n for n, (k, v) in enumerate(pairs)
+           if q in f"{display(k, False)} {display(v, False)}".lower()}
+    out = []
+    for line, n in enumerate(owner):
+        if n in hit:
+            if out and out[-1][0] == n:
+                out[-1][2] = line + 1
+            else:
+                out.append([n, line, line + 1])
+    return tuple(tuple(x) for x in out)
 
 
 def _spark(p: dict, w: int, mask: bool) -> list:
@@ -543,6 +587,8 @@ def _overlay(boxes: list, ui, mask: bool, tsfmt):
         title += "   real IPs shown"
     box = _Box("detail", title + "   Esc close", "ok", "detail", pairs or [("", "line gone")])
     box.src_ip = ip
+    box.find, box.seek, box.mark = (getattr(ui, "find", ""), getattr(ui, "seek", None),
+                                    getattr(ui, "mark", None))
     return box
 
 
@@ -696,6 +742,36 @@ def _select(ui, key: str, texts: list, vis: int) -> tuple:
     return sel, off
 
 
+def _seek(b, off: int, vis: int, n: int) -> tuple:
+    """Detail search -> (current match as pair index or None, first visible line).
+    b.seek asks for a move: first match, next / previous (wraps); from the top line when
+    there is no current match (scrolled by hand). The match is scrolled into view
+    (a third of the box from the top) only when it was not fully visible."""
+    pairs = [f[0] for f in b.found]
+    mark = b.mark if b.mark in pairs else None
+    if b.seek == "first":
+        mark = pairs[0]
+    elif b.seek in ("next", "prev"):
+        step = 1 if b.seek == "next" else -1
+        if mark is not None:
+            mark = pairs[(pairs.index(mark) + step) % len(pairs)]
+        elif step > 0:
+            mark = next((p for p, start, _ in b.found if start >= off), pairs[0])
+        else:
+            mark = next((p for p, start, _ in reversed(b.found) if start < off), pairs[-1])
+    if b.seek and mark is not None:
+        _, start, end = next(f for f in b.found if f[0] == mark)
+        if start < off or end > off + vis:
+            off = min(max(start - vis // 3, 0), max(0, n - vis))
+    return mark, off
+
+
+def _lit(line: list, current: bool) -> list:
+    """A line that matches the detail search: bold; the current match also reverse."""
+    style = (SEL if current else "") + BOLD
+    return [(t, style + s) for t, s in line]
+
+
 def _pick_focus(want, pref, boxes: list):
     keys = [b.key for b in boxes]
     if want in keys:
@@ -728,27 +804,40 @@ def _grid(boxes: list, ui, width: int, room: int, mask: bool, tsfmt, pref) -> tu
             vis = max(0, hr - len(head))
             ids = b.idents([_text(line) for line in body])
             sel, off = _select(ui, b.key, ids, vis)
+            mark = None
+            if b.found:                          # detail search: seek, mark
+                mark, off = _seek(b, off, vis, len(body))
+                if b.seek:
+                    sel = off
             infos.append(BoxInfo(b.key, len(body), vis, sel, off,
-                                 ids[sel] if ids else None, b.cursor, b.filterable,
-                                 b.ip_at(sel), b.pick_at(sel)))
+                                 ids[sel] if ids and b.cursor else None, b.cursor,
+                                 b.filterable, b.ip_at(sel), b.pick_at(sel), mark))
             suffix = ""
             if b.filt:
                 suffix = f"  / {b.filt}  {len(b.view)} of {b.total()}"
+            if b.find.strip():
+                at = [f[0] for f in b.found].index(mark) + 1 if mark is not None else "-"
+                suffix += f"  / {b.find}  " + (f"{at}/{len(b.found)}" if b.found
+                                                else "no match")
             if len(body) > vis > 0:
                 suffix += f"  {off + 1}-{min(off + vis, len(body))}/{len(body)}"
             on = b.key == focus
             titles.append((x, _title(b, on and b.cursor, mask, suffix), max(0, cw - 3)))
-            shown_body = [_hi(line) if on and b.cursor and off + i == sel else line
+            now = {n for p, s, e in b.found if p == mark for n in range(s, e)}
+            lit = {n for _, s, e in b.found for n in range(s, e)}
+            shown_body = [_hi(line) if on and b.cursor and off + i == sel
+                          else _lit(line, off + i in now) if off + i in lit else line
                           for i, line in enumerate(body[off:off + vis])]
-            cells.append((cw, (head + shown_body)[:hr],
-                          len(head) + sel - off if on and b.cursor else -1))
+            hi = {len(head) + sel - off} if on and b.cursor else {
+                len(head) + n - off for n in now}
+            cells.append((cw, (head + shown_body)[:hr], hi))
         lines.append(_border(width, above, xs, titles))
         for i in range(hr):
             parts = [(BV, "dim")]
             for cw, content, hi in cells:
                 line = content[i] if i < len(content) else []
                 fill = cw - min(cw, 1) - _len(line)
-                style = SEL + "plain" if i == hi else "plain"
+                style = SEL + "plain" if i in hi else "plain"
                 parts += ([(" ", style)] if cw else []) + line
                 parts += [(" " * fill, style), (BV, "dim")]
             lines.append([(t, s) for t, s in parts if t])

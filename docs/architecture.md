@@ -35,8 +35,8 @@ can decide from what is on screen. Read-only until the privilege split (phase 3)
   replaces it.
 
 Keys now: `1-3` screen, `tab` / arrows box, `j/k` / arrows select line, `PgDn/PgUp` page,
-`enter` detail, `/` filter, `Esc` clear filter, `f` follow, `x` hide, `w` whois, `a` ack,
-`p` pause, `m` mask, `?` help, `q` quit.
+`enter` detail, `/` filter (in a detail: search, `n` `N` next / previous match), `Esc` clear
+filter, `f` follow, `x` hide, `w` whois, `a` ack, `p` pause, `m` mask, `?` help, `q` quit.
 Planned: `t` capture (from detail); program card (`enter` on a program, phase 4).
 
 ## Firewall screen: network only (2026-10-20)

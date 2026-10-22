@@ -1,3 +1,4 @@
+import curses
 import unittest
 
 from core import render
@@ -654,6 +655,214 @@ class TestFeedAndScreens(unittest.TestCase):
         f = frame(height=6)                                        # top 3 + grid 3
         self.assertEqual(len(f.lines), 6)
         self.assertEqual([b.key for b in f.boxes], ["firewall/mode", "firewall/conns"])
+
+
+class TestDetailLoop(unittest.TestCase):
+    """UI and renderer together, the way core/app.py runs them: key, layout, update.
+    2026-10-22: the detail did not scroll at all. Every frame stored the text of the
+    first line as the anchor and put the view back to it (found on the host: a program
+    with many sockets, no way to reach the lower lines)."""
+
+    HEIGHT = 24                                              # detail body = 18 lines
+
+    def setUp(self):
+        self.m = mod()
+        self.m["panels"][1]["rows"][0]["detail"] = [
+            {"k": f"sock{i}", "v": f"tcp 10.2.0.2:{40000 + i} -> 1.2.3.{i}:443"}
+            for i in range(60)]
+        self.ui = UI(2)
+        self.draw()
+
+    def draw(self, view=None):
+        f = frame(view or [self.m], ui=self.ui, height=self.HEIGHT)
+        self.ui.update(f)
+        return f
+
+    def press(self, *keys):
+        for k in keys:
+            self.ui.key(k if isinstance(k, int) else ord(k))
+            f = self.draw()
+        return f
+
+    def type(self, text):
+        """/, the old text away, then text, still typing."""
+        self.press("/")
+        for _ in range(60):
+            self.press(127)
+        return self.press(*text) if text else self.draw()
+
+    def search(self, text):
+        self.type(text)
+        return self.press(10)
+
+    def open(self, key="firewall/conns"):
+        self.ui.focus[0] = key
+        self.ui.key(10)
+        return self.draw()
+
+    @staticmethod
+    def body(f):
+        return [text(line)[1:].rstrip(BV).rstrip() for line in f.lines
+                if text(line).startswith(BV)]
+
+    def mark_text(self, f):
+        """Text of the lines drawn as the current match."""
+        return [text(line)[1:].rstrip(BV).strip() for line in f.lines
+                if any(st.startswith("sel ") for _, st in line)]
+
+    def test_scroll_keys(self):
+        f = self.open()
+        b = f.boxes[0]
+        self.assertEqual((b.key, b.lines, b.page, b.off, b.ident), ("detail", 64, 18, 0, None))
+        self.assertTrue(self.body(f)[0].startswith(" proc "))
+        f = self.press("j", "j")
+        self.assertEqual(f.boxes[0].off, 2)
+        self.assertTrue(self.body(f)[0].startswith(" severity"))
+        self.assertEqual(self.press(curses.KEY_DOWN).boxes[0].off, 3)
+        self.assertEqual(self.press("k").boxes[0].off, 2)
+        self.assertEqual(self.press(curses.KEY_UP).boxes[0].off, 1)
+        self.assertEqual(self.press(curses.KEY_NPAGE).boxes[0].off, 18)      # page - 1 lines
+        self.assertEqual(self.press(" ").boxes[0].off, 35)
+        f = self.press("G")
+        self.assertEqual(f.boxes[0].off, 46)                                 # 64 - 18
+        self.assertTrue(self.body(f)[-1].startswith(" sock59"))
+        self.assertEqual(self.press(curses.KEY_END).boxes[0].off, 46)
+        self.assertEqual(self.press(curses.KEY_PPAGE).boxes[0].off, 29)
+        self.assertEqual(self.press("g").boxes[0].off, 0)
+        self.assertEqual(self.press("G", curses.KEY_HOME).boxes[0].off, 0)
+
+    def test_help_scrolls_too(self):
+        self.HEIGHT = 12                                      # help is longer than the box
+        f = self.press("?")
+        b = f.boxes[0]
+        self.assertEqual(b.key, "help")
+        self.assertGreater(b.lines, b.page)
+        self.assertFalse(find(f.lines, "quit"))
+        f = self.press("G")
+        self.assertTrue(find(f.lines, "quit"))
+        self.assertEqual(self.press("g").boxes[0].off, 0)
+
+    def test_footer_names_the_keys(self):
+        self.assertTrue(text(self.open().lines[-1]).startswith(
+            " up down PgUp PgDn scroll  g G Home End top / end  / search  n N match"))
+        self.press(27)
+        self.assertTrue(text(self.press("?").lines[-1]).startswith(" up down PgUp PgDn scroll"))
+        self.press(27)
+        self.assertTrue(text(self.draw().lines[-1]).startswith(" 1-2 screen"))
+
+    def test_search_jumps_to_the_match(self):
+        self.open()
+        f = self.type("1.2.3.54:")
+        b = f.boxes[0]
+        self.assertEqual(self.mark_text(f), ["sock54    tcp 10.2.0.2:40054 -> 1.2.3.54:443"])
+        self.assertEqual((b.mark, b.off), (4 + 54, 46))       # 4 pairs above sock0; end clamps
+        self.assertTrue(find(f.lines, "/ 1.2.3.54:  1/1  47-64/64"))
+        self.assertTrue(text(f.lines[-1]).startswith(" / 1.2.3.54:_  enter keep  esc cancel"))
+        self.assertEqual(self.press(10).boxes[0].mark, 4 + 54)                # enter keeps
+        self.assertEqual((self.ui.typing, self.ui.detail), (None, "firewall/conns"))
+        self.assertTrue(text(self.draw().lines[-1]).startswith(" up down PgUp"))
+
+    def test_search_marks_every_match_bold(self):
+        self.open()
+        f = self.type("1.2.3.1")                              # sock1 and sock10 .. sock19
+        lit = [text(line) for line in f.lines
+               if any(st.endswith("bold plain") or st.endswith("bold dim") for _, st in line)]
+        self.assertEqual(len(lit), 5)                         # 11 matches, 5 in view
+        self.assertEqual(len([line for line in f.lines if not any(
+            "bold" in st for _, st in line) and "sock1" in text(line)]), 0)
+        self.assertTrue(find(f.lines, "/ 1.2.3.1  1/11  1-18/64"))
+        self.assertEqual(self.mark_text(f), ["sock1     tcp 10.2.0.2:40001 -> 1.2.3.1:443"])
+
+    def test_next_previous_wrap(self):
+        self.open()
+        self.search("1.2.3.1")
+        seen = []
+        for _ in range(11):
+            seen.append(self.press("n").boxes[0].mark)
+        self.assertEqual(seen, [14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 5])   # wraps to the first
+        self.assertEqual(self.press("N").boxes[0].mark, 23)                   # and back
+        self.assertEqual(self.press("N").boxes[0].mark, 22)
+        f = self.press("n")
+        self.assertEqual(f.boxes[0].mark, 23)
+        self.assertTrue(find(f.lines, "/ 1.2.3.1  11/11"))
+        self.assertEqual(self.mark_text(f), ["sock19    tcp 10.2.0.2:40019 -> 1.2.3.19:443"])
+
+    def test_scrolling_drops_the_current_match(self):
+        self.open()
+        self.search("1.2.3.1")
+        f = self.press(curses.KEY_NPAGE)                      # off 17: matches 14 .. 23 in view
+        self.assertEqual((f.boxes[0].mark, self.mark_text(f)), (None, []))
+        self.assertTrue(find(f.lines, "/ 1.2.3.1  -/11"))
+        self.assertEqual(self.press("n").boxes[0].mark, 17)   # first match at / after the top line
+        self.press("g")
+        self.assertEqual(self.press("N").boxes[0].mark, 23)   # nothing above the top: wraps
+        self.press(curses.KEY_NPAGE, curses.KEY_NPAGE)        # off 35: all matches are above
+        self.assertEqual(self.press("n").boxes[0].mark, 5)    # nothing below: wraps
+
+    def test_no_match_and_keys_that_do_nothing(self):
+        self.open()
+        f = self.type("nothing like this")
+        self.assertTrue(find(f.lines, "/ nothing like this  no match"))
+        self.assertEqual((f.boxes[0].mark, f.boxes[0].off), (None, 0))
+        self.press(10, "n", "N")                              # nothing to move to
+        self.assertEqual(self.draw().boxes[0].off, 0)
+        f = self.search("")                                   # empty search = no search
+        self.assertEqual(self.ui.find, "")
+        self.assertFalse(find(f.lines, "no match"))
+
+    def test_search_case_and_esc(self):
+        self.open()
+        f = self.search("SOCK3")
+        self.assertEqual(f.boxes[0].mark, 4 + 3)              # sock3 first (case-insensitive)
+        f = self.type("sock5")
+        self.assertEqual(f.boxes[0].mark, 4 + 5)
+        f = self.press(27)                                    # esc: back to the text before
+        self.assertEqual((self.ui.find, self.ui.typing), ("SOCK3", None))
+        self.assertEqual(f.boxes[0].mark, 4 + 3)              # and to its first match
+        self.assertEqual(self.ui.detail, "firewall/conns")    # esc while typing: not closed
+
+    def test_search_key_and_value(self):
+        self.open()
+        self.assertEqual(self.search("proc firefox").boxes[0].mark, 0)   # key, space, value
+        self.assertEqual(self.search("dst").boxes[0].mark, 1)            # the key alone
+        self.assertTrue(find(self.search("proc  firefox").lines, "no match"))   # one space
+
+    def test_search_is_not_cut_by_a_wrap(self):
+        pairs = [("msg", "a" * 32 + "needle" + "b" * 50), ("x", "y")]
+        lines, owner = render._detail_rows(pairs, 40, False)     # value column = 35 cells
+        self.assertEqual(owner, [0] * len(lines[:-1]) + [1])
+        self.assertGreater(len(lines) - 1, 2)
+        self.assertFalse([t for t in map(text, lines) if "needle" in t])   # cut by the wrap
+        self.assertEqual(render._found(pairs, owner, "NEEDLE"), ((0, 0, len(lines) - 1),))
+        self.assertEqual(render._found(pairs, owner, "zzz"), ())
+        self.assertEqual(render._found([("", ""), ("a", "b")], [0, 1], "a b"), ((1, 1, 2),))
+
+    def test_opened_from_a_filtered_table(self):
+        self.ui.filters["firewall/conns"] = "1.2.3.54"
+        self.draw()
+        f = self.open()
+        self.assertEqual((self.ui.find, f.boxes[0].mark), ("1.2.3.54", 4 + 54))
+        self.assertEqual(self.mark_text(f), ["sock54    tcp 10.2.0.2:40054 -> 1.2.3.54:443"])
+        self.press(27)                                        # close: search gone
+        self.assertEqual((self.ui.find, self.ui.mark), ("", None))
+        for filt in ("1.2.3 firefox", "!curl", ""):           # not exactly one word to look for
+            self.ui.filters["firewall/conns"] = filt
+            self.draw()
+            self.open()
+            self.assertEqual((self.ui.find, self.ui.mark), ("", None), filt)
+            self.press(27)
+        self.ui.filters["firewall/conns"] = "!curl 1.2.3.54"  # !words are not searched for
+        self.draw()
+        self.open()
+        self.assertEqual(self.ui.find, "1.2.3.54")
+
+    def test_whois_opens_the_detail_too(self):
+        self.m["panels"][1]["rows"][0]["ip"] = "149.112.112.11"
+        self.ui.filters["firewall/conns"] = "1.2.3.54"
+        self.draw()
+        self.ui.focus[0] = "firewall/conns"
+        self.press("w")
+        self.assertEqual((self.ui.detail, self.ui.find), ("firewall/conns", "1.2.3.54"))
 
 
 if __name__ == "__main__":
