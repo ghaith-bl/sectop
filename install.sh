@@ -84,6 +84,16 @@ install_users() {  # $1 = login user
 
 check_conf() {     # collector and net unit read the config as non-root users
   install -d -m 0755 -o root -g root "$CONF"
+  local watch=$CONF/watch.toml defaults=$DEST/deploy/watch.toml
+  if [[ ! -e $watch && ! -L $watch ]]; then          # mine stays mine: never over it
+    install -m 0644 -o root -g root "$defaults" "$watch"
+    relabel "$watch"
+    log "watch: $watch (new, from deploy/watch.toml)"
+  elif [[ $(sha256sum < "$watch") != "$(sha256sum < "$defaults")" ]]; then
+    log "watch: $watch kept (differs from $defaults)"
+  else
+    log "watch: $watch (same as deploy/watch.toml)"
+  fi
   local f
   for f in "$CONF"/*.toml; do
     [[ -e $f ]] || continue

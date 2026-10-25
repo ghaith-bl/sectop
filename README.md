@@ -24,8 +24,8 @@ Status: in progress (phase 3: privilege split, docs/architecture.md).
 - firewall: hostfw mode + counters, kernel log (HFW-*), programs, peers (remote IPs),
   WireGuard (docs/modules/firewall.md)
 - security: commands run as root after a login (sudo, pkexec, su, setuid programs), from
-  the audit records in the journal (docs/modules/security.md). Auth, kernel, posture,
-  logs: phase 4
+  the audit records in the journal, rated by `/etc/sectop/watch.toml` (crit / warn /
+  info, docs/modules/security.md). Auth, kernel, posture, logs: phase 4
 
 ## Screen legend
 

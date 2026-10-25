@@ -145,6 +145,21 @@ class TestInstallScript(unittest.TestCase):
             self.assertIn(mkdir, text, var)
             self.assertLess(text.index(mkdir), text.index(write), var)
 
+    def test_watch_list_only_when_missing(self):
+        """deploy/watch.toml -> /etc/sectop/watch.toml once; my edits are never replaced."""
+        with open(os.path.join(ROOT, "install.sh"), encoding="ascii") as f:
+            text = f.read()
+        self.assertIn("local watch=$CONF/watch.toml defaults=$DEST/deploy/watch.toml", text)
+        guard = 'if [[ ! -e $watch && ! -L $watch ]]; then'
+        put = 'install -m 0644 -o root -g root "$defaults" "$watch"'
+        self.assertIn(guard, text)
+        self.assertLess(text.index(guard), text.index(put))
+        writes = [ln.strip() for ln in text.splitlines()
+                  if '"$watch"' in ln and not ln.strip().startswith(("relabel", "elif"))]
+        self.assertEqual(writes, [put])                             # the only write
+        self.assertTrue(os.path.isfile(os.path.join(DEPLOY, "watch.toml")))
+        self.assertLess(text.index("  install_code "), text.index("  check_conf"))   # DEST first
+
     def test_installs_every_unit(self):
         with open(os.path.join(ROOT, "install.sh"), encoding="ascii") as f:
             text = f.read()

@@ -146,10 +146,14 @@ Audit records in the journal (host sample 2026-10-20: 2 sudo calls, 195 entries)
   `user:pass@` in URLs, `*_PASSWORD= *_TOKEN= *_SECRET=`. Argv is readable by every user
   in `/proc/<pid>/cmdline` and stored in audit + journal anyway: this only keeps it off
   the screen.
-- Alerts: none per command. Watch list `/etc/sectop/watch.toml` (root-owned, same file
-  checks as config): commands that weaken the baseline -> warn. Changes nothing on the
-  host. First entries: `setenforce 0`, `auditctl -D` / `-e 0`, `nft flush`,
-  `systemctl stop|disable|mask` of auditd / hostfw / firewalld, `usermod -aG wheel`.
+- Rating (decided + built 2026-10-25): watch list `/etc/sectop/watch.toml` (root-owned,
+  same file checks as config, defaults in deploy/watch.toml). Row sev = its rule: crit
+  turns a protection off, warn changes a security setting, info routine change, no rule
+  ok. Alert for crit only (red only in the bar), while its last run is under 1 h old.
+  Changes nothing on the host. Details: docs/modules/security.md, Watch list.
+- Root or normal user: every row ran as root (euid 0); normal-user execs are not
+  audited (volume). Users, live process tree, zombies: screen 3, decided after the
+  security screen (2026-10-25).
 
 ### Auth
 
@@ -425,13 +429,14 @@ Best practice decides (Red Hat for the host). Fixtures from my host first
      2026-10-20 in tests/fixtures/security/. CPU of sectop.service after install: not
      measured yet.
   2. Look: done 2026-10-25 (see Look)
-  3. commands box + watch.toml. Commands box done 2026-10-25 (modules/security,
-     docs/modules/security.md). watch.toml: next.
+  3. commands box + watch.toml: done 2026-10-25 (modules/security,
+     docs/modules/security.md).
   4. auth box
   5. kernel box
   6. posture module + posture.toml
   7. logs box: groups, noise on groups, audit keys
   8. program card
+- Then screen 3 (processes): its design is decided after step 8 (2026-10-25).
 
 ## Contract changes (Snapshot v2)
 

@@ -22,6 +22,11 @@ pid: sudo run by root, gdm-session-worker on unlock). Parent not seen: counted o
 Secrets (core/sanitize.py mask_secrets): always masked in the cmd cell and in grouping;
 the detail argv is raw, masked by the UI while mask is on (key m shows it).
 
+Rating (watch.py, /etc/sectop/watch.toml, read once in init): each exec gets the rule
+that matches it, the row its sev (crit / warn / info, no rule = ok; the rule id is part
+of the group, so `setenforce 0` and `setenforce 1` are two rows). crit: also a check
+(alert) while its last run is under WINDOW old; warn / info: row color only.
+
 A launch is a row at once ("no root command"); when its root command comes (after the
 password, any time later) the launch is taken back out of that row and the command row
 gets its password checks. A failed USER_CMD marks the launch row "denied". No timer:
@@ -29,6 +34,7 @@ a slow password prompt cannot turn a sudo into a launch without a command.
 """
 
 import collections
+import hashlib
 import os
 import pwd
 import re
@@ -36,6 +42,7 @@ import time
 
 from core import audit
 from core.sanitize import _ADDR, mask_secrets
+from modules.security import watch
 
 NAME = "security"
 INTERVAL = 2.0
@@ -56,6 +63,10 @@ MAX_USERCMDS = 100
 MAX_LAUNCHES = 256
 MAX_HOPS = 8                    # parent chain in the detail
 LAUNCH_KEEP = 600.0             # a launch older than this cannot be matched any more
+WINDOW = 3600.0                 # crit command: alert while its last run is this new
+MAX_CHECKS = 50
+WATCH_PATH = watch.DEFAULT_PATH
+WATCH_OWNER = 0                 # root-owned (tests: their own uid)
 COLUMNS = ["last", "n", "who>as", "via", "cmd"]
 TYPES = ["age", "num", "text", "text", "text"]
 
@@ -95,6 +106,9 @@ class Group:
         self.parents = ""                                    # chain of the newest one
         self.denied = 0                                      # launches with a failed USER_CMD
         self.chkpwd = 0
+        self.rule = None                                     # watch rule (part of the key)
+        self.subject = self.shown = ""                       # alert: command from program on
+        self.reported = 0                                    # n at the last check
 
 
 class Launch:
@@ -105,8 +119,10 @@ class Launch:
 
 
 class State:
-    def __init__(self, wall=time.time, user=_user, stamp=_stamp):
+    def __init__(self, wall=time.time, user=_user, stamp=_stamp, rules=None):
         self.wall, self.user, self.stamp = wall, user, stamp
+        self.rules = rules or ()                  # watch rules
+        self.watch_file = rules is not None       # False: /etc/sectop/watch.toml missing
         self.asm = audit.Assembler()
         self.groups = collections.OrderedDict()   # key -> Group, least recent first
         self.pids = collections.OrderedDict()     # pid -> (exe, row key, ppid, via): seen
@@ -134,17 +150,27 @@ def _remember(st: State, pid: str, exe: str, key: str, ppid: str, via: str) -> N
         st.pids.popitem(last=False)
 
 
-def _key(st: State, ev, argv: list) -> str:
+def _key(st: State, ev, argv: list, rule=None) -> str:
     who, as_ = st.name(ev.get("auid")), st.name(ev.get("euid"))
     exe = ev.get("exe") or (argv[0] if argv else "?")
-    return "\x1f".join((who, as_, exe, normalize(argv[1:])))
+    return "\x1f".join((who, as_, exe, normalize(argv[1:]), rule.id if rule else ""))
 
 
-def _group(st: State, ev, argv: list, ts: float) -> Group:
+def _rate(st: State, ev, argv: list):
+    return watch.rate(st.rules, ev.get("exe") or "", argv)
+
+
+def _group(st: State, ev, argv: list, ts: float, rule=None) -> Group:
     who, as_ = st.name(ev.get("auid")), st.name(ev.get("euid"))
     exe = ev.get("exe") or (argv[0] if argv else "?")
-    key = _key(st, ev, argv)
+    key = _key(st, ev, argv, rule)
     g = st.groups.pop(key, None) or Group(who, as_, exe, ts)
+    if rule is not None and g.rule is None:
+        g.rule = rule
+        cmd = watch.command(exe, argv) or [exe]
+        g.subject = normalize(cmd)
+    if rule is not None:
+        g.shown = " ".join(watch.command(exe, argv)) or exe
     st.groups[key] = g                                     # most recent last
     while len(st.groups) > MAX_GROUPS:
         st.groups.popitem(last=False)
@@ -250,7 +276,8 @@ def _root(st: State, ev, ts: float, setuid: bool = False) -> None:
     via, launch = _via(st, ev, argv, ts, fallback)
     st.runs += 1
     checks = _take_back(st, launch) if launch is not None else 0
-    key, pid, ppid = _key(st, ev, argv), ev.get("pid") or "", ev.get("ppid") or ""
+    rule = _rate(st, ev, argv)
+    key, pid, ppid = _key(st, ev, argv, rule), ev.get("pid") or "", ev.get("ppid") or ""
     parents = _parents(st, ppid, via)
     if launch is not None:                       # later checks under the launcher: here
         lpid = launch.ev.get("pid") or ""
@@ -258,7 +285,7 @@ def _root(st: State, ev, ts: float, setuid: bool = False) -> None:
             lexe, _, lppid, lvia = st.pids[lpid]
             _remember(st, lpid, lexe, key, lppid, lvia)
     _remember(st, pid, exe, key, ppid, via)
-    g = _group(st, ev, argv, ts)
+    g = _group(st, ev, argv, ts, rule)
     g.via, g.result, g.parents = via, "", parents
     if via in g.vias:
         g.vias.remove(via)
@@ -267,11 +294,12 @@ def _root(st: State, ev, ts: float, setuid: bool = False) -> None:
 
 
 def _launch(st: State, ev, ts: float) -> None:
-    pid, key, ppid = ev.get("pid") or "", _key(st, ev, ev.argv), ev.get("ppid") or ""
+    rule = _rate(st, ev, ev.argv)
+    pid, key, ppid = ev.get("pid") or "", _key(st, ev, ev.argv, rule), ev.get("ppid") or ""
     via = os.path.basename(st.pids[ppid][0]) if ppid in st.pids else f"ppid {ppid or '?'}"
     parents = _parents(st, ppid, via)
     _remember(st, pid, ev.get("exe") or "", key, ppid, via)
-    g = _group(st, ev, ev.argv, ts)
+    g = _group(st, ev, ev.argv, ts, rule)
     g.via, g.result, g.parents = "-", "no root command", parents
     st.launches.pop(pid, None)
     st.launches[pid] = Launch(ev, ts, key)
@@ -287,6 +315,8 @@ def _prune(st: State, now: float) -> None:
 def _row(st: State, key: str, g: Group) -> dict:
     result = "denied" if g.result and g.denied > 0 else g.result
     detail = [("exe", g.exe)]
+    if g.rule is not None:
+        detail.append(("watch", f"{g.rule.id}: {g.rule.why}"))
     if result:
         detail.append(("result", result))
         if g.denied > 0:
@@ -301,16 +331,43 @@ def _row(st: State, key: str, g: Group) -> dict:
         detail.append(("password checks", str(g.chkpwd)))
     row = {"cells": [f"{g.last:.3f}", str(g.n), f"{g.who}>{g.as_}", result or g.via,
                      mask_secrets(g.argvs[0] if g.argvs else g.exe)],
-           "sev": "ok", "id": key, "detail": [{"k": k, "v": v} for k, v in detail]}
+           "sev": g.rule.sev if g.rule else "ok", "id": key,
+           "detail": [{"k": k, "v": v} for k, v in detail]}
     if result:
         row["tone"] = "dim"                              # launch without a root command
     return row
 
 
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", "backslashreplace")).hexdigest()[:12]
+
+
+def _checks(st: State, now: float) -> list:
+    """crit rows whose last run is under WINDOW old -> one check per rule + who>as +
+    command from the program on (env and bash exec of one script: one alert, n = the
+    most new runs of its rows, not their sum: one run of the script = 1)."""
+    hot = sorted((g for g in st.groups.values() if g.rule is not None
+                  and g.rule.sev == "crit" and now - g.last <= WINDOW),
+                 key=lambda g: -g.last)
+    out = {}
+    for g in hot:
+        key = f"watch:{g.rule.id}:{_digest(chr(31).join((g.who, g.as_, g.subject)))}"
+        if key not in out:
+            if len(out) == MAX_CHECKS:
+                continue
+            out[key] = {"key": key, "sev": "crit",
+                        "title": f"{g.rule.why}: {mask_secrets(g.shown)}"[:160],
+                        "detail": f"{g.who}>{g.as_} via {g.via}, last {st.stamp(g.last)}, "
+                                  f"rule {g.rule.id}", "n": 0}
+        out[key]["n"] = max(out[key]["n"], g.n - g.reported)
+        g.reported = g.n
+    return list(out.values())
+
+
 def init(cfg: dict) -> State:
     if cfg:
         raise ValueError(f"unknown option(s): {', '.join(sorted(cfg))}")
-    return State()
+    return State(rules=watch.load(WATCH_PATH, WATCH_OWNER))   # bad file: init fails
 
 
 def collect(st: State, ctx) -> dict:
@@ -340,6 +397,7 @@ def collect(st: State, ctx) -> dict:
         title += f"  (journal: {items_note})"
     panel = {"id": "commands", "title": title, "type": "table", "columns": list(COLUMNS),
              "types": list(TYPES), "rows": rows, "width": "full"}
-    summary = f"root runs {st.runs} | groups {len(rows)}"
+    summary = f"root runs {st.runs} | groups {len(rows)} | " + \
+        (f"watch {len(st.rules)} rules" if st.watch_file else "no watch list")
     return {"v": 2, "status": "ok", "summary": summary, "panels": [panel], "events": [],
-            "checks": []}
+            "checks": _checks(st, now)}

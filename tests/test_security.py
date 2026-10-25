@@ -1,11 +1,14 @@
 import json
 import os
+import tempfile
 import unittest
 
 import modules.security as sec
 from core import journal as corejournal
+from core.config import ConfigError
 from core.module import Context, check_module, validate
 from core.screens import SCREENS, find
+from modules.security import watch
 
 FIX = os.path.join(os.path.dirname(__file__), "fixtures", "security")
 USERS = {"0": "root", "1000": "null"}
@@ -54,9 +57,25 @@ class TestModule(unittest.TestCase):
         sp = corejournal.spec(sec.JOURNAL)
         self.assertEqual(sp.groups, ((("_TRANSPORT", "audit"),),))
         self.assertEqual(sp.fields, ("MESSAGE", "_AUDIT_ID", "_AUDIT_TYPE", "_AUDIT_TYPE_NAME"))
-        self.assertIsInstance(sec.init({}), sec.State)
-        with self.assertRaises(ValueError):
-            sec.init({"x": 1})
+        with WatchFile(None):                                   # not the host's file
+            self.assertIsInstance(sec.init({}), sec.State)
+            with self.assertRaises(ValueError):
+                sec.init({"x": 1})
+
+    def test_init_reads_watch_file(self):
+        with WatchFile(None):
+            st = sec.init({})
+            self.assertEqual((st.rules, st.watch_file), ((), False))
+            self.assertTrue(validate(sec.collect(st, Context((), True, "")))["summary"]
+                            .endswith("| no watch list"))
+        with WatchFile(RULES):
+            st = sec.init({})
+            self.assertEqual(len(st.rules), 4)
+            self.assertTrue(validate(sec.collect(st, Context((), True, "")))["summary"]
+                            .endswith("| watch 4 rules"))
+        with WatchFile(b'[[rule]]\nid = "x"\nsev = "high"\ncmd = "a"\nwhy = "b"\n'):
+            with self.assertRaises(ConfigError):                 # module off, header says why
+                sec.init({})
 
     def test_on_screen_2(self):
         s = SCREENS[find("security")]
@@ -88,7 +107,7 @@ class TestCommands(unittest.TestCase):
         p = snap["panels"][0]
         self.assertEqual((p["title"], p["width"], p["types"]),
                          ("commands 23  (28 root runs since start)", "full", sec.TYPES))
-        self.assertEqual(snap["summary"], "root runs 28 | groups 23")
+        self.assertEqual(snap["summary"], "root runs 28 | groups 23 | no watch list")
         d = got["su"][3]
         self.assertEqual((d["exe"], d["argv"], d["cwd"], d["ses"], d["key"]),
                          ("/usr/bin/su", "su", "/var/home/null/my-project/sectop", "18",
@@ -279,6 +298,108 @@ class TestCommands(unittest.TestCase):
         self.assertIn("(journal: 3 bad line(s))", snap["panels"][0]["title"])
         snap = validate(sec.collect(r.st, Context((), False, "")))
         self.assertIn("(journal: follower down)", snap["panels"][0]["title"])
+
+
+class TestWatch(unittest.TestCase):
+    def run_(self, *execs, now=200.0, r=None):
+        r = r or Run()
+        if not r.st.rules:
+            r.st = sec.State(wall=r.st.wall, user=r.st.user, stamp=r.st.stamp,
+                             rules=watch.parse(RULES))
+        return r, r.collect(_events(*execs), now)
+
+    def test_rows_rated(self):
+        r, snap = self.run_(
+            (900, 1, "0", "/usr/bin/setenforce", ["setenforce", "0"], "root_cmds"),
+            (901, 1, "0", "/usr/bin/setenforce", ["setenforce", "1"], "root_cmds"),
+            (902, 1, "1000", "/usr/bin/kmod", ["modprobe", "nvidia"], "user_emulation"),
+            (903, 1, "0", "/usr/bin/systemctl", ["systemctl", "restart", "sectop.service"],
+             "root_cmds"),
+            (904, 1, "0", "/usr/bin/id", ["id"], "root_cmds"))
+        sev = {row["cells"][4]: row["sev"] for row in snap["panels"][0]["rows"]}
+        self.assertEqual(sev, {"setenforce 0": "crit", "setenforce 1": "ok",       # own rows
+                               "modprobe nvidia": "warn",
+                               "systemctl restart sectop.service": "info", "id": "ok"})
+        got = rows(snap)
+        self.assertEqual(got["setenforce 0"][3]["watch"], "selinux-permissive: SELinux off")
+        self.assertNotIn("watch", got["id"][3])
+        [c] = snap["checks"]                                    # crit only
+        self.assertTrue(c["key"].startswith("watch:selinux-permissive:"))
+        self.assertEqual((c["sev"], c["title"], c["n"]), ("crit", "SELinux off: setenforce 0", 1))
+        self.assertIn("null>root via ppid 1", c["detail"])
+
+    def test_alert_window(self):
+        ev = (900, 1, "0", "/usr/bin/setenforce", ["setenforce", "0"], "root_cmds")
+        r, snap = self.run_(ev)
+        last = 100.0                                            # _events: first one at 100 s
+        self.assertEqual(snap["checks"][0]["n"], 1)
+        snap = r.collect([], last + 60)
+        self.assertEqual(snap["checks"][0]["n"], 0)              # still open, nothing new
+        _, snap = self.run_(ev, now=last + 120, r=r)
+        self.assertEqual(snap["checks"][0]["n"], 1)              # ran again
+        snap = r.collect([], 100.0 + sec.WINDOW + 1)             # 2nd run was at 100 s too
+        self.assertEqual(snap["checks"], [])                     # older than the window
+
+    def test_env_and_bash_of_one_script_one_alert(self):
+        r, snap = self.run_(
+            (910, 1, "0", "/usr/bin/env", ["/usr/bin/env", "bash", "/usr/local/sbin/hostfw",
+                                           "observe"], "root_cmds"),
+            (910, 1, "0", "/usr/bin/bash", ["bash", "/usr/local/sbin/hostfw", "observe"],
+             "root_cmds"))
+        self.assertEqual([row["sev"] for row in snap["panels"][0]["rows"]], ["crit", "crit"])
+        [c] = snap["checks"]
+        self.assertEqual((c["title"], c["n"]),
+                         ("hostfw off: /usr/local/sbin/hostfw observe", 1))   # one run
+
+
+RULES = b"""
+[[rule]]
+id = "selinux-permissive"
+sev = "crit"
+cmd = "setenforce 0|[Pp]ermissive"
+why = "SELinux off"
+
+[[rule]]
+id = "hostfw-off"
+sev = "crit"
+cmd = "hostfw observe|remove"
+why = "hostfw off"
+
+[[rule]]
+id = "kernel-module"
+sev = "warn"
+cmd = "modprobe|insmod|rmmod !-n"
+why = "module"
+
+[[rule]]
+id = "unit-change"
+sev = "info"
+cmd = "systemctl start|restart"
+why = "unit"
+"""
+
+
+class WatchFile:
+    """sec.WATCH_PATH -> a file with this content (None: missing), owned by me."""
+
+    def __init__(self, data):
+        self.data = data
+
+    def __enter__(self):
+        self.dir = tempfile.TemporaryDirectory()
+        os.chmod(self.dir.name, 0o755)
+        path = os.path.join(self.dir.name, "watch.toml")
+        if self.data is not None:
+            with open(path, "wb") as f:
+                f.write(self.data)
+            os.chmod(path, 0o644)
+        self.saved = (sec.WATCH_PATH, sec.WATCH_OWNER)
+        sec.WATCH_PATH, sec.WATCH_OWNER = path, os.getuid()
+        return self
+
+    def __exit__(self, *exc):
+        sec.WATCH_PATH, sec.WATCH_OWNER = self.saved
+        self.dir.cleanup()
 
 
 def _events(*execs) -> list:

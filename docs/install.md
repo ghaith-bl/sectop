@@ -24,6 +24,9 @@ sectop runs as separate parts (docs/architecture.md, Privilege split):
   `/etc/sysusers.d` is created first: Silverblue does not have it (first install
   2026-10-20 stopped there: "No such file or directory").
 - `/etc/sectop`: 0755, `*.toml` 0644 root:root (read by the sectop users; no secrets).
+- `/etc/sectop/watch.toml` (security screen, rating of root commands): copied from
+  deploy/watch.toml when missing, never over mine. Mine differs from the shipped one:
+  `kept` in the log (`diff` it to see new defaults).
 - Units from deploy/ -> `/etc/systemd/system`, daemon-reload, enable, restart:
   sectop-net.service, sectop.service, sectop-whois.socket.
 - SELinux labels: restorecon on everything it wrote.

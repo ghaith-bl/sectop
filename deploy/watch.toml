@@ -1,0 +1,364 @@
+# sectop watch list: rates root commands on the security screen (commands box).
+# install.sh puts this file in /etc/sectop/watch.toml when that is missing, never over
+# it. Edit as root, then: sudo systemctl restart sectop.service (read once at start).
+# Format: docs/modules/security.md, Watch list.
+#
+# sev   crit  red, alert in the bar while its last run is under 1 h old
+#       warn  yellow, row only
+#       info  cyan, row only
+#       no rule: ok (plain). Not a verdict: only what this list knows.
+# cmd   program, then words. Every word must match one argument (any order); !word:
+#       no argument may match. a|b = either, each a glob (* ? [...]). Program = exe
+#       name, argv[0] name, or the script an interpreter runs (bash .../hostfw -> hostfw).
+# The highest sev wins, then the first rule.
+#
+# Baseline: silverblue-cis-hardening (SELinux enforcing, auditd + CIS rules, firewalld
+# drop zone, hostfw on top, wheel = sudo).
+
+# --- crit: turns a protection off ----------------------------------------------------
+
+[[rule]]
+id = "selinux-permissive"
+sev = "crit"
+cmd = "setenforce 0|[Pp]ermissive"
+why = "SELinux to permissive"
+
+[[rule]]
+id = "selinux-permissive-domain"
+sev = "crit"
+cmd = "semanage permissive -a|--add"
+why = "SELinux domain made permissive"
+
+[[rule]]
+id = "kargs-off"
+sev = "crit"
+cmd = "rpm-ostree|grubby *selinux=0*|*enforcing=0*|*audit=0* !--delete*|--remove-args*"
+why = "kernel command line turns SELinux or audit off"
+
+[[rule]]
+id = "audit-off"
+sev = "crit"
+cmd = "auditctl -e 0"
+why = "audit off"
+
+[[rule]]
+id = "audit-rules-deleted"
+sev = "crit"
+cmd = "auditctl -D"
+why = "all audit rules deleted"
+
+[[rule]]
+id = "auditd-stop"
+sev = "crit"
+cmd = "service auditd stop"
+why = "auditd stopped"
+
+[[rule]]
+id = "protection-unit-off"
+sev = "crit"
+cmd = "systemctl stop|disable|mask|kill auditd|auditd.service|firewalld|firewalld.service|hostfw|hostfw.service|usbguard|usbguard.service"
+why = "a protection service stopped or disabled"
+
+[[rule]]
+id = "hostfw-off"
+sev = "crit"
+cmd = "hostfw|hostfw.sh observe|remove|uninstall"
+why = "hostfw to observe or removed"
+
+[[rule]]
+id = "hostfw-table-removed"
+sev = "crit"
+cmd = "nft delete|destroy table hostfw"
+why = "hostfw table removed"
+
+[[rule]]
+id = "nft-flush-all"
+sev = "crit"
+cmd = "nft flush ruleset"
+why = "all firewall rules flushed"
+
+[[rule]]
+id = "firewalld-zone"
+sev = "crit"
+cmd = "firewall-cmd --set-default-zone=* !--set-default-zone=drop"
+why = "firewalld default zone not drop"
+
+[[rule]]
+id = "firewalld-target"
+sev = "crit"
+cmd = "firewall-cmd --set-target=* !--set-target=DROP"
+why = "firewalld zone target changed"
+
+[[rule]]
+id = "wheel"
+sev = "crit"
+cmd = "usermod|gpasswd|groupmems *wheel* !-d|--delete|-r|--remove"
+why = "wheel membership: sudo rights"
+
+[[rule]]
+id = "usbguard-allow-all"
+sev = "crit"
+cmd = "usbguard set-parameter ImplicitPolicyTarget allow"
+why = "USBGuard allows unknown devices"
+
+[[rule]]
+id = "secureboot-off"
+sev = "crit"
+cmd = "mokutil --disable-validation"
+why = "Secure Boot validation off (shim)"
+
+# --- warn: changes a security setting ------------------------------------------------
+
+[[rule]]
+id = "kernel-module"
+sev = "warn"
+cmd = "modprobe|insmod|rmmod !-n|--dry-run|-c|--showconfig|-D|--show-depends"
+why = "kernel module loaded or removed"
+
+[[rule]]
+id = "sysctl-set"
+sev = "warn"
+cmd = "sysctl -w|--write|*=*"
+why = "kernel setting changed"
+
+[[rule]]
+id = "kargs"
+sev = "warn"
+cmd = "rpm-ostree kargs --append*|--delete*|--replace*|--editor|--import-proc-cmdline"
+why = "kernel command line changed"
+
+[[rule]]
+id = "image-change"
+sev = "warn"
+cmd = "rpm-ostree install|uninstall|override|rebase|reset|deploy|usroverlay|initramfs|initramfs-etc|apply-live|rollback"
+why = "OS image changed"
+
+[[rule]]
+id = "ostree-unlock"
+sev = "warn"
+cmd = "ostree unlock|undeploy|set-origin"
+why = "ostree deployment changed"
+
+[[rule]]
+id = "ostree-remote"
+sev = "warn"
+cmd = "ostree remote add|delete|gpg-import"
+why = "ostree remote changed"
+
+[[rule]]
+id = "flatpak-sandbox"
+sev = "warn"
+cmd = "flatpak remote-add|remote-modify|override|permission-set|permission-reset"
+why = "flatpak remote or sandbox permissions changed"
+
+[[rule]]
+id = "account-change"
+sev = "warn"
+cmd = "useradd|userdel|usermod|passwd|chage|chpasswd|chsh|chfn|groupadd|groupdel|groupmod|gpasswd|groupmems|newusers !-S|--status|-l|--list"
+why = "user, group or password changed"
+
+[[rule]]
+id = "visudo"
+sev = "warn"
+cmd = "visudo !-c|--check"
+why = "sudoers edited"
+
+[[rule]]
+id = "auth-files"
+sev = "warn"
+cmd = "tee|cp|mv|install|ln|chmod|chown|rm|truncate|vi|vim|nano */etc/sudoers*|*/etc/pam.d*|*/etc/security/*|*/etc/shadow*|*/etc/gshadow*|*/etc/passwd*|*/etc/group*|*/etc/polkit-1/*"
+why = "login, sudo or polkit files changed"
+
+[[rule]]
+id = "auth-files-sed"
+sev = "warn"
+cmd = "sed -i*|--in-place* */etc/sudoers*|*/etc/pam.d*|*/etc/security/*|*/etc/shadow*|*/etc/gshadow*|*/etc/passwd*|*/etc/group*|*/etc/polkit-1/*"
+why = "login, sudo or polkit files edited in place"
+
+[[rule]]
+id = "selinux-change"
+sev = "warn"
+cmd = "setsebool|semanage|semodule|chcon|load_policy !-l|--list"
+why = "SELinux policy, boolean or label changed"
+
+[[rule]]
+id = "audit-change"
+sev = "warn"
+cmd = "auditctl !-l|-s|--list|--status|-v"
+why = "audit rules or settings changed"
+
+[[rule]]
+id = "augenrules"
+sev = "warn"
+cmd = "augenrules --load"
+why = "audit rules reloaded"
+
+[[rule]]
+id = "unit-off"
+sev = "warn"
+cmd = "systemctl stop|disable|mask|unmask|kill|revert|edit|set-property !hostfw-rollback*"
+why = "a service stopped, disabled, masked or edited"
+
+[[rule]]
+id = "firewalld-change"
+sev = "warn"
+cmd = "firewall-cmd !--state !--list-* !--get-* !--query-* !--info-* !--check-config !-h !--help !-V !--version"
+why = "firewalld changed"
+
+[[rule]]
+id = "nft-change"
+sev = "warn"
+cmd = "nft add|insert|replace|delete|destroy|flush|create|reset|rename|-f|--file !-c|--check"
+why = "nftables rules changed"
+
+[[rule]]
+id = "hostfw-change"
+sev = "warn"
+cmd = "hostfw|hostfw.sh apply|router-open|install"
+why = "hostfw loaded in observe, router hole or installed"
+
+[[rule]]
+id = "wireguard-change"
+sev = "warn"
+cmd = "wg set|setconf|addconf|syncconf"
+why = "WireGuard config changed"
+
+[[rule]]
+id = "ip-change"
+sev = "warn"
+cmd = "ip add|del|delete|change|replace|flush|set|append|prepend"
+why = "routes, rules or addresses changed"
+
+[[rule]]
+id = "usbguard-change"
+sev = "warn"
+cmd = "usbguard allow-device|append-rule|remove-rule|set-parameter|add-user|remove-user"
+why = "USBGuard policy changed"
+
+[[rule]]
+id = "luks-change"
+sev = "warn"
+cmd = "cryptsetup luksAddKey|luksRemoveKey|luksChangeKey|luksKillSlot|luksErase|erase|reencrypt|luksFormat|token|config|luksHeaderRestore|convert"
+why = "LUKS keys or header changed"
+
+[[rule]]
+id = "cryptenroll"
+sev = "warn"
+cmd = "systemd-cryptenroll --tpm2-device*|--fido2-device*|--password|--recovery-key|--wipe-slot*|--pkcs11-token-uri*"
+why = "LUKS key slot enrolled or wiped"
+
+[[rule]]
+id = "mok-change"
+sev = "warn"
+cmd = "mokutil --import|--delete|--reset|--revoke-*|--enable-validation|--trust-mok|--untrust-mok"
+why = "Secure Boot keys (MOK) changed"
+
+[[rule]]
+id = "setuid-bit"
+sev = "warn"
+cmd = "chmod [ugoa]*+*s*|+*s*|[2467][0-7][0-7][0-7]|0[2467][0-7][0-7][0-7]"
+why = "setuid / setgid bit set"
+
+[[rule]]
+id = "setcap"
+sev = "warn"
+cmd = "setcap !-v"
+why = "file capabilities set"
+
+[[rule]]
+id = "chattr"
+sev = "warn"
+cmd = "chattr ?*"
+why = "file attributes (immutable, append-only) changed"
+
+[[rule]]
+id = "mount"
+sev = "warn"
+cmd = "mount|umount ?* !-l|--list"
+why = "file system mounted or unmounted"
+
+[[rule]]
+id = "raw-write"
+sev = "warn"
+cmd = "dd of=*"
+why = "raw write with dd"
+
+[[rule]]
+id = "logs-deleted"
+sev = "warn"
+cmd = "journalctl --vacuum-*"
+why = "journal entries deleted"
+
+[[rule]]
+id = "log-files-deleted"
+sev = "warn"
+cmd = "rm|truncate|shred */var/log/*"
+why = "log files deleted"
+
+[[rule]]
+id = "clock-date"
+sev = "warn"
+cmd = "date -s|--set*"
+why = "clock changed"
+
+[[rule]]
+id = "clock-timedatectl"
+sev = "warn"
+cmd = "timedatectl set-time|set-ntp|set-timezone|set-local-rtc"
+why = "clock or time sync changed"
+
+# --- info: changes the system (routine) ----------------------------------------------
+
+[[rule]]
+id = "unit-change"
+sev = "info"
+cmd = "systemctl start|restart|reload|try-restart|reload-or-restart|enable|reenable|daemon-reload|daemon-reexec|preset|link"
+why = "service started, restarted or enabled"
+
+[[rule]]
+id = "image-update"
+sev = "info"
+cmd = "rpm-ostree upgrade|update|refresh-md|cleanup"
+why = "OS image update"
+
+[[rule]]
+id = "flatpak-update"
+sev = "info"
+cmd = "flatpak install|update|uninstall|repair"
+why = "flatpak apps changed"
+
+[[rule]]
+id = "hostfw-routine"
+sev = "info"
+cmd = "hostfw|hostfw.sh enforce|confirm|sync"
+why = "hostfw enforce, confirm or sync"
+
+[[rule]]
+id = "relabel"
+sev = "info"
+cmd = "restorecon|fixfiles|setfiles"
+why = "SELinux labels reset to policy"
+
+[[rule]]
+id = "sysctl-load"
+sev = "info"
+cmd = "sysctl --system|-p|--load*"
+why = "sysctl files applied"
+
+[[rule]]
+id = "system-users"
+sev = "info"
+cmd = "systemd-sysusers|systemd-tmpfiles"
+why = "system users or tmpfiles applied"
+
+[[rule]]
+id = "sed-in-place"
+sev = "info"
+cmd = "sed -i*|--in-place*"
+why = "file edited in place"
+
+[[rule]]
+id = "files-change"
+sev = "info"
+cmd = "cp|mv|rm|install|ln|tee|touch|mkdir|rmdir|chmod|chown|chgrp|truncate|rsync|shred"
+why = "files changed"
