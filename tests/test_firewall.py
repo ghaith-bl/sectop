@@ -5,8 +5,9 @@ import unittest
 from unittest import mock
 
 import modules.firewall as fw
+from core import journal as corejournal
 from core import netd
-from core.module import check_module, validate
+from core.module import Context, check_module, validate
 from core.run import Result
 from modules.firewall import conns, journal, nft, vpn
 
@@ -24,6 +25,18 @@ def ok(out=""):
 
 def fail(err="", rc=1):
     return Result(rc, "", err, False, False)
+
+
+def live(text):
+    """Complete JSON lines -> entries as core's follower hands them over (ctx.journal).
+    Lines that are not JSON never reach a module (the follower counts them)."""
+    out = []
+    for line in text.split("\n")[:-1]:
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            pass
+    return tuple(out)
 
 
 NO_TABLE = fail("Error: No such file or directory\nlist table inet hostfw\n")
@@ -99,6 +112,14 @@ class TestNft(unittest.TestCase):
 
 
 class TestJournal(unittest.TestCase):
+    def test_entries_from_follower(self):
+        objs = live(fix("journal.json"))
+        got, bad = journal.entries(objs + ({"__CURSOR": 1, "__REALTIME_TIMESTAMP": "1"},
+                                           {"MESSAGE": "HFW-OUT-LEAK: x"}, ["x"]))
+        want, _cursor, _bad = journal.parse(fix("journal.json"))
+        self.assertEqual(got, want)                      # same as the text parser
+        self.assertEqual(bad, 3)
+
     def test_parse_fixture(self):
         entries, cursor, bad = journal.parse(fix("journal.json"))
         self.assertEqual([e.code for e in entries],
@@ -352,8 +373,16 @@ class Base(unittest.TestCase):
                            owner=os.getuid(), mode_file=self.mode_file,
                            rollback_file=self.rb_file)
 
-    def collect(self):
-        return validate(fw.collect(self.st))          # always a valid Snapshot
+    def ctx(self):
+        """The fake host's "journalctl" answer = what the follower read since the last
+        collect (rc != 0: follower down, err = why)."""
+        res = self.host.answers["journalctl"]
+        if res.rc != 0:
+            return Context((), False, res.err.strip())
+        return Context(live(res.out), True, "")
+
+    def collect(self, ctx=None):
+        return validate(fw.collect(self.st, ctx or self.ctx()))   # always a valid Snapshot
 
     def items(self, snap, panel):
         p = next(p for p in snap["panels"] if p["id"] == panel)
@@ -550,32 +579,32 @@ class TestCollect(Base):
                           ("HFW-OUT-DNS", "warn"), ("HFW-IN-VPN", "warn")])   # IN-NOISE hidden
         self.assertEqual(s["events"][1]["msg"],
                          "uid 1000 tcp 192.168.8.102:46866 -> 203.0.113.11:443 wlo1")
-        self.assertEqual(self.st.cursor, "s=0;i=7;b=0;m=0;t=0;x=0")
-        self.host.calls.clear()
-        self.collect()
-        [argv] = [c for c in self.host.calls if c[0].endswith("journalctl")]
-        self.assertIn("--after-cursor=s=0;i=7;b=0;m=0;t=0;x=0", argv)
+        self.assertFalse([c for c in self.host.calls if c[0].endswith("journalctl")])
 
-    def test_journal_since_without_cursor(self):
-        self.collect()
-        argv = next(c for c in self.host.calls if c[0].endswith("journalctl"))
-        self.assertIn(f"--since=@{self.st.since}", argv)
-        self.assertNotIn("-g", argv)
+    def test_journal_spec(self):
+        sp = corejournal.spec(fw.JOURNAL)                 # every kernel entry, no -g
+        self.assertEqual(sp.groups, ((("_TRANSPORT", "kernel"),),))
+        self.assertEqual(sp.fields, ("MESSAGE",))
 
-    def test_journal_cut_output(self):
-        text = fix("journal.json")
-        self.host.set("journalctl", Result(-9, text[:-20], "", False, True))
-        s = self.collect()
-        self.assertEqual(self.items(s, "hostfw")["log reader"][0],
-                         "behind (output cut, catching up)")
-        self.assertEqual(self.st.cursor, "s=0;i=6;b=0;m=0;t=0;x=0")
+    def test_journal_note(self):
+        entries = live(fix("journal.json")) + ({"__CURSOR": "x", "MESSAGE": "no time"},)
+        s = self.collect(Context(entries, True, "12 entries dropped (buffer full)"))
+        self.assertEqual(self.items(s, "hostfw")["log reader"],
+                         ("12 entries dropped (buffer full); 1 bad entry", "info"))
         self.assertEqual(len(s["events"]), 4)
+        self.assertNotIn("log_reader", [c["key"] for c in s["checks"]])
 
-    def test_journal_error(self):
-        self.host.set("journalctl", fail("Failed to open journal"))
-        s = self.collect()
-        self.assertEqual(self.items(s, "hostfw")["log reader"], ("Failed to open journal", "warn"))
+    def test_journal_down(self):
+        why = "journalctl exited (rc 1: Failed to open journal), restart in 2 s"
+        s = self.collect(Context(live(fix("journal.json")), False, why))
+        self.assertEqual(self.items(s, "hostfw")["log reader"], (why, "warn"))
+        [c] = [c for c in s["checks"] if c["key"] == "log_reader"]
+        self.assertEqual((c["title"], c["detail"]), ("log reader down", why))
         self.assertEqual(s["status"], "warn")
+        self.assertEqual(len(s["events"]), 4)                 # read before the exit: used
+        s = self.collect(Context((), False, ""))
+        self.assertEqual(self.items(s, "hostfw")["log reader"][0],
+                         "journal follower not running")
 
     def test_table_missing(self):
         self.host.set("nft list table", NO_TABLE)
@@ -734,7 +763,7 @@ class TestCollect(Base):
         inbound = {d["k"]: d["v"] for d in p["rows"][3]["detail"]}
         self.assertTrue(inbound["verdict"].startswith("zone  hostfw only logs"))
         self.assertEqual(inbound["MAC"], "02:00:00:00:00:02:02:00:00:00:00:03:08:00")
-        events = [e["code"] for e in fw.collect(self.st)["events"]]
+        events = [e["code"] for e in fw.collect(self.st, self.ctx())["events"]]
         self.assertEqual(events, ["HFW-OUT-LEAK", "HFW-IN-LAN", "HFW-FWD-VM-KS", "HFW-OUT-KS",
                                   "HFW-OUT-LAN-ALLOW"])     # no *-NEW, no IN-NOISE events
 
@@ -1053,8 +1082,6 @@ class TestCollect(Base):
         argvs = self.argvs()
         self.assertEqual(argvs, [
             "nft -j -t list table inet hostfw",
-            f"journalctl _TRANSPORT=kernel -o json --output-fields=MESSAGE -q --no-pager "
-            f"--since=@{self.st.since}",
             "wg show proton0 latest-handshakes",
             "wg show proton0 transfer",
             "wg show proton0 endpoints",
@@ -1067,18 +1094,18 @@ class TestCollect(Base):
         self.assertFalse(any("dump" in a for a in argvs))           # never prints private key
 
     def test_commands_per_tick(self):
-        fast = ["nft", "journalctl", "wg latest-handshakes", "wg transfer", "ss"]
+        fast = ["nft", "wg latest-handshakes", "wg transfer", "ss"]
         words = lambda: [a.split()[0] if a.split()[0] != "wg" else "wg " + a.split()[3]
                          for a in self.argvs()]
         self.collect()
-        self.assertEqual(len(words()), 10)                          # first tick: all sources
+        self.assertEqual(len(words()), 9)                           # first tick: all sources
         for _ in range(int(fw.SLOW // 2) - 1):
             self.tick()
             self.collect()
-            self.assertEqual(words(), fast)                         # 5 commands per tick
+            self.assertEqual(words(), fast)                         # 4 commands per tick
         self.tick()
         self.collect()
-        self.assertEqual(len(words()), 10)                          # SLOW s later: all again
+        self.assertEqual(len(words()), 9)                           # SLOW s later: all again
 
     def test_slow_refresh_on_tunnel_change(self):
         self.collect()
@@ -1191,7 +1218,7 @@ class TestLeakBox(Base):
         self.boot(first=self.BOOT + 40, leaks=[("b1", self.BOOT + 12)])
         self.host.set("journalctl", ok(jline("b1", self.BOOT + 12, LEAK.format(spt=1)) +
                                        jline("l2", self.BOOT + 700, LEAK.format(spt=2))))
-        s = self.collect()                                   # b1 again (after the start cursor)
+        s = self.collect()                                   # b1 again: follower from start
         self.assertEqual([r[0][-1] for r in self.rows(s)], ["tunnel up", "pre-connect"])
         self.assertEqual(self.rows(s)[0][1], "crit")
 
@@ -1266,7 +1293,8 @@ class TestNetSource(Base):
         self.collect()
         self.assertTrue(self.net)
         self.assertFalse({"nft", "wg"} & set(self.ran))
-        self.assertTrue({"journalctl", "ss", "ip"} <= set(self.ran))
+        self.assertTrue({"ss", "ip"} <= set(self.ran))
+        self.assertNotIn("journalctl", self.ran)          # live lines: core's follower
 
     def test_net_unit_has_every_command(self):
         """Each nft / wg argv the module asks for is one the net unit runs."""
@@ -1294,18 +1322,13 @@ class TestInit(unittest.TestCase):
             with self.assertRaises(ValueError, msg=repr(cfg)):
                 fw.init(cfg)
 
-    def test_start_cursor(self):
+    def test_init_only_boot_scan(self):
         host = Host()
-        host.set("journalctl", ok('{"__CURSOR": "c1", "__REALTIME_TIMESTAMP": "1", '
-                                  '"MESSAGE": "x"}\n'))
-        st = fw.State(run=host, net=host)
-        fw._start_cursor(st)
-        self.assertEqual(st.cursor, "c1")
-        self.assertIn("-n", host.calls[0])
-        host.set("journalctl", fail("no journal"))
-        st = fw.State(run=host, net=host)
-        fw._start_cursor(st)
-        self.assertIsNone(st.cursor)
+        real = fw.State
+        with mock.patch.object(fw, "State", lambda **kw: real(run=host, net=host, **kw)):
+            st = fw.init({})
+        self.assertEqual([c[-1] for c in host.calls], ["+1", "--grep=^HFW-OUT-LEAK:"])
+        self.assertFalse(hasattr(st, "cursor"))           # live lines: core's follower
 
 
 if __name__ == "__main__":

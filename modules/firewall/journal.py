@@ -1,9 +1,8 @@
-"""Parse hostfw kernel log lines from `journalctl -o json`. Pure functions.
+"""Parse hostfw kernel log lines from journald JSON. Pure functions.
 
-Filtering is done here, not with `journalctl -g`: the cursor must move
-past every kernel entry, also when no HFW line matched. Otherwise each
-poll would scan the same non-matching entries again. (The one-shot boot
-scan at start has no cursor to keep, so it uses `-g`.)
+Live: entries (dicts) from core's journal follower (core/journal.py), every
+kernel entry; HFW lines are picked here. Boot scan at start: text of a
+one-shot `journalctl -o json --grep=...` (parse()).
 """
 
 import ipaddress
@@ -53,8 +52,39 @@ def parse_fields(rest: str) -> tuple:
     return fields, tuple(flags)
 
 
+def _entry(e) -> tuple:
+    """One journald JSON object -> (cursor, Entry or None for a non-HFW line).
+    Not a journal entry -> ValueError, KeyError or TypeError."""
+    cur = e["__CURSOR"]
+    ts = int(e["__REALTIME_TIMESTAMP"]) / 1e6
+    if not isinstance(cur, str):
+        raise TypeError("__CURSOR: str required")
+    msg = _message(e.get("MESSAGE"))
+    m = CODE_RE.match(msg) if msg is not None else None
+    if m is None:
+        return cur, None
+    code = m.group(1)
+    fields, flags = parse_fields(m.group(2))
+    kind = code[4:].lower().replace("-", "_")
+    return cur, Entry(ts, code, KIND_ALIAS.get(kind, kind), fields, flags, cur)
+
+
+def entries(objs) -> tuple:
+    """Follower entries (dicts, journal order) -> (HFW entries, bad entries)."""
+    out, bad = [], 0
+    for e in objs:
+        try:
+            _cur, ent = _entry(e)
+        except (ValueError, KeyError, TypeError):
+            bad += 1
+            continue
+        if ent is not None:
+            out.append(ent)
+    return out, bad
+
+
 def parse(text: str) -> tuple:
-    """-> (entries, cursor, bad).
+    """Text of `journalctl -o json` -> (entries, cursor, bad).
 
     entries: HFW lines only, in journal order.
     cursor: of the last complete entry (any kernel line), None if none.
@@ -64,30 +94,19 @@ def parse(text: str) -> tuple:
     lines = text.split("\n")
     if not text.endswith("\n"):
         lines = lines[:-1]
-    entries, cursor, bad = [], None, 0
+    out, cursor, bad = [], None, 0
     for line in lines:
         if not line.strip():
             continue
         try:
-            e = json.loads(line)
-            cur = e["__CURSOR"]
-            ts = int(e["__REALTIME_TIMESTAMP"]) / 1e6
+            cur, ent = _entry(json.loads(line))
         except (ValueError, KeyError, TypeError):
             bad += 1
             continue
-        if not isinstance(cur, str):
-            bad += 1
-            continue
         cursor = cur
-        msg = _message(e.get("MESSAGE"))
-        m = CODE_RE.match(msg) if msg is not None else None
-        if m is None:
-            continue
-        code = m.group(1)
-        fields, flags = parse_fields(m.group(2))
-        kind = code[4:].lower().replace("-", "_")
-        entries.append(Entry(ts, code, KIND_ALIAS.get(kind, kind), fields, flags, cur))
-    return entries, cursor, bad
+        if ent is not None:
+            out.append(ent)
+    return out, cursor, bad
 
 
 def _addr(a: str) -> str:

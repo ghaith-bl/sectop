@@ -18,7 +18,7 @@ def fake(name, **over):
         calls.append(("init", cfg))
         return {"name": name}
 
-    def collect(st):
+    def collect(st, ctx):
         return {"v": 1, "status": "ok", "summary": "", "panels": [], "events": []}
 
     def close_fn(st):

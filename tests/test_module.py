@@ -3,7 +3,7 @@ import types
 import unittest
 
 from core import module as m
-from core.module import InvalidSnapshot, check_module, validate, worst
+from core.module import Context, InvalidSnapshot, check_module, validate, worst
 
 GOOD = {
     "v": 1,
@@ -287,13 +287,32 @@ class TestChecks(unittest.TestCase):
 class TestCheckModule(unittest.TestCase):
     def mod(self, **over):
         attrs = {"NAME": "firewall", "INTERVAL": 2.0,
-                 "init": lambda cfg: None, "collect": lambda st: GOOD}
+                 "init": lambda cfg: None, "collect": lambda st, ctx: GOOD}
         attrs.update(over)
         return types.SimpleNamespace(**attrs)
 
     def test_good(self):
         check_module(self.mod())
         check_module(self.mod(close=lambda st: None))
+        check_module(self.mod(collect=lambda st, ctx=None: GOOD))
+        check_module(self.mod(JOURNAL={"groups": [["_TRANSPORT=kernel"]], "fields": ["MESSAGE"]}))
+        check_module(self.mod(JOURNAL=None))
+
+    def test_collect_takes_ctx(self):
+        with self.assertRaisesRegex(ValueError, r"collect\(state, ctx\) required"):
+            check_module(self.mod(collect=lambda st: GOOD))
+        with self.assertRaises(ValueError):
+            check_module(self.mod(collect=lambda st, ctx, more: GOOD))
+
+    def test_bad_journal(self):
+        with self.assertRaisesRegex(ValueError, "firewall: JOURNAL"):
+            check_module(self.mod(JOURNAL={"groups": [["x=1"]], "fields": ["MESSAGE"]}))
+
+    def test_context(self):
+        ctx = Context()
+        self.assertEqual((ctx.journal, ctx.journal_up, ctx.journal_note), ((), False, ""))
+        with self.assertRaises(AttributeError):
+            ctx.journal = (1,)                           # frozen: modules cannot change it
 
     def test_bad(self):
         for over in ({"NAME": "Fire-Wall"}, {"NAME": ""}, {"NAME": None},

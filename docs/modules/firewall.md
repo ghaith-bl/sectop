@@ -13,14 +13,17 @@ writes each result to `/run/sectop-net/<name>.json`; the module reads the last o
 than 30 s (slow ones 90 s) -> a failed result that says why, shown like any command
 error. The rest runs in the collector via `core.run.run()` as user sectop.
 
-Every tick (5 commands):
+Every tick (4 commands):
 
 | what | argv |
 |---|---|
 | counters + live mode | `nft -j -t list table inet hostfw` |
-| log lines | `journalctl _TRANSPORT=kernel -o json --output-fields=MESSAGE -q --no-pager --after-cursor=<c>` |
 | tunnel | `wg show proton0 latest-handshakes`, `transfer` |
 | open sockets (peers, prog) | `ss -tunaH --cgroup state established` |
+
+Log lines: core's journal follower (`core/journal.py`, docs/module-interface.md,
+Journal). `JOURNAL = {"groups": [["_TRANSPORT=kernel"]], "fields": ["MESSAGE"]}`: every
+kernel entry since the last collect in `ctx.journal`, HFW lines picked in `journal.py`.
 
 Slow (every 30 s, and at once when the tunnel goes up / down):
 
@@ -54,16 +57,17 @@ Files (root-owned, not g/o writable, `O_NOFOLLOW`, max 4 KiB):
 `/proc/uptime`: boot time for the leak context.
 
 - No `wg show ... dump`: first line is the private key. Per-field subcommands never print it.
-- No `journalctl -g` in the live reader: HFW lines are filtered in `journal.py`, so the
-  cursor moves past every kernel entry. With `-g` a poll with no match returns no cursor
-  and the next poll scans the same entries again. The boot scan runs once, keeps no
-  cursor, so it uses `-g`. `-n +1` = oldest match. rc 1 with no output = no match.
-- Journal start: `init()` takes the cursor of the newest kernel entry (`-n 1`), so old
-  lines are not replayed. No entry -> `--since=@<start time>`.
-- Output cut (timeout / 1 MiB): only complete lines used, cursor = last complete entry,
-  next tick continues from there. Shown as `log reader: behind`.
+- Live lines: every kernel entry (no `-g`), HFW lines picked in `journal.py`. The boot
+  scan runs once in `init()`, so it uses `-g`. `-n +1` = oldest match. rc 1 with no
+  output = no match.
+- The follower starts at collector start (`--since`), before `init()`: a leak line seen
+  by the boot scan and again live is skipped (boot scan cursors).
+- `log reader` item: `ok`; the follower's note (dropped, bad lines, restarted) and
+  `N bad entries` (no time / cursor) -> info; follower down -> warn + check `log_reader`
+  "log reader down" (detail: why, restart in N s). Entries read before it went down are
+  still used.
 - MESSAGE as byte array (non-UTF-8 / control chars) decoded with `errors="replace"`.
-  Null MESSAGE (too large) skipped, cursor still moves.
+  Null MESSAGE (too large) skipped.
 
 ## Severity
 
@@ -132,7 +136,8 @@ own at the bottom, it has the most columns and gets the leftover lines).
   switch) red, block yellow, zone / pass / deny plain. Healthy kv values green (table
   loaded, mode enforce, boot mode = live, log reader ok, tunnel up, handshake fresh,
   fwmark in set, default route = kill switch / tunnel). Problems keep their severity color.
-- hostfw `log reader` = sectop's own kernel log reader (ok / behind / error), not a log view.
+- hostfw `log reader` = state of core's journal follower for this module (ok / note /
+  down), not a log view.
   System journal view: security screen (phase 4).
 - vpn `recv / sent` = bytes received / sent through the tunnel since it came up
   (`wg show transfer`, summed over peers, 1000-based units). Reset on every reconnect.

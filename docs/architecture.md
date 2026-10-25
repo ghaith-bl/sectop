@@ -398,9 +398,11 @@ Best practice decides (Red Hat for the host). Fixtures from my host first
   `posture` (own module, every 300 s: other sources, slow, its errors do not stop the
   other boxes).
 - Order:
-  1. Journal reader in core (see Resources): firewall moves to it. Audit events by
-     `_AUDIT_ID`, EXECVE / USER_CMD parsing. Poll or follow (`journalctl -f`, owned by
-     core): from the measured CPU of sectop.service.
+  1. Journal reader in core: follow (see Resources). Done 2026-10-25: `core/journal.py`,
+     `collect(state, ctx)` + `JOURNAL`, firewall moved to it (no poll, no cursor of its
+     own). Still in this step: audit events by `_AUDIT_ID`, EXECVE / USER_CMD parsing
+     (`core/audit.py`, fixtures 2026-10-20 -> tests/fixtures/security/). CPU of
+     sectop.service after install: not measured yet.
   2. Look
   3. commands box + watch.toml
   4. auth box
@@ -413,7 +415,8 @@ Best practice decides (Red Hat for the host). Fixtures from my host first
 
 - `checks`: conditions for the alert engine. Done (docs/module-interface.md, Checks).
 - Panel layout hint `width`: `full` done (audit box). Planned: half, min height.
-- Planned: `collect()` gets a context with `visible` (screen shown or not).
+- `collect(state, ctx)`: done 2026-10-25 (journal entries). Planned in ctx: `visible`
+  (screen shown or not).
 - v1 Snapshots keep working until all modules move to v2.
 
 ## Phases

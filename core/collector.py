@@ -10,7 +10,9 @@ Single thread. Error / backoff / stale / slow rules are in
 docs/module-interface.md (Errors). Core is pure logic with an injected
 clock, so the rules can be tested without a service. After each good
 collect the module's checks go to the alert engine (core/alerts.py,
-wall clock).
+wall clock). The journal follower (core/journal.py, one for all modules)
+is read in the loop: before each tick and while waiting; each collect gets
+its module's entries in the Context.
 
 systemd: /usr/bin/python3 -I -B /usr/local/lib/sectop/bin/sectop-collector
 """
@@ -24,9 +26,10 @@ from dataclasses import dataclass
 
 from core import alerts as alertsmod
 from core import config as configmod
+from core import journal as journalmod
 from core import noise as noisemod
 from core import registry, statefile
-from core.module import MIN_INTERVAL, validate, worst
+from core.module import MIN_INTERVAL, Context, validate, worst
 from core.sanitize import display
 
 STATE_PATH = "/run/sectop/state.json"
@@ -72,15 +75,19 @@ def backoff(base: float, errors: int) -> float:
 
 
 class Core:
-    def __init__(self, loaded: list, clock=time.monotonic, wall=time.time, noise=()):
+    def __init__(self, loaded: list, clock=time.monotonic, wall=time.time, noise=(),
+                 journal=None):
         self.clock, self.wall = clock, wall
         self.runs = [Run(ld, ld.interval, ld.interval) for ld in loaded]
         self.feed = collections.deque(maxlen=FEED_MAX)   # newest first
         self.alerts = alertsmod.empty()                  # alert engine state
         self.noise = tuple(noise)                        # core/noise.py entries
+        self.journal = journal                           # core/journal.Reader or None
 
     def tick(self) -> bool:
         """Collect modules that are due. True if any was collected."""
+        if self.journal is not None:
+            self.journal.pump()
         done = False
         for r in self.runs:
             if r.loaded.active and self.clock() >= r.due:
@@ -88,10 +95,24 @@ class Core:
                 done = True
         return done
 
+    def context(self, name: str) -> Context:
+        """collect()'s ctx. Journal entries are handed over once (also if collect fails)."""
+        if self.journal is None or name not in self.journal.specs:
+            return Context()
+        return Context(*self.journal.take(name))
+
+    def nap(self, seconds: float) -> None:
+        """The loop's sleep: reads the journal meanwhile (no full pipe, no lost wakeup)."""
+        if self.journal is None:
+            time.sleep(seconds)
+        else:
+            self.journal.wait(seconds)
+
     def _collect(self, r: Run) -> None:
         start = self.clock()
+        ctx = self.context(r.loaded.name)
         try:
-            snap = validate(r.loaded.mod.collect(r.loaded.state))
+            snap = validate(r.loaded.mod.collect(r.loaded.state, ctx))
         except (Exception, SystemExit) as e:
             end = self.clock()
             r.errors += 1
@@ -175,10 +196,12 @@ def _log(msg: str) -> None:
     print(f"sectop-collector: {display(msg)}", file=sys.stderr, flush=True)
 
 
-def run(core: Core, path: str = STATE_PATH, write=statefile.write, sleep=time.sleep,
+def run(core: Core, path: str = STATE_PATH, write=statefile.write, sleep=None,
         log=_log, stop=lambda: False) -> None:
-    """Collect, write the state, sleep. Until stop() (tests) or Quit / Ctrl-C.
-    A write problem is logged once until it changes (no log flood every tick)."""
+    """Collect, write the state, sleep (core.nap: reads the journal). Until stop()
+    (tests) or Quit / Ctrl-C. A write problem is logged once until it changes (no
+    log flood every tick)."""
+    sleep = sleep or core.nap
     last, problem = None, None
     while not stop():
         collected = core.tick()
@@ -209,6 +232,7 @@ def main(argv: list | None = None) -> int:
     if os.geteuid() == 0:
         _log("refusing to run as root: runs as user sectop (sectop.service, docs/install.md)")
         return 2
+    start = time.time()                    # the follower reads from here (--since)
     try:
         cfg = configmod.load()
         noise = noisemod.load()            # before modules load: nothing to close on error
@@ -217,11 +241,17 @@ def main(argv: list | None = None) -> int:
         _log(f"config: {e}")
         return 2
     signal.signal(signal.SIGTERM, _term)
+    reader = None
     try:
-        run(Core(loaded, noise=noise))
+        reader = journalmod.for_modules(loaded, since=start)
+        if reader is not None:
+            reader.pump()                  # starts journalctl
+        run(Core(loaded, noise=noise, journal=reader))
     except (KeyboardInterrupt, Quit):
         pass
     finally:
+        if reader is not None:
+            reader.close()
         for name, err in registry.close(loaded):
             _log(f"{name}: {err}")
     return 0

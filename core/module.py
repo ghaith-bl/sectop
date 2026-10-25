@@ -3,13 +3,17 @@
 See docs/module-interface.md. validate() returns a new, normalized
 Snapshot (known keys only, defaults filled, limits applied) or raises
 InvalidSnapshot. Core never draws a Snapshot that did not pass here.
+Context is the second argument of collect().
 """
 
+import inspect
 import ipaddress
 import json
 import math
 import re
+from dataclasses import dataclass
 
+from core import journal
 from core.sanitize import truncate
 
 VERSIONS = (1, 2)       # v2 = v1 + checks
@@ -44,6 +48,14 @@ class InvalidSnapshot(ValueError):
     pass
 
 
+@dataclass(frozen=True)
+class Context:
+    """What core gives collect(state, ctx) besides the module's own state."""
+    journal: tuple = ()          # entries since the last collect (module with JOURNAL)
+    journal_up: bool = False     # the follower runs (core/journal.py)
+    journal_note: str = ""       # what went wrong since the last collect, "" = nothing
+
+
 def worst(*sevs: str) -> str:
     """Highest severity of the given ones. Empty -> ok."""
     return max(sevs, key=SEV_RANK.__getitem__, default="ok")
@@ -62,9 +74,18 @@ def check_module(mod) -> None:
     for fn in ("init", "collect"):
         if not callable(getattr(mod, fn, None)):
             raise ValueError(f"{name}: {fn}() missing")
+    try:
+        inspect.signature(mod.collect).bind(None, None)
+    except TypeError:
+        raise ValueError(f"{name}: collect(state, ctx) required") from None
     close = getattr(mod, "close", None)
     if close is not None and not callable(close):
         raise ValueError(f"{name}: close is not callable")
+    if getattr(mod, "JOURNAL", None) is not None:
+        try:
+            journal.spec(mod.JOURNAL)
+        except ValueError as e:
+            raise ValueError(f"{name}: {e}") from None
 
 
 # --- helpers --------------------------------------------------------------

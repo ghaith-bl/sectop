@@ -7,6 +7,7 @@ from unittest import mock
 from core import collector, statefile
 from core.collector import Core, Quit, backoff
 from core.config import ConfigError
+from core.module import Context
 from core.noise import Entry
 from core.registry import Loaded
 
@@ -30,7 +31,7 @@ def ev(ts, msg="m", sev="warn"):
 
 
 def loaded(name="a", collect=None, interval=2.0, **over):
-    mod = types.SimpleNamespace(collect=collect or (lambda st: snap()))
+    mod = types.SimpleNamespace(collect=collect or (lambda st, ctx: snap()))
     kw = {"name": name, "import_name": f"modules.{name}", "enabled": True,
           "mod": mod, "interval": interval, "state": {"st": name}}
     kw.update(over)
@@ -44,14 +45,68 @@ class Script:
         self.calls = []
         self.clock, self.takes = clock, takes
 
-    def __call__(self, state):
+    def __call__(self, state, ctx):
         self.calls.append(state)
+        self.ctxs = getattr(self, "ctxs", []) + [ctx]
         if self.clock:
             self.clock.t += self.takes
         r = self.results.pop(0) if len(self.results) > 1 else self.results[0]
         if isinstance(r, BaseException):
             raise r
         return r
+
+
+class FakeJournal:
+    """core/journal.Reader as Core uses it."""
+    def __init__(self, *names):
+        self.specs = dict.fromkeys(names)
+        self.pumps, self.waits, self.taken = 0, [], []
+
+    def pump(self):
+        self.pumps += 1
+
+    def take(self, name):
+        self.taken.append(name)
+        return (("e1", "e2"), True, "3 bad line(s)")
+
+    def wait(self, seconds):
+        self.waits.append(seconds)
+
+
+class TestJournal(unittest.TestCase):
+    def test_context(self):
+        a, b = Script(snap()), Script(snap())
+        j = FakeJournal("a")
+        c = Core([loaded("a", collect=a), loaded("b", collect=b)], clock=Clock(), journal=j)
+        c.tick()
+        self.assertEqual(j.pumps, 1)                       # read before the collects
+        self.assertEqual(a.ctxs, [Context(("e1", "e2"), True, "3 bad line(s)")])
+        self.assertEqual(b.ctxs, [Context()])              # no JOURNAL: empty context
+        self.assertEqual(j.taken, ["a"])
+
+    def test_entries_given_once_even_on_error(self):
+        j = FakeJournal("a")
+        c = Core([loaded("a", collect=Script(ValueError("bad")))], clock=Clock(), journal=j)
+        c.tick()
+        self.assertEqual(j.taken, ["a"])
+        self.assertEqual(c.runs[0].error, "ValueError: bad")
+
+    def test_nap(self):
+        j = FakeJournal("a")
+        Core([], journal=j).nap(0.4)
+        self.assertEqual(j.waits, [0.4])                   # reads the journal while waiting
+        with mock.patch.object(collector.time, "sleep") as sleep:
+            Core([]).nap(0.3)
+        sleep.assert_called_once_with(0.3)
+
+    def test_run_sleeps_with_nap(self):
+        j = FakeJournal("a")
+        n = iter(range(3))
+        collector.run(Core([loaded(interval=20.0)], clock=Clock(), journal=j), "/x",
+                      write=lambda p, d: None, log=lambda m: None,
+                      stop=lambda: next(n, None) is None)
+        self.assertEqual(len(j.waits), 3)
+        self.assertEqual(j.pumps, 3)
 
 
 class TestBackoff(unittest.TestCase):
@@ -232,10 +287,10 @@ class TestCore(unittest.TestCase):
         self.assertFalse(c.runs[0].slow)
 
     def test_isolation(self):
-        def boom(st):
+        def boom(st, ctx):
             raise ValueError("bad")
 
-        def bye(st):
+        def bye(st, ctx):
             raise SystemExit(1)
 
         good = Script(snap("info"))
@@ -249,7 +304,7 @@ class TestCore(unittest.TestCase):
 
     def test_quit_and_interrupt_propagate(self):
         for exc in (Quit, KeyboardInterrupt):
-            def f(st, exc=exc):
+            def f(st, ctx, exc=exc):
                 raise exc
             c = self.core(loaded(collect=f))
             with self.assertRaises(exc):
@@ -339,7 +394,7 @@ class TestRun(unittest.TestCase):
         self.assertIn("written again", self.logs[1])
 
     def test_quit_stops(self):
-        def f(st):
+        def f(st, ctx):
             raise Quit
         with self.assertRaises(Quit):
             self.go(Core([loaded(collect=f)], clock=self.clock), 5)
@@ -387,7 +442,28 @@ class TestMain(unittest.TestCase):
         self.assertEqual(rc, 0)
         core = run.call_args.args[0]
         self.assertEqual(core.noise, ("entry",))
+        self.assertIsNone(core.journal)                    # no module wants the journal
         self.assertEqual(logs, ["firewall: close: OSError: x"])
+
+    def test_journal_started_and_closed(self):
+        reader = mock.Mock()
+        with mock.patch.object(collector.journalmod, "for_modules",
+                               return_value=reader) as fm, \
+             mock.patch.object(collector.time, "time", return_value=1792410000.5):
+            rc, run, reg, logs = self.main()
+        self.assertEqual(rc, 0)
+        self.assertEqual(fm.call_args.kwargs, {"since": 1792410000.5})
+        reader.pump.assert_called_once_with()              # journalctl starts before run
+        self.assertIs(run.call_args.args[0].journal, reader)
+        reader.close.assert_called_once_with()
+
+    def test_journal_closed_on_quit(self):
+        reader = mock.Mock()
+        with mock.patch.object(collector.journalmod, "for_modules", return_value=reader), \
+             mock.patch.object(collector, "run", side_effect=Quit):
+            rc, _run, _reg, _logs = self.main()
+        self.assertEqual(rc, 0)
+        reader.close.assert_called_once_with()
 
 
 if __name__ == "__main__":

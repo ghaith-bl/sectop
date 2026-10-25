@@ -27,18 +27,22 @@ Modules collect data only. They never draw.
 ```python
 NAME = "firewall"     # unique, [a-z0-9_]+
 INTERVAL = 2.0        # seconds; config can override, min 1.0
+JOURNAL = {...}       # optional: journal entries the module reads (see Journal)
 
 def init(cfg: dict) -> object: ...
-def collect(state: object) -> dict: ...   # returns Snapshot
+def collect(state: object, ctx: Context) -> dict: ...   # returns Snapshot
 def close(state: object) -> None: ...     # optional
 ```
 
 - `init`: once at start. `cfg` = `[modules.<name>]` table (may be empty).
   Returns module state (any object). Raise -> module disabled, error shown.
 - `collect`: every INTERVAL. Returns Snapshot. Raise -> see Errors.
+  `ctx` (`core.module.Context`, frozen): `journal` (entries since the last collect),
+  `journal_up`, `journal_note` (see Journal). Empty for a module without JOURNAL.
+  Planned: `visible` (screen shown or not).
 - `close`: on exit, if defined.
-- v1: single thread. No threads, no long-lived child processes in modules.
-  Follow-style sources (journal) are polled with a cursor.
+- Single thread. No threads, no long-lived child processes in modules. The journal:
+  declare JOURNAL, core runs one follower for all modules.
 - External commands only via `core.run.run()`.
 - Module keeps its own history (spark series, counter deltas) in state.
 
@@ -299,6 +303,46 @@ A condition that is not true any more is left out.
   114 green), crit 196. Else the 8 basic colors; no color support: plain.
 - Box lines: Unicode box drawing (U+2500 block), written as escapes in the source.
 
+## Journal (`core/journal.py`)
+
+One follower for the whole collector: one long-lived `journalctl -f`, started and
+owned by core, read in the collector loop without threads. Why follow, host facts:
+docs/architecture.md, Resources.
+
+```python
+JOURNAL = {"groups": [["_TRANSPORT=kernel"]], "fields": ["MESSAGE"]}
+```
+
+- `groups`: 1..8 groups of 1..8 `FIELD=VALUE` terms, journalctl(1) matches: in a group,
+  terms of one field are alternatives, different fields must all match; groups are
+  alternatives (`+`). FIELD `A-Z 0-9 _`, VALUE `A-Z a-z 0-9 _ . : / @ % -` (max 64).
+- `fields`: 1..32 fields the module reads (`--output-fields`). Also in every entry:
+  `__CURSOR`, `__REALTIME_TIMESTAMP`, `__MONOTONIC_TIMESTAMP`, `_BOOT_ID`, `__SEQNUM`,
+  `__SEQNUM_ID` (journalctl prints them always) and the fields any module matches on
+  (needed to give an entry to the right module).
+- Wrong JOURNAL -> `check_module()` error, module not loaded.
+- argv: `journalctl -f -o json --output-fields=<union> -q --no-pager <start> <groups of
+  all modules, joined by +>`. Binary checked like `run()` (root-owned, not g/o
+  writable), same env, cwd `/`, own session.
+- Start: `--since=@<collector start>`: lines written while the modules run `init()` are
+  kept (a module's own start scan may see some of them again: it skips them).
+- Restart after an exit: `--after-cursor=<last entry>`, never with `-n`. Backoff 1 s,
+  doubling, max 60 s; 1 s again after 60 s up. A start from a cursor that exits without
+  an entry (cursor refused) -> next start from the second of the last entry
+  (`--since`), entries already given skipped by cursor (last 256).
+- Each entry goes to every module whose groups match it. Buffer per module: 5000
+  entries until its next collect, oldest dropped.
+- `ctx.journal`: entries since the last collect, journal order, dicts as `-o json` prints
+  them (str; byte array for non-UTF-8; list when a field repeats). Given once, also
+  when `collect` raises.
+- `ctx.journal_up`: journalctl runs. `ctx.journal_note`: what happened since the last
+  collect, "" = nothing. Parts (joined by `; `): `N entries dropped (buffer full)`,
+  `N bad line(s)` (not JSON, no or bad cursor, longer than 64 KiB),
+  `journalctl exited (rc N: <stderr>)`, `journalctl restarted from the last entry` /
+  `from time @T`, while down `<why>, restart in N s`.
+- Read before each tick and while the collector waits (selectors on the pipe; pipe
+  1 MiB, max 4 MiB per read). Collector exit: SIGTERM, 1 s, then SIGKILL.
+
 ## Validation (`core/module.py`)
 
 - `validate()` returns a new Snapshot: known keys only, defaults filled
@@ -309,8 +353,9 @@ A condition that is not true any more is left out.
 - Strings cut to 512 chars (last char `~`).
 - Lists cut: panels 8, kv items 50, columns 12 (more = invalid), rows 200 (first kept),
   spark values 120 and events 100 (newest kept), checks 50 (worst kept).
-- `check_module()`: NAME, INTERVAL (number >= 1.0), init / collect callable,
-  close callable if present. Else `ValueError`, module not loaded.
+- `check_module()`: NAME, INTERVAL (number >= 1.0), init / collect callable, collect
+  takes `(state, ctx)`, close callable if present, JOURNAL valid if set. Else
+  `ValueError`, module not loaded.
 
 ## Running commands (`core/run.py`)
 

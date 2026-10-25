@@ -1,10 +1,11 @@
 """firewall: hostfw + Proton WireGuard status for sectop.
 
 Sources (fixed argv). Every tick: nft table without set elements (counters +
-enforce chain), kernel journal (HFW- lines, cursor), wg handshakes + transfer,
-ss. Every SLOW s or when the tunnel goes up / down: wg endpoints + fwmark, nft
-wg_fwmark set, ip default routes. nft and wg need CAP_NET_ADMIN: their results
-come from the net unit's files (core/netd.py Reader), the rest via
+enforce chain), wg handshakes + transfer, ss. Kernel journal lines (HFW-) come
+from core's journal follower (JOURNAL, ctx.journal: every kernel entry since the
+last collect). Every SLOW s or when the tunnel goes up / down: wg endpoints +
+fwmark, nft wg_fwmark set, ip default routes. nft and wg need CAP_NET_ADMIN:
+their results come from the net unit's files (core/netd.py Reader), the rest via
 core.run.run as user sectop. Files:
 /etc/hostfw/mode, /run/hostfw/rollback, /proc/uptime. At start: one boot
 journal scan (leak lines, first tunnel flow).
@@ -28,6 +29,7 @@ from modules.firewall import conns, journal, nft, vpn
 
 NAME = "firewall"
 INTERVAL = netd.FW_INTERVAL
+JOURNAL = {"groups": [["_TRANSPORT=kernel"]], "fields": ["MESSAGE"]}   # core/journal.py
 
 TIMEOUT = netd.TIMEOUT   # per command, keeps a full tick below INTERVAL
 BOOT_TIMEOUT = 5.0       # boot journal scan, once in init()
@@ -166,8 +168,6 @@ class State:
         self.comments = {}             # counter name -> hostfw rule comment
         self.bins = {n: netd.bin_path(n) for n in ("nft", "journalctl", "ss", "wg", "ip")}
         self.net = net if net is not None else netd.Reader(tunnel, wall=wall)
-        self.cursor = None
-        self.since = int(wall())
         self.prev = None               # counters of last tick
         self.prev_tx = None
         self.held = {}                 # kind -> (mono time, sev): counter row color until then
@@ -507,29 +507,19 @@ def _new_checks(st: State, deltas: dict, up: bool, vpn_in: tuple, now: float,
     return worst(*sevs)
 
 
-def _events(st: State, checks: list, items: list) -> tuple:
-    """-> (events, HFW entries)."""
-    if st.cursor:
-        argv = ("journalctl", "_TRANSPORT=kernel", "-o", "json", "--output-fields=MESSAGE",
-                "-q", "--no-pager", f"--after-cursor={st.cursor}")
+def _events(st: State, checks: list, items: list, ctx) -> tuple:
+    """-> (events, HFW entries). Kernel entries from core's journal follower (ctx).
+    Entries taken before the follower went down are still used."""
+    entries, bad = journal.entries(ctx.journal)
+    notes = [n for n in (ctx.journal_note, f"{bad} bad entr{'y' if bad == 1 else 'ies'}"
+                         if bad else "") if n]
+    if not ctx.journal_up:
+        why = "; ".join(notes) or "journal follower not running"
+        _chk(checks, "log_reader", "warn", "log reader down", why)
+        items.append(_item("log reader", why, "warn"))
     else:
-        argv = ("journalctl", "_TRANSPORT=kernel", "-o", "json", "--output-fields=MESSAGE",
-                "-q", "--no-pager", f"--since=@{st.since}")
-    res = st.cmd(*argv)
-    cut = res.timed_out or res.truncated
-    if res.rc != 0 and not cut:
-        _chk(checks, "log_reader", "warn", "log reader error", _fail(res))
-        items.append(_item("log reader", _fail(res), "warn"))
-        return [], []
-    entries, cursor, bad = journal.parse(res.out)
-    if cursor:
-        st.cursor = cursor
-    state = "ok"
-    if cut:
-        state = "behind (output cut, catching up)"
-    if bad:
-        state = f"{bad} bad line(s)"
-    items.append(_item("log reader", state, "ok" if state == "ok" else "info", "green"))
+        state = "; ".join(notes) or "ok"
+        items.append(_item("log reader", state, "ok" if state == "ok" else "info", "green"))
 
     out = []
     for e in entries:
@@ -1108,27 +1098,17 @@ def init(cfg: dict) -> State:
     if isinstance(hold, bool) or not isinstance(hold, (int, float)) or not 0 <= hold <= 3600:
         raise ValueError("hold: seconds 0..3600 required")
     st = State(tunnel=tunnel, ks=ks, hold=float(hold))
-    _start_cursor(st)
     _boot_scan(st)
     return st
 
 
-def _start_cursor(st: State) -> None:
-    """Start at the newest kernel entry so old lines are not replayed."""
-    res = st.cmd("journalctl", "_TRANSPORT=kernel", "-o", "json",
-                 "--output-fields=MESSAGE", "-q", "--no-pager", "-n", "1")
-    if res.rc == 0:
-        _entries, cursor, _bad = journal.parse(res.out)
-        st.cursor = cursor
-
-
-def collect(st: State) -> dict:
+def collect(st: State, ctx) -> dict:
     now, wall = st.mono(), st.wall()
     checks, panels = [], []
 
     fw_items, counters, live = _safe(lambda: _hostfw(st, checks), "nft", checks,
                                      lambda e: ([_item("table", e, "warn")], None, "?"))
-    events, entries = _safe(lambda: _events(st, checks, fw_items), "journal", checks,
+    events, entries = _safe(lambda: _events(st, checks, fw_items, ctx), "journal", checks,
                             lambda e: _note(fw_items, "log reader", e, ([], [])))
     _recent(st, entries)
     totals, deltas = _safe(lambda: _deltas(st, counters), "counters", checks,
