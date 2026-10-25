@@ -93,6 +93,9 @@ true. Built in phase 4, after the privilege split.
     | logs (full width)                                     |
     +-------------------------------------------------------+
 
+Built so far (2026-10-25): commands and auth, each full width, one under the other (the
+cmd column needs the room). The grid is looked at again when kernel / posture come.
+
 Source: the one journal reader. Audit records via journald
 (`systemd-journald-audit.socket` enabled + active, 2026-10-20). Not `/var/log/audit` or
 `/var/log/sudo.log` (root only).
@@ -157,15 +160,21 @@ Audit records in the journal (host sample 2026-10-20: 2 sudo calls, 195 entries)
 
 ### Auth
 
-- sudo denied: USER_CMD `res=failed` (sudoers(5) log_denied: "to the system audit log")
-  + sudo syslog reason ("user NOT in sudoers", "command not allowed", "N incorrect
-  password attempts", "a password is required"; PRIORITY 1) -> warn.
-- sudo syslog splits at 980 bytes (sudoers(5) `syslog_maxlen`): command text from audit,
-  reason from syslog.
-- PAM: USER_AUTH `res=failed` (sudo, gdm, polkit) -> warn. faillock lock -> crit
-  (source: check on host).
-- Logins: logind "New session", USER_START of gdm-password / login -> info.
-- polkit: polkitd lines (authenticated / failed, action id) -> info / warn.
+Built 2026-10-25 (docs/modules/security.md, auth box). Decided 2026-10-25: red =
+dangerous or suspicious, worth following up, not everything.
+
+- PAM: USER_AUTH (sudo, su, gdm, polkit agent helper): failed -> warn, ok -> info.
+- faillock: RESP_ACCT_LOCK (2207) -> crit. Host check 2026-10-25 (throwaway user, deny
+  5): 2100 + 2207 at the 5th failure, syslog "Consecutive login failures for user ...
+  account temporarily locked" (PRIORITY 6, not used); `faillock --reset` = USER_MGMT
+  op=faillock-reset -> info.
+- sudo refused by policy: syslog PRIORITY 1 "user NOT in sudoers" / "command not
+  allowed" / "user NOT authorized on host" -> crit. "N incorrect password attempts":
+  not a row (USER_AUTH has them). sudo syslog splits at 980 bytes (sudoers(5)
+  `syslog_maxlen`): only the reason and TTY are read.
+- su by a non-root user -> crit (su is closed on my host, sudo only).
+- Alert = crit row, 1 h window (as the watch list).
+- Logins (logind sessions, USER_START) and polkitd lines: not used (logs box, step 7).
 
 ### Kernel
 
@@ -431,7 +440,7 @@ Best practice decides (Red Hat for the host). Fixtures from my host first
   2. Look: done 2026-10-25 (see Look)
   3. commands box + watch.toml: done 2026-10-25 (modules/security,
      docs/modules/security.md).
-  4. auth box
+  4. auth box: done 2026-10-25 (modules/security/auth.py, fixtures 2026-10-25).
   5. kernel box
   6. posture module + posture.toml
   7. logs box: groups, noise on groups, audit keys

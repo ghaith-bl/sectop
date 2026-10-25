@@ -378,8 +378,8 @@ For modules that read `_TRANSPORT=audit` entries from `ctx.journal`. JOURNAL fie
   its `msg='...'`), `keys`, `argv` (EXECVE), `cwd`, `proctitle`, `first(name)` /
   `all(name)` (records: `type`, `name`, `message`, `ts`, `raw` fields).
 - Decoding rules and host facts: docs/architecture.md, Security screen.
-- Fixtures: tests/fixtures/security/ (2026-10-20, `tests/journal_fixture.py`, masked),
-  SHA256SUMS checked by the tests.
+- Fixtures: tests/fixtures/security/ (2026-10-20 and 2026-10-25,
+  `tests/journal_fixture.py`, masked), SHA256SUMS checked by the tests.
 
 ## Validation (`core/module.py`)
 

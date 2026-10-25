@@ -1,7 +1,8 @@
 """security: screen 2 (docs/architecture.md, Security screen; docs/modules/security.md).
 
-Phase 4 step 3: commands box. Source: core's journal follower (JOURNAL: every audit
-record), assembled into events by core/audit.py. Rows: what ran as root after a login
+Phase 4 steps 3 + 4: commands box and auth box (auth.py). Source: core's journal
+follower (JOURNAL: every audit record, sudo's syslog alerts), audit records assembled
+into events by core/audit.py. Commands rows: what ran as root after a login
 (rule key root_cmds: execve with euid 0 and a login auid) and setuid execs
 (user_emulation: uid != euid), grouped by who > as, exe and normalized argv.
 
@@ -42,12 +43,13 @@ import time
 
 from core import audit
 from core.sanitize import _ADDR, mask_secrets
-from modules.security import watch
+from modules.security import auth, watch
 
 NAME = "security"
 INTERVAL = 2.0
-JOURNAL = {"groups": [["_TRANSPORT=audit"]],
-           "fields": ["MESSAGE", "_AUDIT_ID", "_AUDIT_TYPE", "_AUDIT_TYPE_NAME"]}
+JOURNAL = {"groups": [["_TRANSPORT=audit"], ["SYSLOG_IDENTIFIER=sudo", "PRIORITY=1"]],
+           "fields": ["MESSAGE", "_AUDIT_ID", "_AUDIT_TYPE", "_AUDIT_TYPE_NAME",
+                      "_AUDIT_LOGINUID", "_PID"]}
 
 ROOT_KEY = "root_cmds"          # hardening audit rules: execve as root after a login
 LAUNCH_KEY = "user_emulation"   # setuid exec: uid != euid (sudo, pkexec, nvidia-modprobe)
@@ -132,6 +134,7 @@ class State:
         self.runs = 0                             # root commands since start
         self.skipped = 0                          # failed execve in a PATH search
         self.lost_checks = 0                      # unix_chkpwd, parent not seen
+        self.auth = auth.Auth()                   # auth box
 
     def name(self, uid: str | None) -> str:
         if not uid or uid == UNSET:
@@ -305,6 +308,32 @@ def _launch(st: State, ev, ts: float) -> None:
     st.launches[pid] = Launch(ev, ts, key)
 
 
+def _su_denied(st: State, ev) -> None:
+    """su tries once per run: a failed USER_AUTH in the launch's own process -> the launch
+    row says denied (sudo retries: its USER_CMD decides, see _usercmd)."""
+    if ev.records[0].type != auth.USER_AUTH or ev.get("res") != "failed":
+        return
+    launch = st.launches.get(ev.get("pid"))
+    if launch is None or launch.denied or launch.matched \
+            or os.path.basename(launch.ev.get("exe") or "") != "su":
+        return
+    launch.denied = True
+    if launch.key in st.groups:
+        st.groups[launch.key].denied += 1
+
+
+def _sudo_alert(e: dict) -> bool:
+    return (e.get("_TRANSPORT") == "syslog" and e.get("SYSLOG_IDENTIFIER") == "sudo"
+            and e.get("PRIORITY") == "1")
+
+
+def _ts(e: dict, now: float) -> float:
+    try:
+        return int(e["__REALTIME_TIMESTAMP"]) / 1e6
+    except (KeyError, TypeError, ValueError):
+        return now
+
+
 def _prune(st: State, now: float) -> None:
     """Forget launches that are too old to be matched (pids get reused)."""
     for pid in list(st.launches):
@@ -388,6 +417,12 @@ def collect(st: State, ctx) -> dict:
                 _launch(st, ev, ts)
             else:
                 _root(st, ev, ts, setuid=True)   # the setuid program runs as root itself
+        elif ev.kind != "SYSCALL" and ev.records:
+            auth.audit_event(st.auth, ev, ts, st.name)
+            _su_denied(st, ev)
+    for e in ctx.journal:                        # after the audit events: their logins
+        if _sudo_alert(e):
+            auth.sudo_alert(st.auth, e, _ts(e, now), st.name)
     _prune(st, now)
     groups = sorted(st.groups.items(), key=lambda kv: -kv[1].last)
     rows = [_row(st, key, g) for key, g in groups]
@@ -397,7 +432,12 @@ def collect(st: State, ctx) -> dict:
         title += f"  (journal: {items_note})"
     panel = {"id": "commands", "title": title, "type": "table", "columns": list(COLUMNS),
              "types": list(TYPES), "rows": rows, "width": "full"}
-    summary = f"root runs {st.runs} | groups {len(rows)} | " + \
+    arows = auth.rows(st.auth, st.stamp)
+    apanel = {"id": "auth", "title": f"auth {len(arows)}  ({st.auth.fails} failed since start)",
+              "type": "table", "columns": list(auth.COLUMNS), "types": list(auth.TYPES),
+              "rows": arows, "width": "full"}
+    summary = f"root runs {st.runs} | groups {len(rows)} | auth fails {st.auth.fails} | " + \
         (f"watch {len(st.rules)} rules" if st.watch_file else "no watch list")
-    return {"v": 2, "status": "ok", "summary": summary, "panels": [panel], "events": [],
-            "checks": _checks(st, now)}
+    return {"v": 2, "status": "ok", "summary": summary, "panels": [panel, apanel],
+            "events": [],
+            "checks": _checks(st, now) + auth.checks(st.auth, now, WINDOW, st.stamp)}

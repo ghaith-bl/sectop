@@ -25,7 +25,8 @@ Status: in progress (phase 3: privilege split, docs/architecture.md).
   WireGuard (docs/modules/firewall.md)
 - security: commands run as root after a login (sudo, pkexec, su, setuid programs), from
   the audit records in the journal, rated by `/etc/sectop/watch.toml` (crit / warn /
-  info, docs/modules/security.md). Auth, kernel, posture, logs: phase 4
+  info); auth box: sudo / su / unlock / polkit passwords, faillock locks, sudo refusals
+  (docs/modules/security.md). Kernel, posture, logs: phase 4
 
 ## Screen legend
 

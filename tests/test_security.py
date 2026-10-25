@@ -8,10 +8,10 @@ from core import journal as corejournal
 from core.config import ConfigError
 from core.module import Context, check_module, validate
 from core.screens import SCREENS, find
-from modules.security import watch
+from modules.security import auth, watch
 
 FIX = os.path.join(os.path.dirname(__file__), "fixtures", "security")
-USERS = {"0": "root", "1000": "null"}
+USERS = {"0": "root", "1000": "null", "1001": "sectop-locktest"}   # 1001: test user
 
 
 def fix(name):
@@ -55,8 +55,10 @@ class TestModule(unittest.TestCase):
     def test_api(self):
         check_module(sec)
         sp = corejournal.spec(sec.JOURNAL)
-        self.assertEqual(sp.groups, ((("_TRANSPORT", "audit"),),))
-        self.assertEqual(sp.fields, ("MESSAGE", "_AUDIT_ID", "_AUDIT_TYPE", "_AUDIT_TYPE_NAME"))
+        self.assertEqual(sp.groups, ((("_TRANSPORT", "audit"),),
+                                     (("SYSLOG_IDENTIFIER", "sudo"), ("PRIORITY", "1"))))
+        self.assertEqual(sp.fields, ("MESSAGE", "_AUDIT_ID", "_AUDIT_TYPE", "_AUDIT_TYPE_NAME",
+                                     "_AUDIT_LOGINUID", "_PID"))
         with WatchFile(None):                                   # not the host's file
             self.assertIsInstance(sec.init({}), sec.State)
             with self.assertRaises(ValueError):
@@ -107,7 +109,8 @@ class TestCommands(unittest.TestCase):
         p = snap["panels"][0]
         self.assertEqual((p["title"], p["width"], p["types"]),
                          ("commands 23  (28 root runs since start)", "full", sec.TYPES))
-        self.assertEqual(snap["summary"], "root runs 28 | groups 23 | no watch list")
+        self.assertEqual(snap["summary"],
+                         "root runs 28 | groups 23 | auth fails 0 | no watch list")
         d = got["su"][3]
         self.assertEqual((d["exe"], d["argv"], d["cwd"], d["ses"], d["key"]),
                          ("/usr/bin/su", "su", "/var/home/null/my-project/sectop", "18",
@@ -298,6 +301,133 @@ class TestCommands(unittest.TestCase):
         self.assertIn("(journal: 3 bad line(s))", snap["panels"][0]["title"])
         snap = validate(sec.collect(r.st, Context((), False, "")))
         self.assertIn("(journal: follower down)", snap["panels"][0]["title"])
+
+
+def auth_rows(snap):
+    """login>user, service, result -> (n, sev, tty, detail)."""
+    p = snap["panels"][1]
+    out = {}
+    for r in p["rows"]:
+        c = r["cells"]
+        out[(c[2], c[3], c[4])] = (c[1], r["sev"], c[5], {d["k"]: d["v"] for d in r["detail"]})
+    return out
+
+
+def follower(entries):
+    """What core's follower gives the module: entries that match its JOURNAL groups."""
+    want = corejournal.wants(corejournal.spec(sec.JOURNAL).groups)
+    return [e for e in entries if corejournal.matches(e, want)]
+
+
+class TestAuth(unittest.TestCase):
+    """Fixtures 2026-10-20 and 2026-10-25 from my host."""
+
+    def test_fixtures(self):
+        want = {
+            "sudo-denied": {("null>null", "sudo", "failed"): ("3", "warn", "pts/1"),
+                            ("null>null", "sudo", "ok"): ("1", "info", "pts/1")},
+            "polkit": {("null>null", "polkit", "failed"): ("1", "warn", "-"),
+                       ("null>null", "polkit", "ok"): ("1", "info", "-")},
+            "lock": {("null>null", "gdm", "ok"): ("1", "info", "tty1")},
+            "unlock-fail": {("null>null", "gdm", "failed"): ("1", "warn", "tty1"),
+                            ("null>null", "gdm", "ok"): ("1", "info", "tty1")},
+            "su-fail": {("null>sectop-locktest", "su", "failed"): ("2", "crit", "pts/0"),
+                        ("null>null", "sudo", "failed"): ("2", "warn", "pts/0"),
+                        ("null>null", "sudo", "ok"): ("1", "info", "pts/0"),
+                        ("null>sectop-locktest", "faillock", "lock reset"):
+                            ("1", "info", "pts/2")},
+            "not-sudoers": {("null>sectop-locktest", "sudo", "not in sudoers"):
+                                ("1", "crit", "pts/2"),
+                            ("null>sectop-locktest", "sudo", "failed"): ("3", "warn", "pts/2"),
+                            ("null>null", "sudo", "failed"): ("1", "warn", "pts/0"),
+                            ("null>null", "sudo", "ok"): ("1", "info", "pts/0")},
+            "faillock": {("null>sectop-locktest", "sudo", "locked"): ("1", "crit", "pts/2"),
+                         ("null>sectop-locktest", "sudo", "not in sudoers"):
+                             ("2", "crit", "pts/2"),
+                         ("null>sectop-locktest", "sudo", "failed"): ("6", "warn", "pts/2"),
+                         ("null>sectop-locktest", "faillock", "lock reset"):
+                             ("1", "info", "pts/2")},
+        }
+        for name, rows_ in want.items():
+            with self.subTest(fixture=name):
+                _, snap = capture(name)
+                got = {k: v[:3] for k, v in auth_rows(snap).items()}
+                self.assertEqual(got, rows_)
+
+    def test_root_su_is_fine(self):
+        """sudo su: root runs su (pam_rootok) -> ok, not the su-by-a-user alert."""
+        _, snap = capture("sudo")
+        self.assertEqual(auth_rows(snap)[("null>root", "su", "ok")][1], "info")
+        self.assertEqual(snap["checks"], [])
+
+    def test_alerts_red_only(self):
+        _, snap = capture("faillock")
+        self.assertEqual(sorted((c["key"], c["title"], c["n"]) for c in snap["checks"]), [
+            ("auth:sudo:locked:null:sectop-locktest", "account locked: sectop-locktest (sudo)",
+             1),
+            ("auth:sudo:not_in_sudoers:null:sectop-locktest",
+             "sudo refused: sectop-locktest not in sudoers", 2)])
+        self.assertTrue(all(c["sev"] == "crit" for c in snap["checks"]))
+        for name in ("sudo-denied", "polkit", "unlock-fail", "lock"):   # warn / info: no alert
+            self.assertEqual(capture(name)[1]["checks"], [], name)
+        _, snap = capture("su-fail")
+        [c] = snap["checks"]
+        self.assertEqual((c["title"], c["n"]), ("su by null to sectop-locktest: failed", 2))
+
+    def test_alert_window(self):
+        entries = fix("not-sudoers")
+        r = Run()
+        snap = r.collect(entries, end(entries) + 10)
+        self.assertEqual([c["n"] for c in snap["checks"]], [1])
+        snap = r.collect([], end(entries) + 60)
+        self.assertEqual([c["n"] for c in snap["checks"]], [0])          # open, nothing new
+        snap = r.collect([], end(entries) + sec.WINDOW + 1)
+        self.assertEqual(snap["checks"], [])
+
+    def test_su_launch_denied(self):
+        """su: the failed USER_AUTH in the launch's own pid marks the launch row denied."""
+        _, snap = capture("su-fail")
+        n, who, via, d = rows(snap)["su sectop-locktest -c true"]
+        self.assertEqual((n, via, d["denied"]), ("3", "denied", "2 of 3"))   # 3rd: no password
+
+    def test_only_what_the_follower_gives(self):
+        """The real follower only passes JOURNAL matches: same rows as the whole fixture."""
+        for name in ("not-sudoers", "faillock", "su-fail", "unlock-fail"):
+            entries = fix(name)
+            a, b = Run(), Run()
+            whole = a.collect(entries, end(entries) + 10)
+            matched = b.collect(follower(entries), end(entries) + 10)
+            self.assertEqual(whole["panels"], matched["panels"], name)
+            self.assertEqual(whole["checks"], matched["checks"], name)
+
+    def test_sudo_alert_lines(self):
+        a = auth.Auth()
+        name = lambda uid: USERS.get(uid, uid or "-")
+        line = lambda msg: {"MESSAGE": msg, "_AUDIT_LOGINUID": "1000", "_PID": "7"}
+        auth.sudo_alert(a, line("    null : 3 incorrect password attempts ; TTY=pts/1 ; "
+                                "USER=root ; COMMAND=/usr/sbin/id"), 1.0, name)
+        self.assertEqual(a.rows, {})                                      # USER_AUTH has them
+        auth.sudo_alert(a, line("bob : command not allowed ; TTY=pts/3 ; PWD=/ ; USER=root ; "
+                                "COMMAND=/usr/bin/vi"), 2.0, name)
+        auth.sudo_alert(a, line("bob : a password is required ; TTY=pts/3 ; USER=root ; "
+                                "COMMAND=/usr/bin/id"), 3.0, name)
+        auth.sudo_alert(a, line("no separator here"), 4.0, name)
+        got = {(r.user, r.result): (r.sev, r.tty, r.login) for r in a.rows.values()}
+        self.assertEqual(got, {("bob", "not allowed"): ("crit", "pts/3", "null"),
+                               ("bob", "a password is required"): ("warn", "pts/3", "null")})
+
+    def test_limits_and_names(self):
+        self.assertEqual((auth.service("/usr/libexec/gdm-session-worker"),
+                          auth.service("/usr/lib/polkit-1/polkit-agent-helper-1"),
+                          auth.service("/usr/bin/sshd"), auth.service("/opt/x/myauth"),
+                          auth.service(None)), ("gdm", "polkit", "sshd", "myauth", "?"))
+        a = auth.Auth()
+        for i in range(auth.MAX_ROWS + 5):
+            auth._add(a, "null", f"u{i}", "sudo", "failed", float(i), "warn", "w")
+        self.assertEqual(len(a.rows), auth.MAX_ROWS)
+        auth._add(a, "a" * 40, "b" * 40, "sudo", "x" * 40, 9e9, "crit", "w")
+        [c] = [c for c in auth.checks(a, 9e9, 10, str) if c["sev"] == "crit"]
+        self.assertTrue(c["key"].startswith("auth:") and len(c["key"]) <= 128)
 
 
 class TestWatch(unittest.TestCase):

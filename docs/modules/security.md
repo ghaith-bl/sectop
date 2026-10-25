@@ -1,25 +1,34 @@
 # security module
 
-Screen 2. `modules/security/`. Phase 4 step 3: commands box + watch list. Auth, kernel,
-logs: next steps (docs/architecture.md, Phase 4 plan). Design: docs/architecture.md,
-Security screen.
+Screen 2. `modules/security/`. Phase 4 steps 3 + 4: commands box + watch list, auth box
+(`auth.py`). Kernel, logs: next steps (docs/architecture.md, Phase 4 plan). Design:
+docs/architecture.md, Security screen.
 
 ## Source
 
 Core's journal follower only (docs/module-interface.md, Journal). No commands. One file:
 the watch list `/etc/sectop/watch.toml`, read once in init (see Watch list).
 
-    JOURNAL = {"groups": [["_TRANSPORT=audit"]],
-               "fields": ["MESSAGE", "_AUDIT_ID", "_AUDIT_TYPE", "_AUDIT_TYPE_NAME"]}
+    JOURNAL = {"groups": [["_TRANSPORT=audit"], ["SYSLOG_IDENTIFIER=sudo", "PRIORITY=1"]],
+               "fields": ["MESSAGE", "_AUDIT_ID", "_AUDIT_TYPE", "_AUDIT_TYPE_NAME",
+                          "_AUDIT_LOGINUID", "_PID"]}
 
 Every audit entry since the last collect, assembled into events by `core/audit.py`
-(same `_AUDIT_ID`, complete at PROCTITLE). Used:
+(same `_AUDIT_ID`, complete at PROCTITLE), plus sudo's syslog alerts. Used:
 
 | event | what |
 |---|---|
 | SYSCALL execve / execveat, key `user_emulation` | setuid exec: a launch (sudo, pkexec, su) or a setuid program running as root |
 | SYSCALL execve / execveat, key `root_cmds` | a command as root after a login |
-| USER_CMD (`AUDIT1123`) | sudo's own record: cmd, terminal, res |
+| USER_CMD (1123) | sudo's own record: cmd, terminal, res |
+| USER_AUTH (1100) | one PAM authentication: acct, exe, uid, auid, terminal, res (auth box; su launch denied) |
+| RESP_ACCT_LOCK (2207) | pam_faillock locked an account (suid) |
+| USER_MGMT (1102) `op=faillock-reset` | a lock reset (`faillock --reset`, id) |
+| syslog `sudo`, PRIORITY 1 | sudo's policy refusals: user NOT in sudoers, command not allowed |
+
+User space records have no type name in the journal (`_AUDIT_TYPE_NAME=AUDIT1100`):
+matched by `_AUDIT_TYPE`. ANOM_LOGIN_FAILURES (2100) comes with every 2207 (same pid,
+same moment): not used.
 
 Rule keys come from the hardening audit rules (silverblue-cis-hardening). Other keys and
 events: ignored here (logs box, step 7).
@@ -45,7 +54,9 @@ follower is down or dropped lines.
   once. Its root command takes it back out of that row (n - 1, row gone at 0) and the
   command row gets its password checks. No timer (2026-10-25): a 5 s wait after the
   launch turned a slow password prompt into a launch without a command.
-  `denied`: a USER_CMD with res=failed for that launch (sudo, 3 wrong passwords).
+  `denied`: a USER_CMD with res=failed for that launch (sudo, 3 wrong passwords), or a
+  USER_AUTH res=failed in a su launch's own pid (su tries once per run; host 2026-10-25:
+  `su sectop-locktest` showed "no root command" after wrong passwords).
 - `unix_chkpwd` (either key): never a row. `password checks` on the row of its parent: a
   launch waiting for its command, else the command seen with that pid. Were rows before
   2026-10-25: sudo run by root (install.sh, host) and gdm-session-worker on unlock
@@ -61,6 +72,44 @@ follower is down or dropped lines.
 - Secrets: cmd cell and grouping always masked (`core/sanitize.py` `mask_secrets`).
   Detail argv raw; the UI masks secrets there while mask is on, `m` shows them.
 - Severity: from the watch list (below). Detail `watch  <id>: <why>` when a rule matched.
+
+## auth box
+
+`modules/security/auth.py`. Who tried to get in. Cols: last (age), n, login>user,
+service, result, tty. Full width, below the commands box. Newest first. Title:
+`auth <rows>  (<failed> failed since start)`; summary `auth fails <n>`.
+
+- Row = group: login (auid) > user (the account whose password was checked: acct, or
+  suid / id of the lock records), service (exe: sudo, su, gdm-session-worker -> gdm,
+  polkit-agent-helper-1 -> polkit, pkexec, login, sshd, else its name), result.
+  Max 200 rows, least recent dropped. Detail: why, first, exe, ran as (uid), pid,
+  tty seen.
+- Results: `ok`, `failed` (USER_AUTH res); `locked` (2207); `lock reset` (1102); sudo
+  policy: `not in sudoers`, `not allowed`, `not on host`. Other sudo alert reasons: the
+  reason, warn. `N incorrect password attempts`: left out (its USER_AUTH failures are
+  rows already).
+- Severity (decided 2026-10-25: red = dangerous or suspicious, worth following up, not
+  everything):
+
+      crit  account locked; sudo refused by policy; su by a non-root user
+            (su is closed on my host: pam_wheel group=sugroup, empty; I use sudo)
+      warn  failed authentication (wrong password, or a locked account trying again)
+      info  authentication ok, lock reset
+
+  `sudo su` (root runs su: pam_rootok, uid 0) is ok, not the su alert.
+- Alerts: a crit row whose last one is under 1 h old (same window as the watch list) ->
+  check `auth:<service>:<result>:<login>:<user>` (chars outside the key set -> `_`,
+  longer than 128 -> sha256), title `account locked: <user> (<service>)`,
+  `su by <login> to <user>: <result>` or `<service> refused: <user> <result>`, n = new.
+  warn / info: row color only.
+- Host fixtures 2026-10-25: a locked account still prompts (pam_faillock `preauth
+  silent`), each try is a USER_AUTH failure; sudo logs `user NOT in sudoers` also after
+  wrong passwords (and twice USER_CMD res=failed); su to another user prints `Permission
+  denied` (pam_wheel) but its wrong password still counts for faillock (system-auth
+  runs on); gdm unlock is gdm-session-worker on tty1, uid 0, auid = me.
+- Not here: logind sessions, polkitd lines (none on my host for a failed polkit
+  password: only the agent helper's USER_AUTH), new users (`useradd`: commands box,
+  watch rule). Logs box: step 7.
 
 ## Watch list
 
@@ -110,11 +159,16 @@ Groups 200, pids 4096 (parents), parent chain 8, launches 256 / 600 s, USER_CMD 
 per group 5, uid names 256 (cache, cleared when full). Assembler: core/audit.py (1000 open
 events, 2 s timeout). Watch list: 200 rules, 16 words, cmd 200 chars, why 120; checks 50.
 Rating cost: ~0.1 ms per root command with the 57 default rules (2026-10-25, 3.14).
+Auth box: 200 rows, checks 50.
 
 ## Fixtures
 
 `tests/fixtures/security/` (2026-10-20, masked, `tests/journal_fixture.py`): sudo (root
 shell via sudo su, sudo id, sudo -k), sudo-denied (3 wrong passwords, then the right
 one), sudo-l, pkexec, module (modprobe, blocked sctp load), lock (unlock at the gdm lock
-screen). Built in the test (same record format): sudo run by root, nvidia-modprobe ->
-modprobe nvidia, su.
+screen). 2026-10-25, auth (re-masked for my wifi name with the fixed tool): unlock-fail
+(lock screen: 1 wrong, then right), su-fail (2 x `su sectop-locktest` with a wrong
+password, faillock reset), not-sudoers (`sudo -u sectop-locktest sudo -k true`, 3 wrong:
+user NOT in sudoers), faillock (6 wrong more: locked at the 5th failure, reset; userdel
+refused while user@1001.service ran). Built in the test (same record format): sudo run
+by root, nvidia-modprobe -> modprobe nvidia, su.
