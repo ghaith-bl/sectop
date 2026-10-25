@@ -123,6 +123,36 @@ class TestNamesFor(unittest.TestCase):
         self.assertEqual(n[boot.replace("-", "")], "0" * 32)
         self.assertNotIn("short", n)
 
+    def test_wifi(self):
+        out = ("HomeNetwork:802-11-wireless\nWired connection 1:802-3-ethernet\n"
+               "a\\:b\\\\c:802-11-wireless\nlo:loopback\nab:802-11-wireless\n")
+        self.assertEqual(jf.wifi_names(out), ("HomeNetwork", "a:b\\c", "ab"))
+        n = jf.names_for("alice", "", "box1", (), jf.wifi_names(out))
+        self.assertEqual((n["HomeNetwork"], n["a:b\\c"]), ("wifi", "wifi"))
+        self.assertNotIn("ab", n)                                     # too short
+        m = jf.Masker(n)
+        s = ("device (wlo1): Activation: starting connection 'HomeNetwork' (uuid) | "
+             "Connected to wireless network \"HomeNetwork\" | "
+             "wlo1: Trying to associate with 02:00:00:00:00:01 (SSID='Cafe Net' freq=5240)")
+        self.assertEqual(m.text(s), "device (wlo1): Activation: starting connection 'wifi' "
+                         "(uuid) | Connected to wireless network \"wifi\" | wlo1: Trying "
+                         "to associate with 02:00:00:00:00:01 (SSID='wifi' freq=5240)")
+        self.assertEqual(m.n["wifi"], 3)
+        self.assertEqual(m.text("proctitle=" + hexs("nmcli c up HomeNetwork")),
+                         "proctitle=" + hexs("nmcli c up wifi"))              # audit hex
+
+    def test_host_wifi(self):
+        saved = jf.NMCLI
+        try:
+            jf.NMCLI = ("printf", "Home Net:802-11-wireless\\nx:vpn\\n")
+            self.assertEqual(jf.host_wifi(), ("Home Net",))
+            jf.NMCLI = ("false",)
+            self.assertIsNone(jf.host_wifi())                           # nmcli failed
+            jf.NMCLI = ("/nonexistent/nmcli",)
+            self.assertIsNone(jf.host_wifi())                           # no nmcli
+        finally:
+            jf.NMCLI = saved
+
     def test_common_words_stay(self):
         n = jf.names_for("null", "", "fedora", ())
         self.assertEqual(n, {})
