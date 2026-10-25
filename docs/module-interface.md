@@ -250,7 +250,8 @@ A condition that is not true any more is left out.
   to it); the overlay text has no row identity now, tests run key, layout and update
   together (`TestDetailLoop`).
   Search (`/` in a detail): lines whose key + value contain the text (case-insensitive,
-  searched on the pair, so a wrap never cuts a match) are bold, the view jumps to the first
+  searched on the pair, so a wrap never cuts a match; real or masked text, like the table
+  filter: `160.79.x.x` as a table shows it with mask on) are bold, the view jumps to the first
   one, applied while typing. `enter` keeps it, `Esc` goes back to the text before (and its
   first match), empty text = no search. `n` / `N`: next / previous match, wraps; with no
   current match (scrolled by hand) from the top line. The current match is reverse. Title:

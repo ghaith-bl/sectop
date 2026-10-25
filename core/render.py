@@ -22,7 +22,8 @@ Filter: a table / events box shows only lines that match ui.filters[key]
 (words all match, !word must not; cells, row detail, raw and masked text).
 
 Detail search: the detail overlay shows the lines that contain ui.find in bold
-(case-insensitive, searched on key + value, so a wrap never cuts a match). The
+(case-insensitive, searched on key + value, so a wrap never cuts a match; real
+or masked text, like the table filter: what a table shows with mask on). The
 current match (ui.mark = its pair index) is in reverse video. ui.seek asks for
 a move (first / next / prev); the renderer resolves it, because only it knows
 where the wrapped lines are. The frame reports the new mark (BoxInfo.mark).
@@ -514,11 +515,16 @@ def _detail_rows(pairs: list, w: int, mask: bool) -> tuple:
 
 
 def _found(pairs: list, owner: list, query: str) -> tuple:
-    """Pairs of a detail that contain query (case-insensitive, key + value as shown).
+    """Pairs of a detail that contain query (case-insensitive, key + value as shown, or
+    with public IPs masked: the detail shows real IPs, a table with mask on shows
+    160.79.x.x, and that is what gets typed).
     -> (pair index, first line, end line) each; a pair that wraps keeps all its lines."""
     q = query.lower()
-    hit = {n for n, (k, v) in enumerate(pairs)
-           if q in f"{display(k, False)} {display(v, False)}".lower()}
+    hit = set()
+    for n, (k, v) in enumerate(pairs):
+        s = f"{display(k, False)} {display(v, False)}"
+        if q in s.lower() or q in mask_ips(s).lower():
+            hit.add(n)
     out = []
     for line, n in enumerate(owner):
         if n in hit:

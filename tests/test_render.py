@@ -787,6 +787,19 @@ class TestDetailLoop(unittest.TestCase):
         self.assertTrue(find(f.lines, "/ 1.2.3.1  11/11"))
         self.assertEqual(self.mark_text(f), ["sock19    tcp 10.2.0.2:40019 -> 1.2.3.19:443"])
 
+    def test_search_masked_form(self):
+        """Mask on: tables show 1.2.x.x, so that is what gets typed; the detail shows real
+        IPs. 2026-10-25: the table filter found the row, the detail said no match."""
+        self.ui.filters["firewall/conns"] = "1.2.x.x"
+        self.draw()
+        f = self.open()
+        self.assertEqual(f.boxes[0].mark, 4)                  # first socket line
+        self.assertTrue(find(f.lines, "/ 1.2.x.x  1/60"))
+        f = self.search("40007 -> 1.2.x.x")                   # real port + masked IP
+        self.assertEqual(self.mark_text(f), ["sock7     tcp 10.2.0.2:40007 -> 1.2.3.7:443"])
+        f = self.search("1.2.3.7:")                           # the real form still works
+        self.assertEqual(f.boxes[0].mark, 4 + 7)
+
     def test_scrolling_drops_the_current_match(self):
         self.open()
         self.search("1.2.3.1")
