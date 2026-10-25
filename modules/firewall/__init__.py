@@ -75,9 +75,16 @@ AUDIT_ONLY = {"out_new", "fwd_vm_new"}          # every new flow: audit box, no 
 KS_KINDS = {"out_ks", "fwd_vm_ks"}              # always dropped by hostfw
 LOG_ONLY = {"in_noise", "in_lan", "in_vpn"}     # hostfw logs, firewalld zone decides
 AUDIT_COLUMNS = ["last", "n", "dir", "verdict", "proto", "uid", "prog", "src", "dst", "iface"]
-LEAK_COLUMNS = ["time", "uid", "proto", "dst", "iface", "context"]
+LEAK_COLUMNS = ["age", "uid", "proto", "dst", "iface", "context"]
 PEER_COLUMNS = ["peer", "open", "new", "drop", "prog", "last"]
 APP_COLUMNS = ["prog", "uid", "open", "out", "block", "in", "peers", "last"]
+COUNTER_COLUMNS = ["counter", "pkts", "new", "bytes"]
+# column types (docs/module-interface.md): num right, age = epoch seconds shown as 12s / 4m
+AUDIT_TYPES = ["age", "num"] + ["text"] * 8
+LEAK_TYPES = ["age"] + ["text"] * 5
+PEER_TYPES = ["text", "num", "num", "num", "text", "age"]
+APP_TYPES = ["text", "text", "num", "num", "num", "num", "num", "age"]
+COUNTER_TYPES = ["text", "num", "num", "num"]
 PICK_RE = re.compile(r"[ -~]{1,60}")      # row filter: what the filter prompt can type
 # programs box rows for lines without a program: key -> (prog cell, row filter, note)
 APP_OTHER = {
@@ -148,6 +155,11 @@ def kind_sev(name: str) -> str | None:
 
 def _hms(ts: float) -> str:
     return time.strftime("%H:%M:%S", time.localtime(ts))
+
+
+def _when(ts: float) -> str:
+    """Age cell: epoch seconds; the screen shows the age, the detail the full time."""
+    return f"{ts:.3f}"
 
 
 def _stamp(ts: float) -> str:
@@ -450,7 +462,7 @@ def _counter_panel(st: State, counters: dict | None, deltas: dict, now: float,
     zero = len(counters) - len(rows)
     title = "hostfw counters" + (f"  ({zero} zero hidden)" if zero else "")
     return {"id": "counters", "title": title, "type": "table",
-            "columns": ["counter", "pkts", "new", "bytes"], "rows": rows}
+            "columns": list(COUNTER_COLUMNS), "types": list(COUNTER_TYPES), "rows": rows}
 
 
 def _leak_ctx(st: State, up: bool) -> str:
@@ -593,7 +605,7 @@ def _audit(st: State, entries: list, cs: list, live: str) -> dict:
         del st.flows[next(iter(st.flows))]                    # oldest flow out
     rows = [_flow_row(st, key, fl) for key, fl in reversed(st.flows.items())]
     return {"id": "audit", "title": f"audit {len(rows)} flows  ({st.lines} lines)",
-            "type": "table", "columns": list(AUDIT_COLUMNS), "rows": rows}
+            "type": "table", "columns": list(AUDIT_COLUMNS), "types": list(AUDIT_TYPES), "rows": rows}
 
 
 def _flow_row(st: State, key: tuple, fl: Flow) -> dict:
@@ -609,7 +621,7 @@ def _flow_row(st: State, key: tuple, fl: Flow) -> dict:
     if len(fl.progs) > 1:
         detail.append(("programs", ", ".join(fl.progs)))
     detail.append(("last line", "fields below"))
-    row = {"cells": [st.hms(fl.last), str(fl.n), d, fl.verdict, proto, uid, prog,
+    row = {"cells": [_when(fl.last), str(fl.n), d, fl.verdict, proto, uid, prog,
                      fl.src, fl.dst, iface],
            "sev": kind_sev(kind) or "ok", "tone": _tone(fl.verdict),
            "id": "|".join(key),
@@ -813,7 +825,7 @@ def _leak_box(st: State, entries: list, up: bool, total, live: str) -> dict:
             detail.append(("after boot", _since(e.ts - st.boot)))
         verdict = _verdict(e.kind, live)
         rows.append({
-            "cells": [st.hms(e.ts), f.get("UID") or "-", f.get("PROTO", "-").lower(),
+            "cells": [_when(e.ts), f.get("UID") or "-", f.get("PROTO", "-").lower(),
                       journal.dst(e), f.get("OUT") or "-", ctx],
             "sev": "info" if ctx == "pre-connect" else "crit", "tone": _tone(verdict),
             "detail": [{"k": k, "v": v} for k, v in detail] + _audit_detail(st, e, verdict)})
@@ -825,7 +837,7 @@ def _leak_box(st: State, entries: list, up: bool, total, live: str) -> dict:
     if st.boot_note:
         title += f"  ({st.boot_note})"
     sev = "crit" if any(r["sev"] == "crit" for r in rows) else "ok"
-    return {"id": "leak", "title": title, "type": "table", "columns": list(LEAK_COLUMNS),
+    return {"id": "leak", "title": title, "type": "table", "columns": list(LEAK_COLUMNS), "types": list(LEAK_TYPES),
             "rows": rows, "sev": sev}
 
 
@@ -937,7 +949,7 @@ def _peers(st: State, entries: list, cs: list, err: str, live: str, wall: float)
     rows = [_peer_row(st, ip, p, socks[ip]) for ip, p in order]
     n_open = sum(len(v) for v in socks.values())
     title = f"peers {len(rows)}  {n_open} open" + (f"  (ss: {err})" if err else "")
-    return {"id": "peers", "title": title, "type": "table", "columns": list(PEER_COLUMNS),
+    return {"id": "peers", "title": title, "type": "table", "columns": list(PEER_COLUMNS), "types": list(PEER_TYPES),
             "rows": rows, "sev": "warn" if err else "ok"}
 
 
@@ -958,7 +970,7 @@ def _peer_row(st: State, ip: str, p: Peer, socks: list) -> dict:
                ("first seen", st.stamp(p.first)), ("last seen", st.stamp(p.last)),
                ("programs", ", ".join(p.progs) or "-"), ("uids", ", ".join(p.uids) or "-"),
                ("ports", ", ".join(p.ports) or "-"), ("ifaces", ", ".join(p.ifaces) or "-")]
-    return {"cells": [ip, str(len(socks)), str(p.new), str(p.drop), prog, st.hms(p.last)],
+    return {"cells": [ip, str(len(socks)), str(p.new), str(p.drop), prog, _when(p.last)],
             "tone": tone, "id": ip, "ip": ip, "detail": [{"k": k, "v": v} for k, v in detail]}
 
 
@@ -1027,7 +1039,7 @@ def _apps(st: State, entries: list, cs: list, live: str, wall: float) -> dict:
     rows = [_app_row(st, key, a, socks[key]) for key, a in order]
     n_open = sum(1 for key in st.apps if socks[key])
     return {"id": "programs", "title": f"programs {len(rows)}  {n_open} with open sockets",
-            "type": "table", "columns": list(APP_COLUMNS), "rows": rows}
+            "type": "table", "columns": list(APP_COLUMNS), "types": list(APP_TYPES), "rows": rows}
 
 
 def _app_row(st: State, key: str, a: App, socks: list) -> dict:
@@ -1059,7 +1071,7 @@ def _app_row(st: State, key: str, a: App, socks: list) -> dict:
                ("first seen", st.stamp(a.first)), ("last seen", st.stamp(a.last))]
     uids = ",".join(a.uids[:MAX_PROGS]) + ("+" if len(a.uids) > MAX_PROGS else "")
     row = {"cells": [prog, uids or "-", str(len(socks)), str(a.out), str(a.block), str(a.inb),
-                     str(len(a.peers)), st.hms(a.last)],
+                     str(len(a.peers)), _when(a.last)],
            "tone": tone, "id": key, "detail": [{"k": k, "v": v} for k, v in detail]}
     if PICK_RE.fullmatch(pick) and pick.strip():
         row["filter"] = pick                                # f follow / x hide (core/ui.py)
@@ -1132,7 +1144,7 @@ def collect(st: State, ctx) -> dict:
     leak = _safe(lambda: _leak_box(st, entries, up, totals.get("out_leak"), live),
                  "leak", checks,
                  lambda e: {"id": "leak", "title": f"out_leak: {e}", "type": "table",
-                            "columns": list(LEAK_COLUMNS), "rows": [], "sev": "warn"})
+                            "columns": list(LEAK_COLUMNS), "types": list(LEAK_TYPES), "rows": [], "sev": "warn"})
     cs, ss_err = _safe(lambda: _conns(st, checks), "ss", checks, lambda e: ([], e))
     vpn_in = _safe(lambda: _in_vpn(st, entries, cs), "in_vpn", checks,
                    lambda e: ("warn", e))
@@ -1151,14 +1163,14 @@ def collect(st: State, ctx) -> dict:
                    "values": list(st.blocked), "unit": "pkt", "sev": spark_sev})
     panels.append(_safe(lambda: _apps(st, entries, cs, live, wall), "programs", checks,
                         lambda e: {"id": "programs", "title": f"programs: {e}",
-                                   "type": "table", "columns": list(APP_COLUMNS), "rows": [],
+                                   "type": "table", "columns": list(APP_COLUMNS), "types": list(APP_TYPES), "rows": [],
                                    "sev": "warn"}))
     panels.append(_safe(lambda: _peers(st, entries, cs, ss_err, live, wall), "peers", checks,
                         lambda e: {"id": "peers", "title": f"peers: {e}", "type": "table",
-                                   "columns": list(PEER_COLUMNS), "rows": [], "sev": "warn"}))
+                                   "columns": list(PEER_COLUMNS), "types": list(PEER_TYPES), "rows": [], "sev": "warn"}))
     audit = _safe(lambda: _audit(st, entries, cs, live), "audit", checks,
                   lambda e: {"id": "audit", "title": f"audit: {e}", "type": "table",
-                             "columns": list(AUDIT_COLUMNS), "rows": [], "sev": "warn"})
+                             "columns": list(AUDIT_COLUMNS), "types": list(AUDIT_TYPES), "rows": [], "sev": "warn"})
     audit["width"] = "full"                  # most columns: a row of its own, at the bottom
     panels.append(audit)
 

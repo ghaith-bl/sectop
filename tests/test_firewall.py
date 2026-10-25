@@ -39,6 +39,15 @@ def live(text):
     return tuple(out)
 
 
+def lab(cells, i=0, base=0.0):
+    """Age cell (epoch seconds, shown as an age) -> the name the tests give a time:
+    t<seconds % 100>, or t<seconds after base>."""
+    out = list(cells)
+    v = float(out[i])
+    out[i] = f"t{int(v - base)}" if base else f"t{int(v) % 100}"
+    return out
+
+
 NO_TABLE = fail("Error: No such file or directory\nlist table inet hostfw\n")
 NO_DEV = fail("Unable to access interface: No such device\n")
 
@@ -666,7 +675,7 @@ class TestCollect(Base):
         self.st.hms = lambda ts: f"t{int(ts) % 100}"
         self.st.stamp = lambda ts: f"T{ts:.3f}"
         p = self.panel(self.collect(), "audit")
-        return p, [r["cells"] for r in p["rows"]], [r["sev"] for r in p["rows"]]
+        return p, [lab(r["cells"]) for r in p["rows"]], [r["sev"] for r in p["rows"]]
 
     def test_programs(self):
         self.host.set("nft list table", ok(table("nft-enforce.json")))
@@ -679,7 +688,9 @@ class TestCollect(Base):
         self.assertEqual(p["title"], "programs 6  2 with open sockets")
         rows = {r["id"]: r for r in p["rows"]}
         self.assertEqual([r["id"] for r in p["rows"]][:2], ["brave", "NetworkManager"])  # open
-        self.assertEqual(rows["brave"]["cells"], ["brave", "1000", "4", "1", "0", "0", "2", "t51"])
+        self.assertEqual(lab(rows["brave"]["cells"], 7),
+                         ["brave", "1000", "4", "1", "0", "0", "2", "t51"])
+        self.assertEqual(p["types"], ["text", "text", "num", "num", "num", "num", "num", "age"])
         self.assertEqual((rows["brave"]["tone"], rows["brave"]["filter"]), ("blue", "brave"))
         # no ss match: grouped by uid; the leak (blocked) and two allowed flows of uid 1000
         self.assertEqual(rows["? uid 1000"]["cells"][:6], ["?", "1000", "0", "2", "1", "0"])
@@ -726,6 +737,8 @@ class TestCollect(Base):
         self.assertEqual(p["columns"], ["last", "n", "dir", "verdict", "proto", "uid", "prog",
                                         "src", "dst", "iface"])
         self.assertEqual(p["title"], "audit 8 flows  (8 lines)")    # IN-NOISE hidden
+        self.assertEqual(p["types"], ["age", "num"] + ["text"] * 8)
+        self.assertEqual(p["rows"][0]["cells"][0], f"{float(p['rows'][0]['cells'][0]):.3f}")
         self.assertEqual(rows, [                                    # newest first
             ["t59", "1", "out", "allow", "tcp", "1000", "?", "192.168.8.102", "192.168.8.50:22",
              "wlo1"],                                               # ephemeral port left out
@@ -855,7 +868,7 @@ class TestCollect(Base):
         self.host.set("journalctl", ok(self.ks_lines(0, 3) + self.ks_lines(10, 1, uid="994")))
         p = self.panel(self.collect(), "audit")
         self.assertEqual(p["title"], "audit 2 flows  (4 lines)")
-        self.assertEqual([r["cells"][:2] + r["cells"][5:] for r in p["rows"]], [
+        self.assertEqual([lab(r["cells"])[:2] + r["cells"][5:] for r in p["rows"]], [
             ["t10", "1", "994", "?", "fdeb:446c:912d:8da::2", "[2607:6bc0::10]:443",
              "pvpnksintrf0"],
             ["t2", "3", "1000", "?", "fdeb:446c:912d:8da::2", "[2607:6bc0::10]:443",
@@ -867,7 +880,7 @@ class TestCollect(Base):
         self.tick()
         self.host.set("journalctl", ok(self.ks_lines(20, 1)))
         p = self.panel(self.collect(), "audit")
-        self.assertEqual([r["cells"][:2] for r in p["rows"]], [["t20", "4"], ["t10", "1"]])
+        self.assertEqual([lab(r["cells"])[:2] for r in p["rows"]], [["t20", "4"], ["t10", "1"]])
         self.assertEqual(p["rows"][0]["id"], old_id)                 # same flow moved to top
         self.assertEqual(p["title"], "audit 2 flows  (5 lines)")
 
@@ -982,7 +995,8 @@ class TestCollect(Base):
         p = self.panel(s, "peers")
         self.assertEqual(p["columns"], ["peer", "open", "new", "drop", "prog", "last"])
         self.assertEqual(p["title"], "peers 3  5 open")
-        self.assertEqual([r["cells"] for r in p["rows"]], [
+        self.assertEqual(p["types"], ["text", "num", "num", "num", "text", "age"])
+        self.assertEqual([lab(r["cells"], 5) for r in p["rows"]], [
             ["203.0.113.10", "3", "0", "0", "brave", "t45"],
             ["192.168.8.1", "1", "0", "0", "NetworkManager", "t45"],      # tie: by address
             ["198.51.100.20", "1", "0", "0", "brave", "t45"]])
@@ -1002,7 +1016,7 @@ class TestCollect(Base):
         self.host.set("ss", ok(""))
         self.host.set("journalctl", ok(fix("journal-audit.json")))
         p = self.panel(self.collect(), "peers")
-        cells = {r["cells"][0]: r["cells"] for r in p["rows"]}
+        cells = {r["cells"][0]: lab(r["cells"], 5) for r in p["rows"]}
         self.assertEqual(cells["198.51.100.20"], ["198.51.100.20", "0", "1", "0", "?", "t51"])
         self.assertEqual(cells["203.0.113.11"][2:4], ["0", "1"])     # the leak: blocked
         self.assertEqual(cells["192.168.8.50"][2:4], ["1", "1"])     # lan allow out + in_lan in
@@ -1179,7 +1193,8 @@ class TestLeakBox(Base):
         fw._boot_scan(self.st)
 
     def rows(self, snap):
-        return [(r["cells"], r["sev"]) for r in self.panel(snap, "leak")["rows"]]
+        return [(lab(r["cells"], 0, self.BOOT), r["sev"])
+                for r in self.panel(snap, "leak")["rows"]]
 
     def test_boot_scan_context(self):
         self.boot(first=self.BOOT + 40, leaks=[("b1", self.BOOT + 12), ("b2", self.BOOT + 300)])
@@ -1190,7 +1205,8 @@ class TestLeakBox(Base):
             (["t12", "1000", "tcp", "203.0.113.11:443", "wlo1", "pre-connect"], "info")])
         p = self.panel(s, "leak")
         self.assertEqual((p["title"], p["sev"]), ("out_leak 4", "crit"))
-        self.assertEqual(p["columns"], ["time", "uid", "proto", "dst", "iface", "context"])
+        self.assertEqual(p["columns"], ["age", "uid", "proto", "dst", "iface", "context"])
+        self.assertEqual(p["types"], ["age"] + ["text"] * 5)
         d = {it["k"]: it["v"] for it in p["rows"][1]["detail"]}
         self.assertTrue(d["meaning"].startswith("before the first flow via the tunnel"))
         self.assertEqual(d["after boot"], "12s")
@@ -1255,7 +1271,8 @@ class TestLeakBox(Base):
     def test_rows_capped_newest_first(self):
         self.boot(leaks=[(f"b{i}", self.BOOT + i) for i in range(12)])
         p = self.panel(self.collect(), "leak")
-        self.assertEqual([r["cells"][0] for r in p["rows"]], [f"t{i}" for i in range(11, 3, -1)])
+        self.assertEqual([lab(r["cells"], 0, self.BOOT)[0] for r in p["rows"]],
+                         [f"t{i}" for i in range(11, 3, -1)])
         self.assertEqual(p["title"], "out_leak 4  (newest 8 of 12 lines)")
         self.assertEqual(p["sev"], "ok")                     # pre-connect only
 

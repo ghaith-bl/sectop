@@ -138,6 +138,9 @@ own at the bottom, it has the most columns and gets the leftover lines).
   fwmark in set, default route = kill switch / tunnel). Problems keep their severity color.
 - hostfw `log reader` = state of core's journal follower for this module (ok / note /
   down), not a log view.
+- Column types (right-aligned, docs/module-interface.md): counters pkts / new / bytes;
+  programs open / out / block / in / peers; peers open / new / drop; audit n. Ages:
+  programs, peers and audit `last`, out_leak `age`.
   System journal view: security screen (phase 4).
 - vpn `recv / sent` = bytes received / sent through the tunnel since it came up
   (`wg show transfer`, summed over peers, 1000-based units). Reset on every reconnect.
@@ -231,7 +234,8 @@ Leak lines of this boot, newest first, last 8 shown (100 kept). Title: `out_leak
   skipped by the live reader (no double rows).
 - First tunnel flow = first `HFW-OUT-NEW` line of the boot (scan), else the first one the
   live reader sees.
-- Columns: time, uid, proto, dst, iface, context.
+- Columns: age, uid, proto, dst, iface, context. Age = epoch seconds in the cell (column
+  type `age`): the screen shows `12s` / `4m`, the detail the full local time.
 
 | context | when | sev |
 |---|---|---|
@@ -262,7 +266,7 @@ Title: `audit <flows> flows  (<lines> lines)`, lines = all since sectop started.
 
 | column | value |
 |---|---|
-| last | local HH:MM:SS of the newest line |
+| last | age of the newest line (type `age`: epoch seconds, full time in the detail) |
 | n | lines of this flow |
 | dir | out, in, fwd (from the prefix) |
 | verdict | allow (allowed kinds), drop (out_ks, fwd_vm_ks), zone (in_*: hostfw logs, firewalld zone decides), block / pass (deny kinds, live mode enforce / observe) |
