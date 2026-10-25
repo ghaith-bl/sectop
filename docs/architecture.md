@@ -119,8 +119,11 @@ Audit records in the journal (host sample 2026-10-20: 2 sudo calls, 195 entries)
 
 - Keys: audit uses the first matching rule (auditctl(8): "the event triggers on the first
   matching rule"). Hardening rule order: `user_emulation` before `root_cmds`:
-  - `user_emulation` = setuid launch (uid != euid): sudo itself, pkexec, fusermount3
+  - `user_emulation` = setuid exec (uid != euid): sudo itself, pkexec, nvidia-modprobe
   - `root_cmds` = what runs as root after it (uid = euid = 0, auid = login user)
+- Launch = a setuid launcher (sudo, pkexec, su). Any other setuid program runs as root
+  itself (host 2026-10-25: nvidia-modprobe -> `modprobe nvidia`): a root run, via its
+  parent if seen, else `setuid`.
 - Row = one group: who (auid) > as (euid), exe + normalized argv.
   Cols: last, n, who>as, via, cmd. Normalized for grouping only: numbers, hex ids, IPs,
   UUIDs -> placeholder (same as logs).
@@ -129,8 +132,9 @@ Audit records in the journal (host sample 2026-10-20: 2 sudo calls, 195 entries)
   ses, within 5 s -> via `sudo <tty of the sudo launch>`. Else parent = exe of an execve
   already seen (pid), else `ppid <n>`. No `/proc` lookup (2026-10-20): read seconds
   later, the pid may be reused -> wrong parent. `ProtectProc=invisible` stays.
-- `unix_chkpwd` under sudo (2 per password prompt): folded into that sudo row.
-- Launch without a root child (sudo -k / -l, sudoedit, denied sudo, setuid helpers):
+- `unix_chkpwd` (1-2 per password prompt): never a row, folded into its parent's row
+  (sudo launch, sudo run by root, gdm-session-worker). Parent not seen: counted only.
+- Launch without a root child (sudo -k / -l, sudoedit, denied sudo):
   own row, dim (tone `dim`). Nothing hidden. Built 2026-10-25: the launch is a row at
   once, its root command takes it back (no timer: a 5 s wait turned a slow password
   prompt into a launch without a command). Details: docs/modules/security.md.

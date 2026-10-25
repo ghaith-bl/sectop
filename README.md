@@ -23,8 +23,9 @@ Status: in progress (phase 3: privilege split, docs/architecture.md).
 
 - firewall: hostfw mode + counters, kernel log (HFW-*), programs, peers (remote IPs),
   WireGuard (docs/modules/firewall.md)
-- security: commands run as root after a login and setuid launches, from the audit
-  records in the journal (docs/modules/security.md). Auth, kernel, posture, logs: phase 4
+- security: commands run as root after a login (sudo, pkexec, su, setuid programs), from
+  the audit records in the journal (docs/modules/security.md). Auth, kernel, posture,
+  logs: phase 4
 
 ## Screen legend
 
@@ -51,7 +52,7 @@ same on every screen:
 | soft red | dropped by the kill switch |
 | soft yellow | blocked by hostfw (enforce) |
 | green | healthy state (table loaded, tunnel up, ...) |
-| dim | setuid launch without a root command (sudo -k, denied sudo, polkit helper) |
+| dim | sudo / pkexec / su without a root command (sudo -k, sudo -l, denied sudo) |
 
 Tones (blue, soft red, soft yellow, green, dim) carry a meaning, not a severity: crit
 stays red, warn adds bold. 256-color terminal: soft tones, else the 8 basic colors.

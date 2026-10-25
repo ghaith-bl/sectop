@@ -15,7 +15,7 @@ Every audit entry since the last collect, assembled into events by `core/audit.p
 
 | event | what |
 |---|---|
-| SYSCALL execve / execveat, key `user_emulation` | setuid launch (sudo, pkexec, polkit helper) |
+| SYSCALL execve / execveat, key `user_emulation` | setuid exec: a launch (sudo, pkexec, su) or a setuid program running as root |
 | SYSCALL execve / execveat, key `root_cmds` | a command as root after a login |
 | USER_CMD (`AUDIT1123`) | sudo's own record: cmd, terminal, res |
 
@@ -31,14 +31,24 @@ follower is down or dropped lines.
 - Row = group: who (auid) > as (euid), exe, normalized argv[1:] (secrets, UUIDs, IPs, hex
   ids, numbers -> placeholders). Max 200 groups, least recent dropped.
 - via: `sudo <tty>` (root command argv == a sudo USER_CMD `cmd`, same ses, within 5 s,
-  res success); pkexec (same pid as its launch); exe of an execve seen before with the
-  parent pid; else `ppid <n>`. No `/proc` lookup (pid reuse).
-- Launch rows (via = `no root command` / `denied`), tone `dim`: a setuid launch is a row
-  at once. Its root command takes it back out of that row (n - 1, row gone at 0) and the
+  res success); the launch in the same pid (pkexec) or the parent pid (su); exe of an
+  execve seen before with the parent pid; else `ppid <n>` (`setuid` for a setuid
+  program). No `/proc` lookup (pid reuse).
+- Launchers = sudo, pkexec, su (exe name): setuid programs that run another command as
+  root. Any other setuid exec (nvidia-modprobe, its `modprobe nvidia`, fusermount3, the
+  polkit agent helper) is a root run: the program itself runs as root. Host 2026-10-25:
+  `modprobe nvidia` showed as a launch, dim, "no root command", but it loaded a module
+  as root.
+- Launch rows (via = `no root command` / `denied`), tone `dim`: a launch is a row at
+  once. Its root command takes it back out of that row (n - 1, row gone at 0) and the
   command row gets its password checks. No timer (2026-10-25): a 5 s wait after the
   launch turned a slow password prompt into a launch without a command.
   `denied`: a USER_CMD with res=failed for that launch (sudo, 3 wrong passwords).
-- `unix_chkpwd` under a launch: `password checks` on that launch, never a row.
+- `unix_chkpwd` (either key): never a row. `password checks` on the row of its parent: a
+  launch waiting for its command, else the command seen with that pid. Were rows before
+  2026-10-25: sudo run by root (install.sh, host) and gdm-session-worker on unlock
+  (fixture lock). Parent not seen (started before sectop): counted only
+  (`State.lost_checks`).
 - Failed execve in a PATH search (success=no, no EXECVE): not a run, counted only.
 - Detail: exe, result, denied (`<n> of <rows n>`), argv (last 5 distinct, raw), via seen
   (when more than one), cwd, first, ses, pid / ppid, key, password checks.
@@ -56,4 +66,6 @@ uid names 256 (cache, cleared when full). Assembler: core/audit.py (1000 open ev
 
 `tests/fixtures/security/` (2026-10-20, masked, `tests/journal_fixture.py`): sudo (root
 shell via sudo su, sudo id, sudo -k), sudo-denied (3 wrong passwords, then the right
-one), sudo-l, pkexec, module (modprobe, blocked sctp load).
+one), sudo-l, pkexec, module (modprobe, blocked sctp load), lock (unlock at the gdm lock
+screen). Built in the test (same record format): sudo run by root, nvidia-modprobe ->
+modprobe nvidia, su.

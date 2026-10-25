@@ -109,11 +109,69 @@ class TestCommands(unittest.TestCase):
         self.assertEqual(rows(snap)["sudo -l"][:3], ("2", "null>root", "no root command"))
 
     def test_pkexec_same_process(self):
-        _, snap = capture("pkexec")
+        r, snap = capture("pkexec")
         got = rows(snap)
         self.assertEqual(got["/usr/bin/id"][2], "pkexec")
-        helper = got["/usr/lib/polkit-1/polkit-agent-helper-1 null"]
-        self.assertEqual((helper[2], helper[3]["password checks"]), ("no root command", "2"))
+        helper = got["/usr/lib/polkit-1/polkit-agent-helper-1 null"]   # setuid, runs as root
+        self.assertEqual((helper[2], helper[3]["password checks"]), ("setuid", "2"))
+        self.assertNotIn("result", helper[3])
+        tones = {row["cells"][4]: row.get("tone") for row in snap["panels"][0]["rows"]}
+        self.assertIsNone(tones["/usr/lib/polkit-1/polkit-agent-helper-1 null"])
+        self.assertEqual(r.st.runs, 2)
+
+    def test_unlock_password_checks(self):
+        """gdm-session-worker runs unix_chkpwd as root: folded, never a row (fixture lock)."""
+        r, snap = capture("lock")
+        got = rows(snap)
+        self.assertEqual(list(got), ["gdm-session-worker [pam/gdm-password]"])
+        self.assertEqual(got["gdm-session-worker [pam/gdm-password]"][3]["password checks"], "2")
+        self.assertEqual((r.st.runs, r.st.lost_checks), (1, 0))
+
+    def test_password_check_under_a_root_command(self):
+        """sudo run by root (install.sh, host 2026-10-25): its unix_chkpwd goes to its row."""
+        r = Run()
+        got = rows(r.collect(_events(
+            (600, 599, "0", "/usr/bin/bash", ["/bin/bash", "./install.sh"], "root_cmds"),
+            (601, 600, "0", "/usr/bin/sudo", ["sudo", "-u", "null", "git", "log", "-1"],
+             "root_cmds"),
+            (602, 601, "0", "/usr/bin/unix_chkpwd", ["/usr/bin/unix_chkpwd", "root",
+                                                     "chkexpiry"], "root_cmds"),
+            (603, 1, "0", "/usr/bin/unix_chkpwd", ["/usr/bin/unix_chkpwd", "root",
+                                                   "chkexpiry"], "root_cmds"),
+            (604, 1, "1000", "/usr/bin/unix_chkpwd", ["/usr/bin/unix_chkpwd", "null",
+                                                      "nonull"], "user_emulation")), 200.0))
+        self.assertEqual(sorted(got), ["/bin/bash ./install.sh", "sudo -u null git log -1"])
+        self.assertEqual(got["sudo -u null git log -1"][2:3], ("bash",))
+        self.assertEqual(got["sudo -u null git log -1"][3]["password checks"], "1")
+        self.assertEqual((r.st.runs, r.st.lost_checks), (2, 2))     # parent not seen: counted
+
+    def test_setuid_program_runs_as_root(self):
+        """nvidia-modprobe (setuid) runs modprobe nvidia (host 2026-10-25): root runs, not
+        launches without a root command."""
+        r = Run()
+        evs = []
+        for i in (0, 10):
+            evs += [(700 + i, 650, "1000", "/usr/bin/nvidia-modprobe",
+                     ["/usr/bin/nvidia-modprobe"], "user_emulation"),
+                    (701 + i, 700 + i, "1000", "/usr/bin/kmod", ["modprobe", "nvidia"],
+                     "user_emulation")]
+        snap = r.collect(_events(*evs), 200.0)
+        got = rows(snap)
+        self.assertEqual(got["/usr/bin/nvidia-modprobe"][:3], ("2", "null>root", "setuid"))
+        self.assertEqual(got["modprobe nvidia"][:3], ("2", "null>root", "nvidia-modprobe"))
+        self.assertEqual(r.st.runs, 4)
+        self.assertEqual([row.get("tone") for row in snap["panels"][0]["rows"]], [None, None])
+        self.assertNotIn("result", got["modprobe nvidia"][3])
+
+    def test_su_launch_taken_back_by_its_child(self):
+        """su forks the root shell: the child (ppid = su) takes the launch back."""
+        r = Run()
+        got = rows(r.collect(_events(
+            (800, 799, "1000", "/usr/bin/su", ["su", "-"], "user_emulation"),
+            (801, 800, "0", "/usr/bin/bash", ["-bash"], "root_cmds")), 200.0))
+        self.assertEqual(list(got), ["-bash"])
+        self.assertEqual(got["-bash"][2], "su")
+        self.assertEqual(r.st.runs, 1)
 
     def test_via_seen(self):
         """Same program, other ways in: one row, the ways in the detail."""
@@ -198,6 +256,29 @@ class TestCommands(unittest.TestCase):
         self.assertIn("(journal: 3 bad line(s))", snap["panels"][0]["title"])
         snap = validate(sec.collect(r.st, Context((), False, "")))
         self.assertIn("(journal: follower down)", snap["panels"][0]["title"])
+
+
+def _events(*execs) -> list:
+    """Audit journal entries (SYSCALL, EXECVE, CWD, PROCTITLE) of execve events, one second
+    apart: (pid, ppid, uid, exe, argv, key). euid 0, auid 1000, ses 18."""
+    out = []
+    for i, (pid, ppid, uid, exe, argv, key) in enumerate(execs):
+        us = str(100_000_000 + i * 1_000_000)
+        aid = str(90000 + i)
+        msgs = [("1300", "SYSCALL", f"SYSCALL arch=c000003e syscall=59 success=yes exit=0 "
+                 f"a0=1 a1=2 a2=3 a3=4 items=2 ppid={ppid} pid={pid} auid=1000 uid={uid} "
+                 f"gid={uid} euid=0 suid=0 fsuid=0 egid={uid} sgid={uid} fsgid={uid} "
+                 f'tty=pts0 ses=18 comm="x" exe="{exe}" subj=unconfined_u:unconfined_r:'
+                 f'unconfined_t:s0-s0:c0.c1023 key="{key}"'),
+                ("1309", "EXECVE", f"EXECVE argc={len(argv)} "
+                 + " ".join(f'a{n}="{a}"' for n, a in enumerate(argv))),
+                ("1307", "CWD", 'CWD cwd="/var/home/null"'),
+                ("1327", "PROCTITLE", "PROCTITLE proctitle="
+                 + "00".join(a.encode().hex().upper() for a in argv))]
+        for typ, name, msg in msgs:
+            out.append({"__REALTIME_TIMESTAMP": us, "_TRANSPORT": "audit", "_AUDIT_ID": aid,
+                        "_AUDIT_TYPE": typ, "_AUDIT_TYPE_NAME": name, "MESSAGE": msg})
+    return out
 
 
 class _Ev:

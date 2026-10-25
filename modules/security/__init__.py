@@ -2,15 +2,21 @@
 
 Phase 4 step 3: commands box. Source: core's journal follower (JOURNAL: every audit
 record), assembled into events by core/audit.py. Rows: what ran as root after a login
-(rule key root_cmds: execve with euid 0 and a login auid) and setuid launches without a
-root command (user_emulation: sudo -k / -l, denied sudo, polkit agent helper ...),
-grouped by who > as, exe and normalized argv.
+(rule key root_cmds: execve with euid 0 and a login auid) and setuid execs
+(user_emulation: uid != euid), grouped by who > as, exe and normalized argv.
+
+Setuid execs: a launcher (sudo, pkexec, su: runs another command as root) is a launch;
+any other setuid program (nvidia-modprobe, fusermount3, the polkit agent helper ...)
+runs as root itself: a root run, via its parent if seen, else `setuid`.
 
 Via: a root command whose argv equals a sudo USER_CMD (same session, within 5 s) ran
-via `sudo <tty>`; pkexec runs the command in its own process (same pid as the launch);
-else the exe of a command seen before with the parent pid, else `ppid <n>`. No /proc
-lookup: read seconds later, a pid may belong to another process. unix_chkpwd under a
-launch (password prompt) is counted on that launch, not a row of its own.
+via `sudo <tty>`; a launch in the same pid (pkexec) or the parent pid (su) is its way
+in; else the exe of a command seen before with the parent pid, else `ppid <n>`. No
+/proc lookup: read seconds later, a pid may belong to another process.
+
+unix_chkpwd (pam_unix helper, 1-2 per password prompt) is never a row: counted on the
+row of its parent (a launch waiting for its command, else the command seen with that
+pid: sudo run by root, gdm-session-worker on unlock). Parent not seen: counted only.
 
 Secrets (core/sanitize.py mask_secrets): always masked in the cmd cell and in grouping;
 the detail argv is raw, masked by the UI while mask is on (key m shows it).
@@ -36,7 +42,8 @@ JOURNAL = {"groups": [["_TRANSPORT=audit"]],
            "fields": ["MESSAGE", "_AUDIT_ID", "_AUDIT_TYPE", "_AUDIT_TYPE_NAME"]}
 
 ROOT_KEY = "root_cmds"          # hardening audit rules: execve as root after a login
-LAUNCH_KEY = "user_emulation"   # setuid launch: uid != euid (sudo, pkexec, fusermount3)
+LAUNCH_KEY = "user_emulation"   # setuid exec: uid != euid (sudo, pkexec, nvidia-modprobe)
+LAUNCHERS = ("sudo", "pkexec", "su")   # setuid programs that run another command as root
 USER_CMD = "AUDIT1123"          # sudo's own record: cmd, terminal, res
 EXECVE = ("59", "322")          # execve, execveat (x86_64)
 JOIN = 5.0                      # sudo USER_CMD -> its root command
@@ -99,12 +106,13 @@ class State:
         self.wall, self.user, self.stamp = wall, user, stamp
         self.asm = audit.Assembler()
         self.groups = collections.OrderedDict()   # key -> Group, least recent first
-        self.pids = collections.OrderedDict()     # pid -> exe of a command seen (parents)
+        self.pids = collections.OrderedDict()     # pid -> (exe, row key): commands seen
         self.launches = collections.OrderedDict()  # pid -> Launch (setuid process)
         self.usercmds = collections.deque(maxlen=MAX_USERCMDS)
         self.names = {}                           # uid -> name
         self.runs = 0                             # root commands since start
         self.skipped = 0                          # failed execve in a PATH search
+        self.lost_checks = 0                      # unix_chkpwd, parent not seen
 
     def name(self, uid: str | None) -> str:
         if not uid or uid == UNSET:
@@ -116,9 +124,9 @@ class State:
         return self.names[uid]
 
 
-def _remember(st: State, pid: str, exe: str) -> None:
+def _remember(st: State, pid: str, exe: str, key: str) -> None:
     st.pids.pop(pid, None)
-    st.pids[pid] = exe
+    st.pids[pid] = (exe, key)
     while len(st.pids) > MAX_PIDS:
         st.pids.popitem(last=False)
 
@@ -176,7 +184,7 @@ def _take_back(st: State, launch: Launch) -> int:
     return n
 
 
-def _via(st: State, ev, argv: list, ts: float) -> tuple:
+def _via(st: State, ev, argv: list, ts: float, fallback: str) -> tuple:
     """-> (via text, the launch it came from or None)."""
     line, ses = " ".join(argv), ev.get("ses")
     for uc in reversed(st.usercmds):
@@ -188,30 +196,47 @@ def _via(st: State, ev, argv: list, ts: float) -> tuple:
                 launch = None                    # its row was taken back already
             return f"sudo {uc['tty']}", launch
     pid, ppid = ev.get("pid"), ev.get("ppid")
-    launch = st.launches.get(pid)
-    if launch is not None and not launch.matched:   # pkexec: same process
-        return os.path.basename(launch.ev.get("exe") or "?"), launch
+    for p in (pid, ppid):                        # pkexec: same process; su: its child
+        launch = st.launches.get(p)
+        if launch is not None and not launch.matched:
+            return os.path.basename(launch.ev.get("exe") or "?"), launch
     if ppid in st.pids:
-        return os.path.basename(st.pids[ppid]), None
-    return f"ppid {ppid or '?'}", None
+        return os.path.basename(st.pids[ppid][0]), None
+    return fallback, None
 
 
-def _root(st: State, ev, ts: float) -> None:
+def _chkpwd(st: State, ev) -> None:
+    """unix_chkpwd: never a row. A password check on the row of its parent."""
+    ppid = ev.get("ppid")
+    launch = st.launches.get(ppid)
+    if launch is not None and not launch.matched:
+        launch.chkpwd += 1                       # goes with its root command later
+        key = launch.key
+    elif ppid in st.pids:
+        key = st.pids[ppid][1]                   # sudo run by root, gdm-session-worker
+    else:
+        st.lost_checks += 1                      # parent started before sectop
+        return
+    g = st.groups.get(key)
+    if g is not None:
+        g.chkpwd += 1
+
+
+def _root(st: State, ev, ts: float, setuid: bool = False) -> None:
+    """A root run: root_cmds, or a setuid program that is not a launcher."""
     argv = ev.argv
     if ev.get("success") == "no" and not argv:
         st.skipped += 1                          # PATH search: exit -2, no EXECVE
         return
     exe = ev.get("exe") or ""
-    launch = st.launches.get(ev.get("ppid"))
-    if exe.endswith("/unix_chkpwd") and launch is not None and not launch.matched:
-        launch.chkpwd += 1                       # password prompt of that launch
-        if launch.key in st.groups:
-            st.groups[launch.key].chkpwd += 1
-        return
-    via, launch = _via(st, ev, argv, ts)
-    _remember(st, ev.get("pid") or "", exe)
+    fallback = "setuid" if setuid else f"ppid {ev.get('ppid') or '?'}"
+    via, launch = _via(st, ev, argv, ts, fallback)
     st.runs += 1
     checks = _take_back(st, launch) if launch is not None else 0
+    key = _key(st, ev, argv)
+    if launch is not None:                       # later checks under the launcher: here
+        _remember(st, launch.ev.get("pid") or "", launch.ev.get("exe") or "", key)
+    _remember(st, ev.get("pid") or "", exe, key)
     g = _group(st, ev, argv, ts)
     g.via, g.result = via, ""
     if via in g.vias:
@@ -221,12 +246,12 @@ def _root(st: State, ev, ts: float) -> None:
 
 
 def _launch(st: State, ev, ts: float) -> None:
-    pid = ev.get("pid") or ""
-    _remember(st, pid, ev.get("exe") or "")
+    pid, key = ev.get("pid") or "", _key(st, ev, ev.argv)
+    _remember(st, pid, ev.get("exe") or "", key)
     g = _group(st, ev, ev.argv, ts)
     g.via, g.result = "-", "no root command"
     st.launches.pop(pid, None)
-    st.launches[pid] = Launch(ev, ts, _key(st, ev, ev.argv))
+    st.launches[pid] = Launch(ev, ts, key)
 
 
 def _prune(st: State, now: float) -> None:
@@ -271,10 +296,17 @@ def collect(st: State, ctx) -> dict:
         if ev.kind == USER_CMD:
             _usercmd(st, ev, ts)
         elif ev.kind == "SYSCALL" and ev.get("syscall") in EXECVE:
-            if LAUNCH_KEY in ev.keys:
-                _launch(st, ev, ts)
-            elif ROOT_KEY in ev.keys:
+            exe = ev.get("exe") or ""
+            if LAUNCH_KEY not in ev.keys and ROOT_KEY not in ev.keys:
+                continue
+            if exe.endswith("/unix_chkpwd"):
+                _chkpwd(st, ev)                  # either key: never a row
+            elif LAUNCH_KEY not in ev.keys:
                 _root(st, ev, ts)
+            elif os.path.basename(exe) in LAUNCHERS:
+                _launch(st, ev, ts)
+            else:
+                _root(st, ev, ts, setuid=True)   # the setuid program runs as root itself
     _prune(st, now)
     groups = sorted(st.groups.items(), key=lambda kv: -kv[1].last)
     rows = [_row(st, key, g) for key, g in groups]
