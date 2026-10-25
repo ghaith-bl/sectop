@@ -103,6 +103,14 @@ Audit records in the journal (host sample 2026-10-20: 2 sudo calls, 195 entries)
 - argv from the EXECVE MESSAGE (`a0=` quoted or hex, long args `a1[0]`), not from
   `_AUDIT_FIELD_A*`: journald maps max 64 fields per record (`N_IOVEC_AUDIT_FIELDS`).
 - User space types have no name: USER_CMD = `AUDIT1123`. Match `_AUDIT_TYPE=<n>`.
+- EXECVE (kernel auditsc.c): `a<n>=` per argument, quoted or hex (space, quote, control
+  char, byte > 0x7e); a long one as `a<n>_len=` + chunks `a<n>[i]=`, which may go on in
+  the next EXECVE record of the event; encoding once per argument. Encoded fields (cmd,
+  cwd, exe, comm, key, name, proctitle, ...): audit-documentation field dictionary,
+  format "encoded"; `(null)` = none. Several rule keys: joined by 0x01 (hex). SYSCALL
+  a0..a3 are plain hex numbers, not encoded.
+- Failed execve in a PATH search (fixture sudo: xargs tries /usr/local/sbin/cat):
+  SYSCALL success=no exit=-2, PATH = the tried name, no EXECVE record.
 - Every sudo starts root's user manager (pam_systemd, `user@0.service`): ~100 entries
   (BPF, SYSCALL `key=(null)`). No key -> ignored.
 
@@ -400,9 +408,9 @@ Best practice decides (Red Hat for the host). Fixtures from my host first
 - Order:
   1. Journal reader in core: follow (see Resources). Done 2026-10-25: `core/journal.py`,
      `collect(state, ctx)` + `JOURNAL`, firewall moved to it (no poll, no cursor of its
-     own). Still in this step: audit events by `_AUDIT_ID`, EXECVE / USER_CMD parsing
-     (`core/audit.py`, fixtures 2026-10-20 -> tests/fixtures/security/). CPU of
-     sectop.service after install: not measured yet.
+     own); audit events (`core/audit.py`: by `_AUDIT_ID`, EXECVE / USER_CMD), fixtures
+     2026-10-20 in tests/fixtures/security/. CPU of sectop.service after install: not
+     measured yet.
   2. Look
   3. commands box + watch.toml
   4. auth box

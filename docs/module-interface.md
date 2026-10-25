@@ -343,6 +343,24 @@ JOURNAL = {"groups": [["_TRANSPORT=kernel"]], "fields": ["MESSAGE"]}
 - Read before each tick and while the collector waits (selectors on the pipe; pipe
   1 MiB, max 4 MiB per read). Collector exit: SIGTERM, 1 s, then SIGKILL.
 
+## Audit events (`core/audit.py`)
+
+For modules that read `_TRANSPORT=audit` entries from `ctx.journal`. JOURNAL fields:
+`MESSAGE`, `_AUDIT_ID`, `_AUDIT_TYPE`, `_AUDIT_TYPE_NAME` (`_BOOT_ID` is always there).
+
+- `Assembler().feed(entries, now)` -> complete events, journal order. Keep one in the
+  module state. Event = the records with the same `_AUDIT_ID` and `_BOOT_ID`. Complete
+  at PROCTITLE (or EOE); a user space record (1100-1199, 2100-2999) alone. No record
+  for 2 s (no PROCTITLE ever: BPF without a syscall) or more than 1000 open -> given
+  out as it is. Entries without id / type / message: counted in `bad`.
+- `Event`: `kind` (SYSCALL, or the first record's name: `AUDIT1123`, `BPF`, ...),
+  `get(field)` (decoded; from SYSCALL, else the single record, with the fields inside
+  its `msg='...'`), `keys`, `argv` (EXECVE), `cwd`, `proctitle`, `first(name)` /
+  `all(name)` (records: `type`, `name`, `message`, `ts`, `raw` fields).
+- Decoding rules and host facts: docs/architecture.md, Security screen.
+- Fixtures: tests/fixtures/security/ (2026-10-20, `tests/journal_fixture.py`, masked),
+  SHA256SUMS checked by the tests.
+
 ## Validation (`core/module.py`)
 
 - `validate()` returns a new Snapshot: known keys only, defaults filled

@@ -1,0 +1,1 @@
+{"__CURSOR": "s=1;i=1;b=0;m=0;t=0;x=0", "__REALTIME_TIMESTAMP": "1792510292647310", "_TRANSPORT": "kernel", "PRIORITY": "6", "SYSLOG_FACILITY": "0", "SYSLOG_IDENTIFIER": "kernel", "_KERNEL_SUBSYSTEM": "usb", "_KERNEL_DEVICE": "c189:260", "MESSAGE": "usb 3-2: USB disconnect, device number 5"}
