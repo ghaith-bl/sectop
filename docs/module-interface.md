@@ -102,6 +102,11 @@ table (rows max 200):
            "detail": [{"k": "TTL", "v": "64"}]}]}
 ```
 
+`types` optional (column hint, one per column): `text` (default, left), `num` (right),
+`age` (right; the cell is epoch seconds as text, e.g. `"1792410745.120"`, or `-` / empty
+for none; shown as `12s` `4m` `2h` `3d`, the detail and the filter use the full local
+time). Wrong length / type, or an age cell that is not epoch seconds -> invalid.
+
 Row `detail` optional: extra k / v pairs shown on `enter` under the cells (max 40).
 Row `id` optional (str): stable key of the row (e.g. a grouped flow). The cursor follows
 it when the row moves or its text changes. Not shown.
@@ -228,13 +233,22 @@ A condition that is not true any more is left out.
   - Height: each row gets its content height. Leftover lines go to the last row with a
     table, events or note. Too few lines: the tallest row shrinks first (lower row on a tie).
     A row that cannot get one line is not drawn.
-  - Table header stays, rows scroll. Cut box: title shows `first-last/total`.
+  - Table header stays, rows scroll. Top border: title left (with the module's own
+    count), right: `/ <filter>  <shown> of <all>`, detail search, `first-last/total` when
+    cut. No room for that: the counts only; still none: left out, never over the title.
   - Stale module: `(stale)` in each box title.
+- Look (2026-10-25, docs/architecture.md, Look): rounded outer corners; severity column
+  first in tables, kv boxes and events: `!!` crit, `!` warn, `i` info, empty ok, in the
+  severity color (WCAG 2.2, 1.4.1: color is not the only means); the row keeps its color
+  as before (severity, `tone`). Table header bold + underlined (labels only), 2 spaces
+  between columns. Ages count from now; paused: from the pause moment (frozen).
+  Events: glyph, age, source + code, message; detail: full local time + age.
 - Focus: focused title `[title]` in reverse. Start: screen `focus`, else first table /
   events box, else first box. Gone -> same rule.
 - Cursor: each box has a selected line, shown in reverse in the focused box; the box
   scrolls to keep it visible. Line 0 follows the newest line. Below line 0 the cursor
-  stays on the same row when new lines arrive above it: row `id`, else the same text
+  stays on the same row when new lines arrive above it: row `id`, else its raw cells
+  (ages move, the anchor does not); kv: the key; events: time + source + code + message
   (found nearest to the old index; not found -> same index, clamped).
 - Filter (`/`, table and events boxes): type words, applied while typing; `enter` keeps
   it, `Esc` goes back to the filter before. Every key is text while typing (q does not
@@ -301,7 +315,8 @@ A condition that is not true any more is left out.
   the tone color replaces ok / info / warn, warn adds bold, crit always stays crit
   (bold red). 256-color terminal: soft tones (xterm 210 red, 111 blue, 222 yellow,
   114 green), crit 196. Else the 8 basic colors; no color support: plain.
-- Box lines: Unicode box drawing (U+2500 block), written as escapes in the source.
+- Box lines: Unicode box drawing (U+2500 block, rounded corners U+256D..U+2570), written
+  as escapes in the source. Legend of glyphs and colors: README.md, Screen legend.
 
 ## Journal (`core/journal.py`)
 

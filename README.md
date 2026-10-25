@@ -24,6 +24,43 @@ Status: in progress (phase 3: privilege split, docs/architecture.md).
 - firewall: hostfw mode + counters, kernel log (HFW-*), programs, peers (remote IPs),
   WireGuard (docs/modules/firewall.md)
 
+## Screen legend
+
+Severity column (first column of every table, kv box and the events box):
+
+| glyph | severity |
+|---|---|
+| `!!` | crit |
+| `!` | warn |
+| `i` | info |
+| (empty) | ok |
+
+The glyph says the severity without color (WCAG 2.2, 1.4.1 Use of Color). Colors are the
+same on every screen:
+
+| color | meaning |
+|---|---|
+| red, bold | crit |
+| yellow | warn |
+| cyan | info |
+| magenta | unknown (no data, module not loaded) |
+| plain | ok |
+| blue | allowed (firewall verdict) |
+| soft red | dropped by the kill switch |
+| soft yellow | blocked by hostfw (enforce) |
+| green | healthy state (table loaded, tunnel up, ...) |
+
+Tones (blue, soft red, soft yellow, green) carry a meaning, not a severity: crit stays
+red, warn adds bold. 256-color terminal: soft tones, else the 8 basic colors.
+
+- Time in a row: age (`12s` `4m` `2h` `3d`); the detail (enter) shows the full local
+  time. Paused: ages stay as they were at the pause.
+- Table header: bold + underlined. Numbers and ages right-aligned.
+- `[title]` in reverse: the focused box. Reverse line: the selected line. Dim: acked or
+  held alerts, keys, hints.
+- Top border right: `/ <filter>  <shown> of <all>`, detail search, `first-last/total`
+  when the box is cut.
+
 ## Install
 
     sudo ./install.sh            # git HEAD -> /usr/local/lib/sectop, users, units

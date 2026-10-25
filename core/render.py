@@ -53,6 +53,10 @@ GRID_MIN = 4                                 # narrower: no boxes
 ALERT_RANK = {"crit": 0, "warn": 1, "unknown": 2}
 BAR_SEVS = ("warn", "crit")                  # info alerts: counted, not in the bar
 SEL = "sel "                                 # style prefix: reverse video
+# severity column: a glyph per level, so color is not the only means (WCAG 2.2, 1.4.1)
+GLYPH = {"crit": "!!", "warn": "!", "info": "i", "noise": "~", "ok": ""}
+GLYPH_W = 3                                  # glyph (2) + space
+HEAD = "head"                                # table header: bold + underline
 BOLD = "bold "                               # style prefix: bold (warn line with a tone)
 # tone colors: soft on 256-color terminals (xterm palette), basic colors otherwise
 TONE_256 = {"red": 210, "blue": 111, "yellow": 222, "green": 114}
@@ -60,7 +64,7 @@ CRIT_256 = 196
 
 # box drawing, U+2500 block
 BH, BV = "\u2500", "\u2502"
-TL, TR, BL, BR = "\u250c", "\u2510", "\u2514", "\u2518"
+TL, TR, BL, BR = "\u256d", "\u256e", "\u2570", "\u256f"   # rounded (Look 2026-10-20)
 TD, TU, LT, RT, CROSS = "\u252c", "\u2534", "\u251c", "\u2524", "\u253c"
 
 HELP = (
@@ -70,6 +74,8 @@ HELP = (
     ("down up  j k", "select line"),
     ("space PgDn / PgUp", "one page"),
     ("g G  Home End", "first / last line (in help / detail: top / end)"),
+    ("!!  !  i", "severity column: crit, warn, info (empty: ok); README.md, Screen legend"),
+    ("12s  4m  2h  3d", "age in a row (full local time in the detail; paused: frozen)"),
     ("enter", "detail of the selected line (pauses while open, real IPs)"),
     ("/", "filter the focused table: all words match, !word must not"),
     ("/  (in a detail)", "search its lines: jumps to the first match, enter keeps it"),
@@ -243,6 +249,36 @@ def _ts(ts: float) -> str:
     return time.strftime("%H:%M:%S", time.localtime(ts))
 
 
+def _stamp(ts: float) -> str:
+    """Full local time: the detail of an age."""
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+
+
+def _glyph(sev: str) -> tuple:
+    """Severity column part: glyph + space, in the severity color."""
+    return (pad(GLYPH.get(sev, ""), GLYPH_W - 1) + " ", _sev(sev))
+
+
+def age(ts: float, ref: float) -> str:
+    """12s, 4m, 2h, 3d (whole units, never negative)."""
+    sec = max(0, int(ref - ts))
+    if sec < 120:
+        return f"{sec}s"
+    if sec < 7200:
+        return f"{sec // 60}m"
+    if sec < 172800:
+        return f"{sec // 3600}h"
+    return f"{sec // 86400}d"
+
+
+def _when(cell: str):
+    """Age cell -> epoch seconds, None for - / empty / not a number."""
+    try:
+        return float(cell) if cell not in ("", "-") else None
+    except ValueError:
+        return None
+
+
 # --- top lines ------------------------------------------------------------
 
 def _tabs(screens, ui, width: int, now, tsfmt) -> list:
@@ -376,20 +412,42 @@ class _Box:
         self.seek = None                     # detail search: first / next / prev asked
         self.mark = None                     # detail search: current match (pair index)
         self.found = ()                      # detail search: (pair, first line, end) per match
+        self.ref = None                      # age reference (now, or the pause moment)
+        self.tsfmt = _ts                     # clock time: an age cell without a reference
+        self.stampfmt = _stamp               # full time in a detail
 
     @property
     def filterable(self) -> bool:
         return self.kind in ("table", "feed")
 
+    def types(self) -> list:
+        cols_ = self.data["columns"]
+        return self.data.get("types") or ["text"] * len(cols_)
+
+    def cell(self, c: str, t: str, full: bool = False) -> str:
+        """Cell as shown: an age column gives the age (full time in a detail)."""
+        if t != "age":
+            return c
+        ts = _when(c)
+        if ts is None:
+            return "-"
+        if full:
+            return self.stampfmt(ts) + ("" if self.ref is None else f"  ({age(ts, self.ref)} ago)")
+        return age(ts, self.ref) if self.ref is not None else self.tsfmt(ts)
+
     def measure(self, mask: bool) -> None:
         if self.kind == "table":
-            rows = self.data["rows"]
-            self.view = [r for r in rows if not self.filt or match(
-                _search(r["cells"] + [it["v"] for it in r.get("detail", ())]), self.filt)]
+            rows, types = self.data["rows"], self.types()
+            self.view = [r for r in rows if not self.filt or match(_search(
+                [self.cell(c, t, True) for c, t in zip(r["cells"], types)]
+                + [it["v"] for it in r.get("detail", ())]), self.filt)]
         elif self.kind == "feed":
             self.view = [e for e in self.data if not self.filt or match(
                 _search([e["sev"], e["src"], e["code"], e["msg"]]), self.filt)]
         self._measure(mask)
+        if self.kind in ("kv", "table", "feed"):   # severity column
+            self.w += GLYPH_W
+            self.least += GLYPH_W
         if self.kind in ("kv", "table"):     # natural width also fits the title
             self.w = max(self.w, cols(display(self.title, mask)) + 3)
 
@@ -405,8 +463,10 @@ class _Box:
             self.least = KV_MIN
             self.h = max(1, len(keys))
         elif self.kind == "table":
+            types = self.types()
             head = [display(c, mask) for c in d["columns"]]
-            rows = [[display(c, mask) for c in r["cells"]] for r in self.view]
+            rows = [[display(self.cell(c, t), mask) for c, t in zip(r["cells"], types)]
+                    for r in self.view]
             widths = [min(COL_MAX, max(cols(c) for c in col)) for col in zip(head, *rows)]
             floors = [min(w, max(COL_MIN, cols(h))) for w, h in zip(widths, head)]
             self.prep = (head, rows, widths, floors)
@@ -426,23 +486,40 @@ class _Box:
         dash = [_line(w, mask, ("-", "dim"))]
         if self.kind == "kv":
             keys, kw = self.prep
-            body = [_line(w, mask, (pad(k, kw) + "  ", "dim"), (it["v"], _style(it)))
-                    for k, it in zip(keys, d["items"])]
+            body = [_line(w, mask, _glyph(it["sev"]), (pad(k, kw) + "  ", "dim"),
+                          (it["v"], _style(it))) for k, it in zip(keys, d["items"])]
             return [], body or dash
         if self.kind == "table":
             head, rows, widths, floors = self.prep
-            widths = shrink(widths, floors, w - 2 * (len(widths) - 1))
+            right = [t != "text" for t in self.types()]
+            widths = shrink(widths, floors, w - GLYPH_W - 2 * (len(widths) - 1))
+
+            def cell(c, cw, r):
+                c = fit(c, cw)
+                gap = " " * (cw - cols(c))
+                return gap + c if r else c + gap
 
             def row(cells):
-                return "  ".join(pad(c, cw) for c, cw in zip(cells, widths)).rstrip()
+                return "  ".join(cell(c, cw, r) for c, cw, r in zip(cells, widths, right)).rstrip()
 
-            body = [_line(w, mask, (row(cells), _style(r)))
+            def header():
+                """Bold + underlined labels, spaces between them plain."""
+                parts = [(" " * GLYPH_W, "plain")]
+                for j, (c, cw, r) in enumerate(zip(head, widths, right)):
+                    c = fit(c, cw)
+                    gap = " " * (cw - cols(c))
+                    parts += [(gap, "plain"), (c, HEAD)] if r else [(c, HEAD), (gap, "plain")]
+                    if j < len(head) - 1:
+                        parts.append(("  ", "plain"))
+                return _line(w, mask, *parts)
+
+            body = [_line(w, mask, _glyph(r["sev"]), (row(cells), _style(r)))
                     for cells, r in zip(rows, self.view)]
-            return [_line(w, mask, (row(head), "dim"))], body or dash
+            return [header()], body or dash
         if self.kind == "spark":
             return [], [_spark(d, w, mask)]
         if self.kind == "feed":
-            return [], [_event(e, w, mask, tsfmt) for e in self.view] or dash
+            return [], [_event(e, w, mask, tsfmt, self.ref) for e in self.view] or dash
         if self.kind == "detail":                # opened on purpose: real IPs, no mask
             lines, owner = _detail_rows(d, w, False)
             self.found = _found(d, owner, self.find) if self.find.strip() else ()
@@ -457,7 +534,9 @@ class _Box:
             return [(it["k"], it["v"]), ("severity", it["sev"])]
         if self.kind == "table" and i < len(self.view):
             r = self.view[i]
-            out = list(zip(d["columns"], r["cells"])) + [("severity", r["sev"])]
+            out = [(c, self.cell(v, t, True)) for c, v, t in zip(d["columns"], r["cells"],
+                                                                  self.types())]
+            out.append(("severity", r["sev"]))
             if r.get("detail"):
                 out += [("", "")] + [(it["k"], it["v"]) for it in r["detail"]]
             return out
@@ -469,8 +548,9 @@ class _Box:
                     ("values", " ".join(_num(x) for x in v))]
         if self.kind == "feed" and i < len(self.view):
             e = self.view[i]
-            return [("time", tsfmt(e["ts"])), ("severity", e["sev"]), ("source", e["src"]),
-                    ("code", e["code"]), ("message", e["msg"])]
+            ago = "" if self.ref is None else f"  ({age(e['ts'], self.ref)} ago)"
+            return [("time", self.stampfmt(e["ts"]) + ago), ("severity", e["sev"]),
+                    ("source", e["src"]), ("code", e["code"]), ("message", e["msg"])]
         return []
 
     def ip_at(self, i: int) -> str | None:
@@ -486,9 +566,14 @@ class _Box:
         return None
 
     def idents(self, texts: list) -> list:
-        """Anchor per body line: row id if the module gave one, else the line text."""
+        """Anchor per body line, stable while ages and severities change: table row id,
+        else its raw cells; kv key; event time + source + code + message; else the text."""
         if self.kind == "table" and self.view:
-            return [r.get("id") or t for r, t in zip(self.view, texts)]
+            return [r.get("id") or "  ".join(r["cells"]) for r in self.view]
+        if self.kind == "kv" and self.data["items"]:
+            return [it["k"] for it in self.data["items"]]
+        if self.kind == "feed" and self.view:
+            return [f"{e['ts']!r} {e['src']} {e['code']} {e['msg']}" for e in self.view]
         return texts
 
     def total(self) -> int:
@@ -549,9 +634,10 @@ def _spark(p: dict, w: int, mask: bool) -> list:
     return _line(w, mask, (bars, _sev(p["sev"])), (last, "dim"))
 
 
-def _event(e: dict, width: int, mask: bool, tsfmt) -> list:
-    return _line(width, mask, (tsfmt(e["ts"]) + " ", "dim"),
-                 (e["sev"].upper().ljust(4) + " ", e["sev"]),
+def _event(e: dict, width: int, mask: bool, tsfmt, ref=None) -> list:
+    """glyph, age (clock time without a reference), source + code, message."""
+    when = age(e["ts"], ref) if ref is not None else tsfmt(e["ts"])
+    return _line(width, mask, _glyph(e["sev"]), (when.rjust(4) + "  ", "dim"),
                  (f"{e['src']} {e['code']} ", "dim"), (e["msg"], "plain"))
 
 
@@ -674,7 +760,8 @@ def _bars(row: list) -> list:
     return xs
 
 
-def _title(b, focused: bool, mask: bool, suffix: str) -> list:
+def _title(b, focused: bool, mask: bool, suffix: str = "") -> list:
+    """Left part of a box's top border: title (its own count), stale."""
     t = display(b.title, mask)
     if focused:
         main = (f"[{t}]", "focus")
@@ -688,9 +775,35 @@ def _title(b, focused: bool, mask: bool, suffix: str) -> list:
     return out
 
 
-def _border(width: int, above, below, titles: list) -> list:
+def _state(b, mark, off: int, vis: int, n: int, room: int) -> str:
+    """Right part of a box's top border: filter, detail search, position. Too long for
+    the room: the counts without the typed text (the footer shows it while typing),
+    still too long: nothing."""
+    full, short = [], []
+    if b.filt:
+        count = f"{len(b.view)} of {b.total()}"
+        full.append(f"/ {b.filt}  {count}")
+        short.append(count)
+    if b.find.strip():
+        at = [f[0] for f in b.found].index(mark) + 1 if mark is not None else "-"
+        count = f"{at}/{len(b.found)}" if b.found else "no match"
+        full.append(f"/ {b.find}  {count}")
+        short.append(count)
+    if n > vis > 0:
+        pos = f"{off + 1}-{min(off + vis, n)}/{n}"
+        full.append(pos)
+        short.append(pos)
+    for parts in (full, short):
+        s = "  ".join(parts)
+        if s and cols(s) + 2 <= room:
+            return s
+    return ""
+
+
+def _border(width: int, above, below, titles: list, rights: list = ()) -> list:
     """Line between rows. above / below: bar x positions or None.
-    titles: (x, parts, room) written after the corner at x."""
+    titles: (x, parts, room) written after the corner at x.
+    rights: (x_end, text, room) flush right before the corner at x_end (dim)."""
     a, b = set(above or ()), set(below or ())
     cells = []
     for x in range(width):
@@ -719,6 +832,18 @@ def _border(width: int, above, below, titles: list) -> list:
                     cells[pos + k] = ["", style]
                 pos += w
                 left -= w
+    for x_end, text, room in rights:
+        s = " " + text + " " if cols(text) + 2 <= room else ""
+        pos = x_end - 1 - cols(s)
+        for ch in s:
+            w = _cw(ch)
+            if w == 0 or pos < 1 or pos + w > width - 1:
+                pos += w
+                continue
+            cells[pos] = [ch, "dim"]
+            for k in range(1, w):
+                cells[pos + k] = ["", "dim"]
+            pos += w
     out = []
     for ch, style in cells:
         if out and out[-1][1] == style:
@@ -803,8 +928,8 @@ def _grid(boxes: list, ui, width: int, room: int, mask: bool, tsfmt, pref) -> tu
     lines, infos, above = [], [], None
     for row, hr in zip(rows, hs):
         xs = _bars(row)
-        titles, cells = [], []
-        for (b, cw), x in zip(row, xs):
+        titles, rights, cells = [], [], []
+        for (b, cw), x, x_end in zip(row, xs, xs[1:]):
             inner = max(0, cw - 2)
             head, body = b.content(inner, mask, tsfmt)
             vis = max(0, hr - len(head))
@@ -818,17 +943,13 @@ def _grid(boxes: list, ui, width: int, room: int, mask: bool, tsfmt, pref) -> tu
             infos.append(BoxInfo(b.key, len(body), vis, sel, off,
                                  ids[sel] if ids and b.cursor else None, b.cursor,
                                  b.filterable, b.ip_at(sel), b.pick_at(sel), mark))
-            suffix = ""
-            if b.filt:
-                suffix = f"  / {b.filt}  {len(b.view)} of {b.total()}"
-            if b.find.strip():
-                at = [f[0] for f in b.found].index(mark) + 1 if mark is not None else "-"
-                suffix += f"  / {b.find}  " + (f"{at}/{len(b.found)}" if b.found
-                                                else "no match")
-            if len(body) > vis > 0:
-                suffix += f"  {off + 1}-{min(off + vis, len(body))}/{len(body)}"
             on = b.key == focus
-            titles.append((x, _title(b, on and b.cursor, mask, suffix), max(0, cw - 3)))
+            left = _title(b, on and b.cursor, mask)
+            titles.append((x, left, max(0, cw - 3)))
+            room = cw - 3 - _len(left) - 1           # flush right, never over the title
+            state = _state(b, mark, off, vis, len(body), room)
+            if state:
+                rights.append((x_end, state, room))
             now = {n for p, s, e in b.found if p == mark for n in range(s, e)}
             lit = {n for _, s, e in b.found for n in range(s, e)}
             shown_body = [_hi(line) if on and b.cursor and off + i == sel
@@ -837,7 +958,7 @@ def _grid(boxes: list, ui, width: int, room: int, mask: bool, tsfmt, pref) -> tu
             hi = {len(head) + sel - off} if on and b.cursor else {
                 len(head) + n - off for n in now}
             cells.append((cw, (head + shown_body)[:hr], hi))
-        lines.append(_border(width, above, xs, titles))
+        lines.append(_border(width, above, xs, titles, rights))
         for i in range(hr):
             parts = [(BV, "dim")]
             for cw, content, hi in cells:
@@ -861,9 +982,11 @@ def _hi(line: list) -> list:
 # --- layout ---------------------------------------------------------------
 
 def layout(screens, view: list, feed: list, ui, width: int, height: int,
-           now: float | None = None, tsfmt=_ts, alerts=()) -> Frame:
+           now: float | None = None, tsfmt=_ts, alerts=(), ref: float | None = None,
+           stampfmt=_stamp) -> Frame:
     """Frame for the current screen: at most height lines of at most width cells.
-    alerts: core/alerts.py active() (the alert bar)."""
+    alerts: core/alerts.py active() (the alert bar). ref: time the ages count from
+    (default now; paused: the pause moment). No ref and no now: clock times."""
     if width <= 0 or height <= 0:
         return Frame([], ())
     mask = ui.mask
@@ -881,11 +1004,14 @@ def layout(screens, view: list, feed: list, ui, width: int, height: int,
     room -= len(footer)
     boxes = _boxes(scr, mods, feed)
     filters = getattr(ui, "filters", {})
+    ref = now if ref is None else ref
     for b in boxes:
+        b.ref, b.tsfmt, b.stampfmt = ref, tsfmt, stampfmt
         if b.filterable:
             b.filt = filters.get(b.key, "")
     over = _overlay(boxes, ui, mask, tsfmt)
     if over is not None:
+        over.ref, over.tsfmt, over.stampfmt = ref, tsfmt, stampfmt
         boxes = [over]
     grid, infos, focus = _grid(boxes, ui, width, room, mask, tsfmt,
                                getattr(scr, "focus", None))
@@ -905,7 +1031,8 @@ def setup(stdscr) -> None:
         pass
     plain = curses.A_NORMAL
     _ATTR.update(plain=plain, title=curses.A_BOLD, dim=curses.A_DIM, off=curses.A_DIM,
-                 focus=curses.A_REVERSE | curses.A_BOLD)
+                 focus=curses.A_REVERSE | curses.A_BOLD,
+                 head=curses.A_BOLD | curses.A_UNDERLINE)
     colors = {"ok": curses.COLOR_GREEN, "info": curses.COLOR_CYAN,
               "warn": curses.COLOR_YELLOW, "crit": curses.COLOR_RED,
               "unknown": curses.COLOR_MAGENTA,
@@ -962,10 +1089,10 @@ def draw_top(stdscr, screens, ui, now: float) -> None:
 
 
 def draw(stdscr, screens, view: list, feed: list, ui, now: float | None = None,
-         alerts=()) -> Frame:
+         alerts=(), ref: float | None = None) -> Frame:
     h, w = stdscr.getmaxyx()
     # w - 1: writing the last cell of a line can raise in curses.
-    frame = layout(screens, view, feed, ui, w - 1, h, now, alerts=alerts)
+    frame = layout(screens, view, feed, ui, w - 1, h, now, alerts=alerts, ref=ref)
     stdscr.erase()
     for y, line in enumerate(frame.lines):
         _paint(stdscr, y, line)

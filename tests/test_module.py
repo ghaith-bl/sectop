@@ -117,6 +117,26 @@ class TestValidate(unittest.TestCase):
             change(s["panels"][1])
             self.assertInvalid(s)
 
+    def test_column_types(self):
+        s = snap()
+        p = s["panels"][1]
+        p["types"] = ["text"] * len(p["columns"])
+        self.assertEqual(validate(s)["panels"][1]["types"], p["types"])
+        self.assertNotIn("types", validate(snap())["panels"][1])    # no hint: not added
+        p = {"id": "t", "title": "t", "type": "table", "columns": ["when", "n"],
+             "types": ["age", "num"],
+             "rows": [{"cells": ["1792410745.5", "3"]}, {"cells": ["-", "4"]},
+                      {"cells": ["", "5"]}, {"cells": ["0", "6"]}]}
+        s = snap()
+        s["panels"] = [p]
+        self.assertEqual(validate(s)["panels"][0]["types"], ["age", "num"])
+        for bad in (["age"], ["age", "date"], "age num", ["age", 1]):
+            s["panels"][0] = {**p, "types": bad}
+            self.assertInvalid(s)
+        for cell in ("12:00:00", "-1", "nan", "inf", "x"):        # age: epoch seconds or -
+            s["panels"][0] = {**p, "rows": [{"cells": [cell, "1"]}]}
+            self.assertInvalid(s)
+
     def test_spark_errors(self):
         for vals in (["1"], [True], [None]):
             s = snap()

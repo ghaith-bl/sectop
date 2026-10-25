@@ -141,13 +141,14 @@ class Reader:
 
 
 def source(reader: Reader, ui: UI, frozen, now: float):
-    """What to draw: live data, or the copy taken when pause started.
-    Reading goes on while paused. -> (view, feed, alerts, frozen)."""
+    """What to draw: live data, or the copy taken when pause started (with that
+    moment, so ages do not move while paused). Reading goes on while paused.
+    -> (view, feed, alerts, frozen)."""
     if not ui.paused:
         view, feed, alerts = reader.current(now)
         return view, feed, alerts, None
     if frozen is None:
-        frozen = reader.current(now)
+        frozen = (*reader.current(now), now)
     return frozen[0], frozen[1], frozen[2], frozen
 
 
@@ -176,7 +177,8 @@ def _ui(stdscr, reader: Reader, ui: UI) -> None:
             dirty = True
         if dirty:
             view, feed, alerts, frozen = source(reader, ui, frozen, now)
-            ui.update(render.draw(stdscr, SCREENS, view, feed, ui, now, alerts))
+            ref = frozen[3] if frozen else now          # ages: paused -> the pause moment
+            ui.update(render.draw(stdscr, SCREENS, view, feed, ui, now, alerts, ref))
             dirty, shown = False, int(now)
         elif int(now) != shown:
             render.draw_top(stdscr, SCREENS, ui, now)

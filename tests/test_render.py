@@ -2,7 +2,9 @@ import curses
 import unittest
 
 from core import render
-from core.render import BH, BV, CROSS, SPARK, TD, TU, cols, fit, layout, pad
+import re
+
+from core.render import BH, BV, CROSS, RT, SPARK, TD, TR, TU, cols, fit, layout, pad
 from core.screens import Screen
 from core.ui import UI
 
@@ -38,11 +40,11 @@ def text(line):
     return "".join(t for t, _ in line)
 
 
-def frame(view=None, feed=(), ui=None, width=100, height=40, now=None, alerts=()):
+def frame(view=None, feed=(), ui=None, width=100, height=40, now=None, alerts=(), ref=None):
     view = [mod()] if view is None else view
     ui = ui or UI(len(SCR))
     return layout(SCR, view, list(feed), ui, width, height, now=now, tsfmt=lambda ts: "12:00:00",
-                  alerts=alerts)
+                  alerts=alerts, ref=ref, stampfmt=lambda ts: "2026-10-25 12:00:00")
 
 
 def alert(key, sev, title, count=1, state="open", noise=None):
@@ -57,6 +59,13 @@ def lay(*a, **kw):
 
 def find(lines, needle):
     return [text(line) for line in lines if needle in text(line)]
+
+
+def border(lines, title, state):
+    """A top border with title on the left and state flush right: one dash, then the
+    box's corner or junction."""
+    pat = re.escape(title) + ".*" + re.escape(f" {state} ") + f"{BH}[{TR}{RT}{TD}{TU}{CROSS}]"
+    return [text(line) for line in lines if re.search(pat, text(line))]
 
 
 def part(lines, needle):
@@ -186,10 +195,11 @@ class TestTop(unittest.TestCase):
 class TestBoxes(unittest.TestCase):
     def test_content(self):
         lines = lay()
-        self.assertTrue(find(lines, f"{BV} mode      enforce"))
-        self.assertTrue(find(lines, f"{BV} rollback  -"))
-        self.assertTrue(find(lines, f"{BV} firefox  10.2.0.1"))
-        self.assertTrue(find(lines, f"{BV} proc     dst"))         # header, masked widths
+        self.assertTrue(find(lines, f"{BV}    mode      enforce"))  # glyph column: ok = blank
+        self.assertTrue(find(lines, f"{BV} !  rollback  -"))         # warn
+        self.assertTrue(find(lines, f"{BV}    firefox  10.2.0.1"))
+        self.assertTrue(find(lines, f"{BV} !! x        149.112.x.x"))   # crit
+        self.assertTrue(find(lines, f"{BV}    proc     dst"))       # header, masked widths
 
     def test_styles(self):
         lines = [line for line in lay() if text(line).startswith(BV)]
@@ -209,7 +219,7 @@ class TestBoxes(unittest.TestCase):
 
     def test_filter_rows(self):
         f = self.filtered("fire")
-        self.assertTrue(find(f.lines, "[Connections]  / fire  1 of 2 "))
+        self.assertTrue(border(f.lines, "[Connections]", "/ fire  1 of 2"))   # state right
         self.assertTrue(find(f.lines, "firefox  10.2.0.1"))
         self.assertFalse(find(f.lines, "149.112"))
         self.assertEqual({b.key: b for b in f.boxes}["firewall/conns"].lines, 1)
@@ -232,7 +242,7 @@ class TestBoxes(unittest.TestCase):
         f = frame(feed=[ev(1), ev(2, msg="other")],
                   ui=UI(2, filters={"one/events": "n1"}, typing="n1"))
         self.assertEqual(len(find(f.lines, "HFW-OUT-LEAK")), 1)
-        self.assertTrue(find(f.lines, " events  2   / n1  1 of 2 "))
+        self.assertTrue(border(f.lines, " events  2 ", "/ n1  1 of 2"))
         self.assertTrue(text(f.lines[-1]).startswith(" / n1_  enter apply  esc cancel"))
         self.assertTrue(text(frame().lines[-1]).startswith(" 1-2 screen"))
         info = {b.key: b for b in f.boxes}
@@ -353,7 +363,7 @@ class TestBoxes(unittest.TestCase):
     def test_pack_side_by_side(self):
         lines = lay(width=120)
         top = lines[3]
-        self.assertTrue(text(top).startswith("\u250c\u2500 hostfw "))
+        self.assertTrue(text(top).startswith("\u256d\u2500 hostfw "))   # rounded corner
         self.assertIn("[Connections]", text(top))                  # same row, focused
         self.assertNotIn("out_leak", text(top))                    # spark: own row
         self.assertTrue(find(lines, " out_leak / tick "))
@@ -377,21 +387,22 @@ class TestBoxes(unittest.TestCase):
         self.assertEqual(render.shrink([9, 9], [3, 3], 14), [7, 7])                # ties share
 
     def test_tables_shrink_side_by_side(self):
-        # natural: audit 8+29+12+4 = 53, conns 15+11+2 = 28 -> 85 cells; screen 70
-        f = frame([self.wide_tables()], width=70, height=20)
+        # natural: audit 3+8+29+12+4 = 56, conns 3+15+11+2 = 31 (3 = severity column)
+        # -> 91 cells; screen 76
+        f = frame([self.wide_tables()], width=76, height=20)
         top = next(text(line) for line in f.lines if "audit" in text(line))
         self.assertIn(" conns ", top)                               # same row
-        self.assertTrue(find(f.lines, f"{BV} peer         proc "))
+        self.assertTrue(find(f.lines, f"{BV}    peer         proc "))
         [row] = find(f.lines, "12:00:00")[:1]
         self.assertIn("~", row)                                     # widest column cut
         self.assertIn("10.0.0.1:443", row)                          # others kept whole
         self.assertIn("systemd-resolve", row)
         for line in f.lines:
-            self.assertLessEqual(cols(text(line)), 70)
+            self.assertLessEqual(cols(text(line)), 76)
 
     def test_tables_stack_below_least(self):
         f = frame([self.wide_tables()], width=50, height=20)
-        tops = [text(line) for line in f.lines if text(line)[:1] in "\u250c\u251c"]
+        tops = [text(line) for line in f.lines if text(line)[:1] in "\u256d\u251c"]
         self.assertEqual(len(tops), 3)                              # audit, conns, events rows
         top = next(text(line) for line in f.lines if "audit" in text(line))
         self.assertNotIn("conns", top)                              # conns on its own row
@@ -426,7 +437,7 @@ class TestBoxes(unittest.TestCase):
 
     def test_narrow_stacks(self):
         lines = lay(width=30)
-        tops = [text(line) for line in lines if text(line)[:1] in "\u250c\u251c"]
+        tops = [text(line) for line in lines if text(line)[:1] in "\u256d\u251c"]
         self.assertEqual(len(tops), 4)                             # 4 rows: kv, table, spark, events
         self.assertNotIn(TD, "".join(tops))                        # no box side by side
 
@@ -434,7 +445,7 @@ class TestBoxes(unittest.TestCase):
         lines = lay(width=120)
         seps = [text(line) for line in lines if text(line).startswith("\u251c")]
         self.assertIn(TU, seps[0])                                 # kv | table row ends above
-        self.assertEqual(text(lines[-2])[0], "\u2514")              # bottom border
+        self.assertEqual(text(lines[-2])[0], "\u2570")              # bottom border, rounded
         self.assertTrue(set(text(lines[-2])[1:-1]) <= {BH, TU})
 
     def test_height_grow_events(self):
@@ -457,7 +468,7 @@ class TestBoxes(unittest.TestCase):
         self.assertEqual(info["firewall/conns"].lines, 30)
         self.assertLess(info["firewall/conns"].page, 30)
         page = info["firewall/conns"].page
-        self.assertTrue(find(f.lines, f"[Connections]  1-{page}/30 "))
+        self.assertTrue(border(f.lines, "[Connections]", f"1-{page}/30"))
 
     def rows30(self):
         m = mod()
@@ -474,7 +485,7 @@ class TestBoxes(unittest.TestCase):
         b = {b.key: b for b in f.boxes}["firewall/conns"]
         self.assertEqual((b.sel, b.off), (20, 20 - page + 1))
         self.assertTrue(b.ident.startswith("p20 ") and b.ident.endswith("10.0.0.1"))
-        self.assertTrue(find(f.lines, f"{BV} proc  dst"))          # header stays
+        self.assertTrue(find(f.lines, f"{BV}    proc  dst"))       # header stays
         self.assertFalse(find(f.lines, f"p{20 - page} "))
         self.assertTrue(find(f.lines, "p20 "))
         ui = UI(2, sel={"firewall/conns": 999})                     # clamped
@@ -490,7 +501,8 @@ class TestBoxes(unittest.TestCase):
         lines = lay(ui=ui)
         [row] = [line for line in lines if "149.112" in text(line)]
         i = row.index(("x        149.112.x.x", render.SEL + "crit"))
-        self.assertEqual(row[i - 1][1], render.SEL + "plain")             # pad before
+        self.assertEqual(row[i - 1], ("!! ", render.SEL + "crit"))        # glyph, selected too
+        self.assertEqual(row[i - 2][1], render.SEL + "plain")             # pad before
         self.assertEqual(row[i + 1][1], render.SEL + "plain")             # fill after
         self.assertEqual(row[i + 2], (BV, "dim"))
         [kv] = [line for line in lines if "enforce" in text(line) and "mode" in text(line)]
@@ -558,7 +570,7 @@ class TestFeedAndScreens(unittest.TestCase):
         self.assertTrue(find(lines, " events  1 "))
         got = find(lines, "HFW-OUT-LEAK")
         self.assertEqual(len(got), 1)
-        self.assertIn("12:00:00 CRIT firewall HFW-OUT-LEAK dst 8.8.x.x n2", got[0])
+        self.assertIn(f"{BV} !! 12:00:00  firewall HFW-OUT-LEAK dst 8.8.x.x n2", got[0])
 
     def test_no_events(self):
         lines = lay()
@@ -626,7 +638,8 @@ class TestFeedAndScreens(unittest.TestCase):
                          [" last    3 pkt", " min     0 pkt", " max     3 pkt", " points  4",
                           " values  0 1 2 3"])
         self.assertEqual(body("one/events", 0, [ev()])[:5],
-                         [" time      12:00:00", " severity  crit", " source    firewall",
+                         [" time      2026-10-25 12:00:00", " severity  crit",
+                          " source    firewall",
                           " code      HFW-OUT-LEAK", " message   dst 8.8.8.8 n0"])
         self.assertEqual(body("nope")[0].strip(), "line gone")
 
@@ -876,6 +889,106 @@ class TestDetailLoop(unittest.TestCase):
         self.ui.focus[0] = "firewall/conns"
         self.press("w")
         self.assertEqual((self.ui.detail, self.ui.find), ("firewall/conns", "1.2.3.54"))
+
+
+class TestLook(unittest.TestCase):
+    """Look (docs/architecture.md, 2026-10-20): severity glyph column, header bold +
+    underline, numbers / ages right, ages from a reference time, state right in the
+    border, rounded corners. Colors as before (README.md, Screen legend)."""
+
+    NOW = 1792410745.0
+
+    def table(self, types=None, rows=None, title="T"):
+        p = {"id": "t", "title": title, "type": "table", "sev": "ok", "columns": ["name", "n"],
+             "rows": rows or [{"cells": ["a", "5"], "sev": "ok"},
+                              {"cells": ["bb", "10"], "sev": "warn"},
+                              {"cells": ["c", "7"], "sev": "info", "tone": "blue"},
+                              {"cells": ["d", "1"], "sev": "crit"}]}
+        if types:
+            p["types"] = types
+        return mod(panels=[p])
+
+    def body(self, f):
+        return [text(line)[1:].rstrip(BV).rstrip() for line in f.lines
+                if text(line).startswith(BV)]
+
+    def test_glyph_per_severity_colors_as_before(self):
+        f = frame([self.table()], ui=UI(2, focus={0: "one/events"}))    # no row selected
+        row = {name: next(line for line in f.lines if f" {name} " in text(line)[4:8])
+               for name in ("a", "bb", "c", "d")}
+        lines = {"   ": row["a"], "!  ": row["bb"], "i  ": row["c"], "!! ": row["d"]}
+        self.assertEqual(self.body(f)[1:5], ["    a     5", " !  bb    10", " i  c     7",
+                                             " !! d     1"])
+        for glyph, sev, row_style in (("!  ", "warn", "warn"), ("i  ", "info", "blue"),
+                                      ("!! ", "crit", "crit")):
+            line = lines[glyph]
+            self.assertEqual(line[1], (" ", "plain"))
+            self.assertEqual(line[2], (glyph, sev))              # glyph: severity color
+            self.assertEqual(line[3][1], row_style)              # row: same style as before
+        self.assertEqual(lines["   "][2], ("   ", "plain"))      # ok: blank, no color
+
+    def test_header_bold_underline_labels_only(self):
+        f = frame([self.table(["text", "num"])])
+        [head] = [line for line in f.lines if "name" in text(line) and text(line).startswith(BV)]
+        self.assertIn(("name", render.HEAD), head)
+        self.assertIn(("n", render.HEAD), head)
+        self.assertFalse([t for t, st in head if st == render.HEAD and not t.strip()])
+
+    def test_numbers_right(self):
+        f = frame([self.table(["text", "num"])])
+        self.assertEqual(self.body(f)[:5], ["    name   n", "    a      5", " !  bb    10",
+                                            " i  c      7", " !! d      1"])
+
+    def ages(self, now=None, ref=None):
+        rows = [{"cells": c, "sev": "ok"} for c in (
+            ["x", str(self.NOW - 12)], ["y", str(self.NOW - 300)], ["z", "-"],
+            ["v", str(self.NOW - 3 * 3600)], ["w", str(self.NOW - 3 * 86400)],
+            ["u", str(self.NOW + 9)])]                                  # clock skew: not negative
+        return frame([self.table(["text", "age"], rows)], now=now, ref=ref)
+
+    def test_age_column(self):
+        self.assertEqual([b[-4:].strip() for b in self.body(self.ages(self.NOW))[1:7]],
+                         ["12s", "5m", "-", "3h", "3d", "0s"])
+        self.assertTrue(self.body(self.ages())[1].endswith("12:00:00"))   # no time: clock
+
+    def test_ref_freezes_ages(self):
+        f = self.ages(now=self.NOW + 100, ref=self.NOW)             # paused 100 s ago
+        self.assertEqual(self.body(f)[1][-4:].strip(), "12s")
+
+    def test_age_detail_and_filter(self):
+        rows = [{"cells": ["x", str(self.NOW - 12)], "sev": "ok"}]
+        ui = UI(2, detail="firewall/t", sel={"firewall/t": 0})
+        f = frame([self.table(["text", "age"], rows)], ui=ui, now=self.NOW)
+        self.assertIn(" n         2026-10-25 12:00:00  (12s ago)", self.body(f))
+        ui = UI(2, filters={"firewall/t": "2026-10-25"})            # full time is searched
+        f = frame([self.table(["text", "age"], rows)], ui=ui, now=self.NOW)
+        self.assertEqual({b.key: b for b in f.boxes}["firewall/t"].lines, 1)
+
+    def test_anchor_stable_while_ages_move(self):
+        rows = [{"cells": [f"p{i}", str(self.NOW - i)], "sev": "ok"} for i in range(30)]
+        m = self.table(["text", "age"], rows)
+        ui = UI(2, sel={"firewall/t": 5})
+        ui.update(frame([m], ui=ui, now=self.NOW))
+        ident = ui.anchor["firewall/t"]
+        m["panels"][0]["rows"][:0] = [{"cells": ["new", str(self.NOW)], "sev": "ok"}]
+        b = {b.key: b for b in frame([m], ui=ui, now=self.NOW + 7).boxes}["firewall/t"]
+        self.assertEqual((b.sel, b.ident), (6, ident))            # same row, ages moved
+        self.assertEqual(ident, f"p5  {self.NOW - 5}")            # raw cells, not the text
+
+    def test_events_glyph_and_age(self):
+        f = frame(feed=[ev(0, sev="warn")], now=1760870792.0)
+        [line] = find(f.lines, "HFW-OUT-LEAK")
+        self.assertIn(f"{BV} !   12s  firewall HFW-OUT-LEAK dst 8.8.x.x n0", line)
+
+    def test_state_right_never_over_title(self):
+        title = "a long title that takes the room"
+        ui = UI(2, filters={"firewall/t": "x" * 50})
+        f = frame([self.table(title=title)], ui=ui, width=60)
+        [top] = find(f.lines, title)
+        self.assertNotIn("xxxx", top)                            # no room: typed text left out
+        self.assertTrue(border(f.lines, title, "0 of 4"))        # the counts stay
+        f = frame([self.table(title="T")], ui=UI(2, filters={"firewall/t": "bb"}), width=60)
+        self.assertTrue(border(f.lines, "[T]", "/ bb  1 of 4"))
 
 
 if __name__ == "__main__":

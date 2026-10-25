@@ -179,10 +179,11 @@ class TestSource(unittest.TestCase):
         self.assertEqual((view[0]["summary"], len(feed), alerts, frozen), ("one", 1, [], None))
         ui.paused = True
         view, feed, alerts, frozen = app.source(r, ui, frozen, NOW)
+        self.assertEqual(frozen[3], NOW)                     # ages count from the pause
         disk.set(doc(summary="two", n_feed=2))
         r.poll()                                             # still reads while paused
-        view, feed, alerts, frozen = app.source(r, ui, frozen, NOW)
-        self.assertEqual((view[0]["summary"], len(feed)), ("one", 1))
+        view, feed, alerts, frozen = app.source(r, ui, frozen, NOW + 30)
+        self.assertEqual((view[0]["summary"], len(feed), frozen[3]), ("one", 1, NOW))
         ui.paused = False
         view, feed, alerts, frozen = app.source(r, ui, frozen, NOW)
         self.assertEqual((view[0]["summary"], len(feed), frozen), ("two", 2, None))

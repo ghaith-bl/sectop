@@ -385,7 +385,11 @@ Stop / restart a service, kill a process. Only after the privilege split:
 
 ## Look (2026-10-20)
 
-Modern, clear tables. Phase 4 step 2, every screen.
+Modern, clear tables. Phase 4 step 2, every screen. Built 2026-10-25, decisions: glyphs
+ASCII (`!!` `!` `i`, `~` noise for the logs box), same width, any font; colors stay as on
+the firewall screen (row color = severity or `tone`, glyph in the severity color), so
+"one accent" = reverse video for focus + selection (as before); ages from now, frozen
+while paused; table column hint `types` (text / num / age) instead of `align`.
 
 - Boxes: rounded corners (U+256D U+256E U+2570 U+256F), title left with row count,
   filter / follow state right.
@@ -411,7 +415,7 @@ Best practice decides (Red Hat for the host). Fixtures from my host first
      own); audit events (`core/audit.py`: by `_AUDIT_ID`, EXECVE / USER_CMD), fixtures
      2026-10-20 in tests/fixtures/security/. CPU of sectop.service after install: not
      measured yet.
-  2. Look
+  2. Look: done 2026-10-25 (see Look)
   3. commands box + watch.toml
   4. auth box
   5. kernel box

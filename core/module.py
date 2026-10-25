@@ -25,6 +25,7 @@ SEV_RANK = {"ok": 0, "info": 1, "warn": 2, "crit": 3}
 PANEL_TYPES = ("kv", "table", "spark")
 WIDTHS = ("auto", "full")                # panel layout hint: full = a grid row of its own
 TONES = ("plain", "red", "blue", "yellow", "green")   # optional color hint, not severity
+COL_TYPES = ("text", "num", "age")       # table column hint: num / age right; age = epoch s
 
 MAX_STR = 512
 MAX_PANELS = 8
@@ -181,7 +182,29 @@ def _table(p: dict, w: str) -> dict:
         if "detail" in r:
             row["detail"] = _detail(r, wr)
         rows.append(row)
-    return {"columns": [truncate(c, MAX_STR) for c in cols], "rows": rows}
+    out = {"columns": [truncate(c, MAX_STR) for c in cols], "rows": rows}
+    if "types" in p:
+        types = _list(p, "types", w)
+        if len(types) != len(cols) or not all(t in COL_TYPES for t in types):
+            raise InvalidSnapshot(f"{w}.types: {len(cols)} of {', '.join(COL_TYPES)} required")
+        for i, row in enumerate(rows):
+            for j, t in enumerate(types):
+                if t == "age" and not _epoch(row["cells"][j]):
+                    raise InvalidSnapshot(f"{w}.rows[{i}].cells[{j}]: epoch seconds or - "
+                                          "required (age column)")
+        out["types"] = list(types)
+    return out
+
+
+def _epoch(cell: str) -> bool:
+    """Age cell: epoch seconds as text, or - / empty for none."""
+    if cell in ("", "-"):
+        return True
+    try:
+        v = float(cell)
+    except ValueError:
+        return False
+    return math.isfinite(v) and v >= 0
 
 
 def _detail(r: dict, w: str) -> list:
