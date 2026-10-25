@@ -628,6 +628,42 @@ class TestFeedAndScreens(unittest.TestCase):
         self.assertTrue(find(f.lines, " detail: Connections   Esc close "))   # no note: mask off
         self.assertTrue(find(f.lines, "149.112.112.11"))
 
+    def test_detail_secrets(self):
+        """Rows: the module masks secrets. Detail: real IPs, secrets masked while mask is
+        on; m (mask off) shows the raw argv."""
+        m = mod()
+        argv = "mysql --password hunter2 -h 149.112.112.11"
+        m["panels"][1]["rows"][0]["detail"] = [{"k": "argv", "v": argv}]
+
+        def body(mask):
+            f = frame([m], ui=UI(2, detail="firewall/conns", mask=mask))
+            return [text(line) for line in f.lines if "argv" in text(line)]
+        [on] = body(True)
+        self.assertIn("mysql --password *** -h 149.112.112.11", on)
+        [off] = body(False)
+        self.assertIn(argv, off)
+
+    def test_cut_column_grows(self):
+        """A column cut at COL_MAX takes free room in its box, the last one first."""
+        self.assertEqual(render.grow([40, 40], [90, 50], 100), [50, 50])
+        self.assertEqual(render.grow([40, 40], [45, 90], 100), [40, 60])
+        self.assertEqual(render.grow([5, 40], [5, 40], 100), [5, 40])        # nothing cut
+        m = mod()
+        long = "x" * 70
+        m["panels"][1]["rows"][0]["cells"] = ["firefox", long]
+        m["panels"][1]["width"] = "full"
+        self.assertTrue(find(lay([m], width=120), long))
+        self.assertTrue(find(lay([m], width=60), "x" * 30 + render.TRUNC))  # no room: cut
+
+    def test_dim_tone(self):
+        m = mod()
+        m["panels"][1]["rows"] = [{"cells": ["sudo -k", "-"], "sev": "ok", "tone": "dim"},
+                                  {"cells": ["sudo -l", "-"], "sev": "warn", "tone": "dim"},
+                                  {"cells": ["id", "-"], "sev": "ok"}]
+        lines = lay([m], ui=UI(2, focus={0: "firewall/mode"}))
+        self.assertEqual([part(lines, c)[1] for c in ("sudo -k", "sudo -l", "id  ")],
+                         ["dim", "bold dim", "plain"])
+
     def test_detail_other_kinds(self):
         def body(key, sel=0, feed=()):
             f = frame(feed=list(feed), ui=UI(2, detail=key, sel={key: sel}))

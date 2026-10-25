@@ -220,6 +220,8 @@ class TestValidate(unittest.TestCase):
         self.assertEqual(out["panels"][0]["items"][0]["tone"], "green")
         self.assertEqual(out["panels"][1]["rows"][0]["tone"], "red")
         self.assertNotIn("tone", out["panels"][0]["items"][1])               # optional
+        s["panels"][1]["rows"][0]["tone"] = "dim"                           # launch rows
+        self.assertEqual(validate(s)["panels"][1]["rows"][0]["tone"], "dim")
         for bad in ("pink", "", 1, None):
             s2 = snap()
             s2["panels"][1]["rows"][0]["tone"] = bad

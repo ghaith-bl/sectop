@@ -1,6 +1,6 @@
 import unittest
 
-from core.sanitize import clean, display, mask_ips, truncate
+from core.sanitize import clean, display, mask_ips, mask_secrets, truncate
 
 # Real hostfw kernel lines (public IPs are public DNS resolvers).
 LEAK = ("HFW-OUT-LEAK: IN= OUT=wlo1 SRC=192.168.8.102 DST=149.112.112.11 LEN=60 "
@@ -92,6 +92,30 @@ class TestMask(unittest.TestCase):
         self.assertEqual(mask_ips(KS), KS)
 
 
+class TestSecrets(unittest.TestCase):
+    def test_flags(self):
+        for flag in ("--password", "--passwd", "--token", "--secret", "--api-key", "--TOKEN"):
+            self.assertEqual(mask_secrets(f"x {flag} s3cr3t y"), f"x {flag} *** y")
+            self.assertEqual(mask_secrets(f"x {flag}=s3cr3t y"), f"x {flag}=*** y")
+        self.assertEqual(mask_secrets("--token-file /etc/t --passwords x"),
+                         "--token-file /etc/t --passwords x")                 # other flags
+
+    def test_url_userinfo(self):
+        self.assertEqual(mask_secrets("git clone https://bob:pa55@host/r.git"),
+                         "git clone https://bob:***@host/r.git")
+        self.assertEqual(mask_secrets("ssh://bob@host https://host:443/x"),
+                         "ssh://bob@host https://host:443/x")                 # no password
+
+    def test_env(self):
+        self.assertEqual(mask_secrets("env DB_PASSWORD=a GH_TOKEN=b AWS_SECRET=c X=d"),
+                         "env DB_PASSWORD=*** GH_TOKEN=*** AWS_SECRET=*** X=d")
+        self.assertEqual(mask_secrets("PASSWORD=a password=b"), "PASSWORD=*** password=b")
+
+    def test_plain_unchanged(self):
+        for s in ("sudo dnf upgrade", "rpm-ostree status", "", "--token"):
+            self.assertEqual(mask_secrets(s), s)
+
+
 class TestDisplay(unittest.TestCase):
     def test_clean_then_mask(self):
         self.assertEqual(display("\x1b]8.8.8.8"), "?]8.8.x.x")
@@ -102,6 +126,15 @@ class TestDisplay(unittest.TestCase):
     def test_mask_before_truncate(self):
         out = display("ip 149.112.112.11", width=12)
         self.assertEqual(out, "ip 149.112.~")
+
+    def test_secrets(self):
+        line = "curl https://me:hunter2@example.org/x --token abc API_TOKEN=xyz 8.8.8.8"
+        self.assertEqual(display(line), "curl https://me:***@example.org/x --token *** "
+                                        "API_TOKEN=*** 8.8.x.x")
+        self.assertEqual(display(line, mask=False), line)                       # m: raw
+        self.assertEqual(display(line, mask=False, secrets=True),
+                         "curl https://me:***@example.org/x --token *** API_TOKEN=*** 8.8.8.8")
+        self.assertEqual(display(line, secrets=False), line.replace("8.8.8.8", "8.8.x.x"))
 
     def test_truncate(self):
         self.assertEqual(truncate("abcdef", 6), "abcdef")

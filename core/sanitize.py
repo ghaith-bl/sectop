@@ -82,6 +82,22 @@ def mask_ips(text: str) -> str:
     return _ADDR.sub(_repl, text)
 
 
+# Secrets in a command line (docs/architecture.md, Security screen, Commands): kept off
+# the screen only; argv is in /proc/<pid>/cmdline, audit and the journal anyway.
+SECRET = "***"
+_FLAG = re.compile(r"(--(?:password|passwd|token|secret|api-key)(?:=|\s+))(\S+)", re.I)
+_URL = re.compile(r"(\b[a-z][a-z0-9+.-]*://[^\s/:@]+:)([^\s/@]+)(@)", re.I)
+_ENV = re.compile(r"(\b[A-Z0-9_]*(?:PASSWORD|PASSWD|TOKEN|SECRET)=)(\S+)")
+
+
+def mask_secrets(text: str) -> str:
+    """Values of --password / --passwd / --token / --secret / --api-key, user:pass@ in
+    URLs, *_PASSWORD= / *_TOKEN= / *_SECRET= -> ***."""
+    text = _FLAG.sub(lambda m: m.group(1) + SECRET, text)
+    text = _URL.sub(lambda m: m.group(1) + SECRET + m.group(3), text)
+    return _ENV.sub(lambda m: m.group(1) + SECRET, text)
+
+
 def truncate(s: str, width: int) -> str:
     if width <= 0:
         return ""
@@ -90,9 +106,14 @@ def truncate(s: str, width: int) -> str:
     return s[: width - 1] + TRUNC
 
 
-def display(text: object, mask: bool = True, width: int | None = None) -> str:
-    """clean -> mask -> truncate. Mask before cut, so no partial public IP is shown."""
+def display(text: object, mask: bool = True, width: int | None = None,
+            secrets: bool | None = None) -> str:
+    """clean -> mask -> truncate. Mask before cut, so no partial public IP is shown.
+    secrets: mask secrets too (default: same as mask; a detail shows real IPs but keeps
+    secrets masked while mask is on)."""
     s = clean(text)
+    if mask if secrets is None else secrets:
+        s = mask_secrets(s)
     if mask:
         s = mask_ips(s)
     if width is not None:

@@ -32,7 +32,8 @@ can decide from what is on screen. Read-only until the privilege split (phase 3)
 - Start screen: `sectop [SCREEN]` (name or number). Switch: keys `1-3`.
 - Alert bar on every screen: problems from all screens, worst first.
 - Events box per screen: raw events of that screen's modules. Firewall: the audit box
-  replaces it.
+  replaces it. Security: none (2026-10-25: the module sends no events, an empty box took
+  room; the logs box comes in step 7).
 
 Keys now: `1-3` screen, `tab` / arrows box, `j/k` / arrows select line, `PgDn/PgUp` page,
 `enter` detail, `/` filter (in a detail: search, `n` `N` next / previous match), `Esc` clear
@@ -130,8 +131,11 @@ Audit records in the journal (host sample 2026-10-20: 2 sudo calls, 195 entries)
   later, the pid may be reused -> wrong parent. `ProtectProc=invisible` stays.
 - `unix_chkpwd` under sudo (2 per password prompt): folded into that sudo row.
 - Launch without a root child (sudo -k / -l, sudoedit, denied sudo, setuid helpers):
-  own row, dim. Nothing hidden.
-- Detail: last 5 distinct full argv, cwd, first / last, ses, pid / ppid, key.
+  own row, dim (tone `dim`). Nothing hidden. Built 2026-10-25: the launch is a row at
+  once, its root command takes it back (no timer: a 5 s wait turned a slow password
+  prompt into a launch without a command). Details: docs/modules/security.md.
+- Detail: last 5 distinct full argv, cwd, first / last, ses, pid / ppid, key; via seen
+  when a group came in more than one way.
 - Secrets: always masked in rows. Detail: masked, `m` shows the raw argv (same key as
   IPs). Masked: values of `--password --passwd --token --secret --api-key`,
   `user:pass@` in URLs, `*_PASSWORD= *_TOKEN= *_SECRET=`. Argv is readable by every user
@@ -416,7 +420,8 @@ Best practice decides (Red Hat for the host). Fixtures from my host first
      2026-10-20 in tests/fixtures/security/. CPU of sectop.service after install: not
      measured yet.
   2. Look: done 2026-10-25 (see Look)
-  3. commands box + watch.toml
+  3. commands box + watch.toml. Commands box done 2026-10-25 (modules/security,
+     docs/modules/security.md). watch.toml: next.
   4. auth box
   5. kernel box
   6. posture module + posture.toml

@@ -24,7 +24,7 @@ CHECK_SEVS = ("info", "warn", "crit")   # a check is a problem that is true now
 SEV_RANK = {"ok": 0, "info": 1, "warn": 2, "crit": 3}
 PANEL_TYPES = ("kv", "table", "spark")
 WIDTHS = ("auto", "full")                # panel layout hint: full = a grid row of its own
-TONES = ("plain", "red", "blue", "yellow", "green")   # optional color hint, not severity
+TONES = ("plain", "red", "blue", "yellow", "green", "dim")   # optional hint, not severity
 COL_TYPES = ("text", "num", "age")       # table column hint: num / age right; age = epoch s
 
 MAX_STR = 512

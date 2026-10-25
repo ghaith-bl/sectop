@@ -116,8 +116,9 @@ Row `filter` optional (str, 1..60 printable ASCII, not blank): filter text for k
 `ip` optional on kv items and table rows: the address of that line (a valid IPv4 / IPv6
 address, stored normalized). Core can look it up on key `w` (whois, see Screen).
 
-`tone` optional on kv items and table rows: `plain`, `red`, `blue`, `yellow`, `green`.
-A color for meaning (a verdict, a healthy state), not a severity. See Screen (color).
+`tone` optional on kv items and table rows: `plain`, `red`, `blue`, `yellow`, `green`,
+`dim`. A color for meaning (a verdict, a healthy state, a less important row), not a
+severity. See Screen (color).
 
 spark (values max 120, numbers):
 
@@ -242,6 +243,8 @@ A condition that is not true any more is left out.
   severity color (WCAG 2.2, 1.4.1: color is not the only means); the row keeps its color
   as before (severity, `tone`). Table header bold + underlined (labels only), 2 spaces
   between columns. Ages count from now; paused: from the pause moment (frozen).
+  Column width: natural, max 40 cells; free room in the box goes to a cut column, the
+  last one first (2026-10-25: full-width commands box, command line cut at 40).
   Events: glyph, age, source + code, message; detail: full local time + age.
 - Focus: focused title `[title]` in reverse. Start: screen `focus`, else first table /
   events box, else first box. Gone -> same rule.
@@ -260,7 +263,8 @@ A condition that is not true any more is left out.
 - `enter`: detail of the selected line in one overlay box: table row = column / cell pairs,
   severity, row `detail`; kv item, spark values, event fields. Long values wrap.
   Real IPs: the detail is opened on purpose, so it is not masked. While mask is on the
-  title says `real IPs shown` (screenshots of the detail show them).
+  title says `real IPs shown` (screenshots of the detail show them). Secrets stay masked
+  while mask is on (see Display safety).
   Opening it pauses; closing resumes (unless paused before).
   Scroll: the line keys (`j` `k` / arrows, `space` `PgDn` / `PgUp`, `g` `G` / `Home` `End`);
   the footer lists them. Help scrolls the same way. 2026-10-22: a detail longer than the
@@ -314,7 +318,8 @@ A condition that is not true any more is left out.
 - Color: severity first. ok plain; info, warn, crit, unknown colored. With a `tone`:
   the tone color replaces ok / info / warn, warn adds bold, crit always stays crit
   (bold red). 256-color terminal: soft tones (xterm 210 red, 111 blue, 222 yellow,
-  114 green), crit 196. Else the 8 basic colors; no color support: plain.
+  114 green), crit 196. Else the 8 basic colors; no color support: plain. Tone `dim`:
+  A_DIM on every terminal.
 - Box lines: Unicode box drawing (U+2500 block, rounded corners U+256D..U+2570), written
   as escapes in the source. Legend of glyphs and colors: README.md, Screen legend.
 
@@ -422,6 +427,12 @@ run(argv: list[str], timeout: float = 1.5) -> Result
   When unsure, mask (a 4-part version string may get masked).
 - Masking is display only. Snapshot data stays unmasked. Exception: the detail overlay
   (see Screen) shows real IPs.
+- Secrets (`mask_secrets`, 2026-10-25, commands box): values of `--password` `--passwd`
+  `--token` `--secret` `--api-key` (`--flag value` / `--flag=value`), the password in
+  `scheme://user:pass@`, values of `*PASSWORD=` `*PASSWD=` `*TOKEN=` `*SECRET=` -> `***`.
+  `display()` masks them while mask is on, the detail too (real IPs, masked secrets).
+  A module masks its own cells when a secret must never show (security: cmd cell).
+  Display only: argv is readable in `/proc/<pid>/cmdline` and stored in audit + journal.
 
 ## Config
 

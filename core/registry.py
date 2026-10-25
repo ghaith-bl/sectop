@@ -21,6 +21,7 @@ from core.module import check_module
 # Import names, in display order. Each is modules/<name>/__init__.py.
 MODULES: tuple[str, ...] = (
     "modules.firewall",
+    "modules.security",
 )
 
 IMPORT_RE = re.compile(r"modules\.([a-z0-9_]+)")

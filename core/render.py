@@ -182,6 +182,19 @@ def wrap(s: str, width: int) -> list:
     return out
 
 
+def grow(widths: list, full: list, room: int) -> list:
+    """Free room goes to columns cut at COL_MAX, the last one first (a full-width box:
+    the command line, not ~ after 40 cells)."""
+    out, left = list(widths), room - sum(widths)
+    for j in reversed(range(len(out))):
+        if left <= 0:
+            break
+        add = min(left, max(0, full[j] - out[j]))
+        out[j] += add
+        left -= add
+    return out
+
+
 def shrink(widths: list, floors: list, room: int) -> list:
     """Column widths that fit room cells: the widest column loses a cell first,
     none below its floor. Cut cells end in TRUNC; detail shows them whole."""
@@ -415,6 +428,7 @@ class _Box:
         self.ref = None                      # age reference (now, or the pause moment)
         self.tsfmt = _ts                     # clock time: an age cell without a reference
         self.stampfmt = _stamp               # full time in a detail
+        self.secrets = True                  # detail: mask secrets (mask on), IPs real
 
     @property
     def filterable(self) -> bool:
@@ -467,9 +481,10 @@ class _Box:
             head = [display(c, mask) for c in d["columns"]]
             rows = [[display(self.cell(c, t), mask) for c, t in zip(r["cells"], types)]
                     for r in self.view]
-            widths = [min(COL_MAX, max(cols(c) for c in col)) for col in zip(head, *rows)]
+            full = [max(cols(c) for c in col) for col in zip(head, *rows)]
+            widths = [min(COL_MAX, w) for w in full]
             floors = [min(w, max(COL_MIN, cols(h))) for w, h in zip(widths, head)]
-            self.prep = (head, rows, widths, floors)
+            self.prep = (head, rows, widths, floors, full)
             gaps = 2 * (len(widths) - 1)
             self.w = max(TABLE_MIN, sum(widths) + gaps)
             self.least = min(self.w, max(TABLE_MIN, sum(floors) + gaps))
@@ -490,9 +505,10 @@ class _Box:
                           (it["v"], _style(it))) for k, it in zip(keys, d["items"])]
             return [], body or dash
         if self.kind == "table":
-            head, rows, widths, floors = self.prep
+            head, rows, widths, floors, full = self.prep
             right = [t != "text" for t in self.types()]
-            widths = shrink(widths, floors, w - GLYPH_W - 2 * (len(widths) - 1))
+            room = w - GLYPH_W - 2 * (len(widths) - 1)
+            widths = grow(shrink(widths, floors, room), full, room)
 
             def cell(c, cw, r):
                 c = fit(c, cw)
@@ -521,7 +537,7 @@ class _Box:
         if self.kind == "feed":
             return [], [_event(e, w, mask, tsfmt, self.ref) for e in self.view] or dash
         if self.kind == "detail":                # opened on purpose: real IPs, no mask
-            lines, owner = _detail_rows(d, w, False)
+            lines, owner = _detail_rows(d, w, False, self.secrets)
             self.found = _found(d, owner, self.find) if self.find.strip() else ()
             return [], lines or dash
         return [], [_line(w, mask, (t, "dim")) for t in d] or dash
@@ -580,7 +596,7 @@ class _Box:
         return len(self.data["rows"] if self.kind == "table" else self.data)
 
 
-def _detail_rows(pairs: list, w: int, mask: bool) -> tuple:
+def _detail_rows(pairs: list, w: int, mask: bool, secrets: bool | None = None) -> tuple:
     """key  value lines, long values wrapped under the value column.
     -> (lines, owner): owner[i] = index of the pair that line i belongs to."""
     keys = [display(k, mask) for k, _ in pairs]
@@ -591,7 +607,7 @@ def _detail_rows(pairs: list, w: int, mask: bool) -> tuple:
             out.append([])
             owner.append(n)
             continue
-        pieces = wrap(display(v, mask), max(1, w - kw - 2))
+        pieces = wrap(display(v, mask, secrets=secrets), max(1, w - kw - 2))
         for j, piece in enumerate(pieces):
             key = pad(k, kw) + "  " if j == 0 else " " * (kw + 2)
             out.append(_line(w, mask, (key, "dim"), (piece, "plain")))
@@ -1012,6 +1028,7 @@ def layout(screens, view: list, feed: list, ui, width: int, height: int,
     over = _overlay(boxes, ui, mask, tsfmt)
     if over is not None:
         over.ref, over.tsfmt, over.stampfmt = ref, tsfmt, stampfmt
+        over.secrets = mask                  # m shows the raw argv, like the IPs
         boxes = [over]
     grid, infos, focus = _grid(boxes, ui, width, room, mask, tsfmt,
                                getattr(scr, "focus", None))

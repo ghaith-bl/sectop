@@ -23,6 +23,8 @@ Status: in progress (phase 3: privilege split, docs/architecture.md).
 
 - firewall: hostfw mode + counters, kernel log (HFW-*), programs, peers (remote IPs),
   WireGuard (docs/modules/firewall.md)
+- security: commands run as root after a login and setuid launches, from the audit
+  records in the journal (docs/modules/security.md). Auth, kernel, posture, logs: phase 4
 
 ## Screen legend
 
@@ -49,15 +51,19 @@ same on every screen:
 | soft red | dropped by the kill switch |
 | soft yellow | blocked by hostfw (enforce) |
 | green | healthy state (table loaded, tunnel up, ...) |
+| dim | setuid launch without a root command (sudo -k, denied sudo, polkit helper) |
 
-Tones (blue, soft red, soft yellow, green) carry a meaning, not a severity: crit stays
-red, warn adds bold. 256-color terminal: soft tones, else the 8 basic colors.
+Tones (blue, soft red, soft yellow, green, dim) carry a meaning, not a severity: crit
+stays red, warn adds bold. 256-color terminal: soft tones, else the 8 basic colors.
 
 - Time in a row: age (`12s` `4m` `2h` `3d`); the detail (enter) shows the full local
   time. Paused: ages stay as they were at the pause.
 - Table header: bold + underlined. Numbers and ages right-aligned.
 - `[title]` in reverse: the focused box. Reverse line: the selected line. Dim: acked or
-  held alerts, keys, hints.
+  held alerts, keys, hints, launch rows (above).
+- Secrets in a command line (`--password` / `--token` / ... values, `user:pass@` in URLs,
+  `*_PASSWORD=` / `*_TOKEN=` / `*_SECRET=`): `***` in rows always, in the detail while
+  mask is on (key m shows them there).
 - Top border right: `/ <filter>  <shown> of <all>`, detail search, `first-last/total`
   when the box is cut.
 
