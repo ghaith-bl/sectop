@@ -14,7 +14,7 @@ can decide from what is on screen. Read-only until the privilege split (phase 3)
     shared sources -> modules -> core -> terminal UI
                                           -> actions (last phase, separate path)
 
-- Shared sources: files (`/proc`, `/sys`), one journal reader (cursor), fixed commands
+- Shared sources: files (`/proc`, `/sys`), one journal follower (core), fixed commands
   via `core.run.run()`.
 - Modules: collect only, return a Snapshot. Never draw, never act.
 - Core: scheduler, validation, alert engine, screens.
@@ -229,6 +229,17 @@ Target: < 1% CPU, < 30 MiB RSS.
 - One journal reader for the whole collector (firewall + security), not one per module.
   Measured 2026-10-20: one `journalctl` run = ~30 ms CPU (user ~7, sys ~25), 3 runs. A
   poll every 2 s = ~1.5% of a core by itself.
+- Decided 2026-10-25: follow, not poll (`core/journal.py`). One long-lived
+  `journalctl -f -o json`, started by core, read in the collector loop without threads
+  (selectors). Host check 2026-10-25 (journal_check.py, systemd 259): idle 0 ms CPU per
+  minute, RSS 21 MiB (journal file maps); an entry is in the pipe ~450 ms after logger
+  (journald + logger, not the reader); a burst of 300 entries complete and in order;
+  follows across `journalctl --rotate`; works under the sectop.service sandbox (user
+  sectop, group systemd-journal). Not in journalctl(1), so checked: `-f --after-cursor=C`
+  replays after C (255 and 259); `-f --after-cursor=C -n 0` replays nothing on 255, after
+  C on 259, so never together; `-f --since=@T` replays all since T (no tail of 10);
+  `-f -n 0` replays nothing; bad cursor: exit 1 "Failed to seek to cursor: Invalid
+  argument". Same check on systemd 255 (Ubuntu, not my host): the same, except -n 0.
 - Hidden screen: only alert-relevant data, longer interval. Heavy detail (process table)
   only while visible.
 - Slow checks on their own interval:
