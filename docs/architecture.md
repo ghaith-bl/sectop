@@ -138,8 +138,9 @@ Audit records in the journal (host sample 2026-10-20: 2 sudo calls, 195 entries)
   own row, dim (tone `dim`). Nothing hidden. Built 2026-10-25: the launch is a row at
   once, its root command takes it back (no timer: a 5 s wait turned a slow password
   prompt into a launch without a command). Details: docs/modules/security.md.
-- Detail: last 5 distinct full argv, cwd, first / last, ses, pid / ppid, key; via seen
-  when a group came in more than one way.
+- Detail: last 5 distinct full argv, parents (chain of root runs seen, e.g.
+  `bash 44494 < su 44491 < sudo pts/0`), cwd, first / last, ses, pid / ppid, key; via
+  seen when a group came in more than one way.
 - Secrets: always masked in rows. Detail: masked, `m` shows the raw argv (same key as
   IPs). Masked: values of `--password --passwd --token --secret --api-key`,
   `user:pass@` in URLs, `*_PASSWORD= *_TOKEN= *_SECRET=`. Argv is readable by every user

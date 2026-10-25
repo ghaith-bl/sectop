@@ -50,17 +50,21 @@ follower is down or dropped lines.
   (fixture lock). Parent not seen (started before sectop): counted only
   (`State.lost_checks`).
 - Failed execve in a PATH search (success=no, no EXECVE): not a run, counted only.
-- Detail: exe, result, denied (`<n> of <rows n>`), argv (last 5 distinct, raw), via seen
-  (when more than one), cwd, first, ses, pid / ppid, key, password checks.
+- Detail: exe, result, denied (`<n> of <rows n>`), argv (last 5 distinct, raw), parents,
+  via seen (when more than one), cwd, first, ses, pid / ppid, key, password checks.
+- parents (newest run of the row): the chain seen in audit, `exe pid < ... < how the top
+  one came in` (its via), e.g. `bash 44494 < su 44491 < sudo pts/0`,
+  `nvidia-modprobe 710 < setuid`. Built when the command runs (pids get reused), max 8
+  parents then `...`. A parent that never ran a root command is not seen: `ppid <n>`.
 - Secrets: cmd cell and grouping always masked (`core/sanitize.py` `mask_secrets`).
   Detail argv raw; the UI masks secrets there while mask is on, `m` shows them.
 - Severity: all ok. No checks yet: watch.toml (warn) is the next step.
 
 ## Limits
 
-Groups 200, pids 4096 (parents), launches 256 / 600 s, USER_CMD 100, argv per group 5,
-uid names 256 (cache, cleared when full). Assembler: core/audit.py (1000 open events,
-2 s timeout).
+Groups 200, pids 4096 (parents), parent chain 8, launches 256 / 600 s, USER_CMD 100, argv
+per group 5, uid names 256 (cache, cleared when full). Assembler: core/audit.py (1000 open
+events, 2 s timeout).
 
 ## Fixtures
 

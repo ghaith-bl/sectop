@@ -94,6 +94,9 @@ class TestCommands(unittest.TestCase):
                          ("/usr/bin/su", "su", "/var/home/null/my-project/sectop", "18",
                           "root_cmds"))
         self.assertNotIn("result", d)
+        self.assertEqual(d["parents"], "sudo pts/0")                           # parent not seen
+        self.assertEqual(got["id"][3]["parents"], "bash 44494 < su 44491 < sudo pts/0")
+        self.assertEqual(got["sudo -k"][3]["parents"], "ppid 30226")
         tones = {r["cells"][4]: r.get("tone") for r in p["rows"]}
         self.assertEqual((tones["sudo -k"], tones["su"]), ("dim", None))     # launch: dim
 
@@ -143,6 +146,7 @@ class TestCommands(unittest.TestCase):
         self.assertEqual(sorted(got), ["/bin/bash ./install.sh", "sudo -u null git log -1"])
         self.assertEqual(got["sudo -u null git log -1"][2:3], ("bash",))
         self.assertEqual(got["sudo -u null git log -1"][3]["password checks"], "1")
+        self.assertEqual(got["sudo -u null git log -1"][3]["parents"], "bash 600 < ppid 599")
         self.assertEqual((r.st.runs, r.st.lost_checks), (2, 2))     # parent not seen: counted
 
     def test_setuid_program_runs_as_root(self):
@@ -162,6 +166,7 @@ class TestCommands(unittest.TestCase):
         self.assertEqual(r.st.runs, 4)
         self.assertEqual([row.get("tone") for row in snap["panels"][0]["rows"]], [None, None])
         self.assertNotIn("result", got["modprobe nvidia"][3])
+        self.assertEqual(got["modprobe nvidia"][3]["parents"], "nvidia-modprobe 710 < setuid")
 
     def test_su_launch_taken_back_by_its_child(self):
         """su forks the root shell: the child (ppid = su) takes the launch back."""
@@ -171,7 +176,25 @@ class TestCommands(unittest.TestCase):
             (801, 800, "0", "/usr/bin/bash", ["-bash"], "root_cmds")), 200.0))
         self.assertEqual(list(got), ["-bash"])
         self.assertEqual(got["-bash"][2], "su")
+        self.assertEqual(got["-bash"][3]["parents"], "su 800 < ppid 799")
         self.assertEqual(r.st.runs, 1)
+
+    def test_parent_chain_limit(self):
+        """At most MAX_HOPS parents, then `...`; a loop of pids ends."""
+        r = Run()
+        n = sec.MAX_HOPS + 3
+        got = rows(r.collect(_events(*[(1000 + i, 999 + i, "0", f"/usr/bin/p{chr(97 + i)}",
+                                        [f"p{chr(97 + i)}"], "root_cmds") for i in range(n)]),
+                             200.0))
+        last = got[f"p{chr(97 + n - 1)}"][3]["parents"].split(" < ")
+        self.assertEqual(len(last), sec.MAX_HOPS + 1)
+        self.assertEqual((last[0], last[-1]), (f"p{chr(97 + n - 2)} {1000 + n - 2}", "..."))
+        r = Run()
+        got = rows(r.collect(_events((2000, 2001, "0", "/usr/bin/a", ["a"], "root_cmds"),
+                                     (2001, 2000, "0", "/usr/bin/b", ["b"], "root_cmds"),
+                                     (2000, 2001, "0", "/usr/bin/a", ["a"], "root_cmds")),
+                             200.0))
+        self.assertEqual(got["a"][3]["parents"], "b 2001 < a 2000 < ppid 2001")   # ends
 
     def test_via_seen(self):
         """Same program, other ways in: one row, the ways in the detail."""

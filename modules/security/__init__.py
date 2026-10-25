@@ -12,7 +12,8 @@ runs as root itself: a root run, via its parent if seen, else `setuid`.
 Via: a root command whose argv equals a sudo USER_CMD (same session, within 5 s) ran
 via `sudo <tty>`; a launch in the same pid (pkexec) or the parent pid (su) is its way
 in; else the exe of a command seen before with the parent pid, else `ppid <n>`. No
-/proc lookup: read seconds later, a pid may belong to another process.
+/proc lookup: read seconds later, a pid may belong to another process. The detail shows
+the parent chain seen the same way: `exe pid < ... < how the top one came in`.
 
 unix_chkpwd (pam_unix helper, 1-2 per password prompt) is never a row: counted on the
 row of its parent (a launch waiting for its command, else the command seen with that
@@ -53,6 +54,7 @@ MAX_PIDS = 4096
 MAX_ARGVS = 5
 MAX_USERCMDS = 100
 MAX_LAUNCHES = 256
+MAX_HOPS = 8                    # parent chain in the detail
 LAUNCH_KEEP = 600.0             # a launch older than this cannot be matched any more
 COLUMNS = ["last", "n", "who>as", "via", "cmd"]
 TYPES = ["age", "num", "text", "text", "text"]
@@ -90,6 +92,7 @@ class Group:
         self.vias = collections.deque(maxlen=MAX_ARGVS)      # distinct, newest first
         self.via = self.cwd = self.ses = self.pid = self.ppid = self.key = ""
         self.result = ""                                     # launches: no root command
+        self.parents = ""                                    # chain of the newest one
         self.denied = 0                                      # launches with a failed USER_CMD
         self.chkpwd = 0
 
@@ -106,7 +109,7 @@ class State:
         self.wall, self.user, self.stamp = wall, user, stamp
         self.asm = audit.Assembler()
         self.groups = collections.OrderedDict()   # key -> Group, least recent first
-        self.pids = collections.OrderedDict()     # pid -> (exe, row key): commands seen
+        self.pids = collections.OrderedDict()     # pid -> (exe, row key, ppid, via): seen
         self.launches = collections.OrderedDict()  # pid -> Launch (setuid process)
         self.usercmds = collections.deque(maxlen=MAX_USERCMDS)
         self.names = {}                           # uid -> name
@@ -124,9 +127,9 @@ class State:
         return self.names[uid]
 
 
-def _remember(st: State, pid: str, exe: str, key: str) -> None:
+def _remember(st: State, pid: str, exe: str, key: str, ppid: str, via: str) -> None:
     st.pids.pop(pid, None)
-    st.pids[pid] = (exe, key)
+    st.pids[pid] = (exe, key, ppid, via)
     while len(st.pids) > MAX_PIDS:
         st.pids.popitem(last=False)
 
@@ -205,6 +208,20 @@ def _via(st: State, ev, argv: list, ts: float, fallback: str) -> tuple:
     return fallback, None
 
 
+def _parents(st: State, ppid: str | None, via: str) -> str:
+    """Parent chain seen in audit: `exe pid < ... < how the top one came in`."""
+    hops, seen = [], set()
+    while ppid in st.pids and ppid not in seen:
+        if len(hops) == MAX_HOPS:
+            via = "..."
+            break
+        seen.add(ppid)
+        exe, _, up, top_via = st.pids[ppid]
+        hops.append(f"{os.path.basename(exe)} {ppid}")
+        ppid, via = up, top_via
+    return " < ".join(hops + [via])
+
+
 def _chkpwd(st: State, ev) -> None:
     """unix_chkpwd: never a row. A password check on the row of its parent."""
     ppid = ev.get("ppid")
@@ -233,12 +250,16 @@ def _root(st: State, ev, ts: float, setuid: bool = False) -> None:
     via, launch = _via(st, ev, argv, ts, fallback)
     st.runs += 1
     checks = _take_back(st, launch) if launch is not None else 0
-    key = _key(st, ev, argv)
+    key, pid, ppid = _key(st, ev, argv), ev.get("pid") or "", ev.get("ppid") or ""
+    parents = _parents(st, ppid, via)
     if launch is not None:                       # later checks under the launcher: here
-        _remember(st, launch.ev.get("pid") or "", launch.ev.get("exe") or "", key)
-    _remember(st, ev.get("pid") or "", exe, key)
+        lpid = launch.ev.get("pid") or ""
+        if lpid in st.pids:
+            lexe, _, lppid, lvia = st.pids[lpid]
+            _remember(st, lpid, lexe, key, lppid, lvia)
+    _remember(st, pid, exe, key, ppid, via)
     g = _group(st, ev, argv, ts)
-    g.via, g.result = via, ""
+    g.via, g.result, g.parents = via, "", parents
     if via in g.vias:
         g.vias.remove(via)
     g.vias.appendleft(via)
@@ -246,10 +267,12 @@ def _root(st: State, ev, ts: float, setuid: bool = False) -> None:
 
 
 def _launch(st: State, ev, ts: float) -> None:
-    pid, key = ev.get("pid") or "", _key(st, ev, ev.argv)
-    _remember(st, pid, ev.get("exe") or "", key)
+    pid, key, ppid = ev.get("pid") or "", _key(st, ev, ev.argv), ev.get("ppid") or ""
+    via = os.path.basename(st.pids[ppid][0]) if ppid in st.pids else f"ppid {ppid or '?'}"
+    parents = _parents(st, ppid, via)
+    _remember(st, pid, ev.get("exe") or "", key, ppid, via)
     g = _group(st, ev, ev.argv, ts)
-    g.via, g.result = "-", "no root command"
+    g.via, g.result, g.parents = "-", "no root command", parents
     st.launches.pop(pid, None)
     st.launches[pid] = Launch(ev, ts, key)
 
@@ -269,6 +292,7 @@ def _row(st: State, key: str, g: Group) -> dict:
         if g.denied > 0:
             detail.append(("denied", f"{g.denied} of {g.n}"))
     detail += [("argv", a) for a in g.argvs]             # raw: the UI masks secrets
+    detail.append(("parents", g.parents or "-"))
     if len(g.vias) > 1:
         detail.append(("via seen", ", ".join(g.vias)))
     detail += [("cwd", g.cwd), ("first", st.stamp(g.first)), ("ses", g.ses),
