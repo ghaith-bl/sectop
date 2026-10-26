@@ -436,7 +436,7 @@ def k_ostree_age(c, cx: Cx) -> Res:
     if err:
         return Res("unknown", err, source="rpm-ostree status --json")
     days = int((cx.now - stamp) // 86400)
-    res = Res("fail" if days > c.max_days else "pass", f"{days} days",
+    res = Res("fail" if days > c.max_days else "pass", f"{days} day{'' if days == 1 else 's'}",
               source="rpm-ostree status --json (once a day)")
     res.lines = [("booted commit", time.strftime("%Y-%m-%d", time.localtime(stamp)))]
     return res

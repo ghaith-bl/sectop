@@ -300,6 +300,7 @@ class TestKinds(unittest.TestCase):
         self.assertEqual(sum(a[1] == "status" for a in h.calls), 1)       # cached
         self.assertEqual(res(c, h, now=BOOTED + 15 * DAY + 10, ostree=cache), ("fail", "15 days"))
         self.assertEqual(sum(a[1] == "status" for a in h.calls), 2)       # a day later: again
+        self.assertEqual(res(c, h, now=BOOTED + DAY + 10, ostree={}), ("pass", "1 day"))
         h.answers["rpm-ostree status"] = Result(1, "", "error: connection refused\n")
         self.assertEqual(res(c, h, ostree={}), ("unknown", "error: connection refused"))
 
