@@ -253,7 +253,10 @@ from, what. Full width, below the kernel box. Newest first. Title:
 ## Program card
 
 Rows carry `progs` (key `c`, docs/architecture.md, Program card): commands (the root
-command's process, else its parent), auth (the pid of the record, sudo alert `_PID`),
+command's process, else its parent, else the program found for its launch or its parent
+before: sudo moves into its own session scope and a root shell stays there, so `sudo su`
+-> bash -> id all get the terminal sudo was typed in, its parent shell still runs;
+2026-10-26, host: install.sh commands had no program), auth (the pid of the record, sudo alert `_PID`),
 kernel (module syscall, AVC pid, blocked load), logs (journal `_SYSTEMD_CGROUP`, audit
 pid). From `/proc/<pid>/cgroup` only when the process started before the record
 (core/proc.py), max 5 per row, newest kept. JOURNAL field `_SYSTEMD_CGROUP` added.

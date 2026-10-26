@@ -147,6 +147,7 @@ class State:
         self.asm = audit.Assembler()
         self.groups = collections.OrderedDict()   # key -> Group, least recent first
         self.pids = collections.OrderedDict()     # pid -> (exe, row key, ppid, via): seen
+        self.pprog = collections.OrderedDict()    # pid -> program found for it (card)
         self.launches = collections.OrderedDict()  # pid -> Launch (setuid process)
         self.usercmds = collections.deque(maxlen=MAX_USERCMDS)
         self.names = {}                           # uid -> name
@@ -184,7 +185,7 @@ def _rate(st: State, ev, argv: list):
     return watch.rate(st.rules, ev.get("exe") or "", argv)
 
 
-def _group(st: State, ev, argv: list, ts: float, rule=None) -> Group:
+def _group(st: State, ev, argv: list, ts: float, rule=None, prog=None) -> Group:
     who, as_ = st.name(ev.get("auid")), st.name(ev.get("euid"))
     exe = ev.get("exe") or (argv[0] if argv else "?")
     key = _key(st, ev, argv, rule)
@@ -205,7 +206,7 @@ def _group(st: State, ev, argv: list, ts: float, rule=None) -> Group:
     if line in g.argvs:
         g.argvs.remove(line)
     g.argvs.appendleft(line)
-    procmod.add(g.progs, _prog(st, ev, ts))
+    procmod.add(g.progs, prog or _prog(st, ev, ts))
     g.cwd, g.ses = ev.cwd or "-", ev.get("ses") or "-"
     g.pid, g.ppid = ev.get("pid") or "-", ev.get("ppid") or "-"
     g.key = ",".join(ev.keys)
@@ -290,6 +291,25 @@ def _chkpwd(st: State, ev) -> None:
         g.chkpwd += 1
 
 
+def _program(st: State, ev, ts: float, launch=None) -> str | None:
+    """Program of a root run or launch (card): its own process or its parent, else the
+    one found for its launch or its parent before (a root shell is in sudo's session
+    scope: `sudo su` -> bash -> id gets the terminal sudo was typed in). Kept per pid
+    for the children."""
+    p = _prog(st, ev, ts)
+    if p is None and launch is not None:
+        p = st.pprog.get(launch.ev.get("pid") or "")
+    if p is None:
+        p = st.pprog.get(ev.get("ppid") or "")
+    pid = ev.get("pid") or ""
+    if p and pid:
+        st.pprog.pop(pid, None)
+        st.pprog[pid] = p
+        while len(st.pprog) > MAX_PIDS:
+            st.pprog.popitem(last=False)
+    return p
+
+
 def _root(st: State, ev, ts: float, setuid: bool = False) -> None:
     """A root run: root_cmds, or a setuid program that is not a launcher."""
     argv = ev.argv
@@ -310,7 +330,7 @@ def _root(st: State, ev, ts: float, setuid: bool = False) -> None:
             lexe, _, lppid, lvia = st.pids[lpid]
             _remember(st, lpid, lexe, key, lppid, lvia)
     _remember(st, pid, exe, key, ppid, via)
-    g = _group(st, ev, argv, ts, rule)
+    g = _group(st, ev, argv, ts, rule, _program(st, ev, ts, launch))
     g.via, g.result, g.parents = via, "", parents
     if via in g.vias:
         g.vias.remove(via)
@@ -324,7 +344,7 @@ def _launch(st: State, ev, ts: float) -> None:
     via = os.path.basename(st.pids[ppid][0]) if ppid in st.pids else f"ppid {ppid or '?'}"
     parents = _parents(st, ppid, via)
     _remember(st, pid, ev.get("exe") or "", key, ppid, via)
-    g = _group(st, ev, ev.argv, ts, rule)
+    g = _group(st, ev, ev.argv, ts, rule, _program(st, ev, ts))
     g.via, g.result, g.parents = "-", "no root command", parents
     st.launches.pop(pid, None)
     st.launches[pid] = Launch(ev, ts, key)

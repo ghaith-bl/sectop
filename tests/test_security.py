@@ -894,6 +894,22 @@ class TestProgs(unittest.TestCase):
                          800.0)
         self.assertEqual([row.get("progs") for row in snap["panels"][3]["rows"]], [None])
 
+    def test_root_shell_gets_the_terminal(self):
+        """sudo su -> bash -> id (fixture sudo): sudo moves into its session scope and the
+        root shell stays there; the program is the one of the shell sudo was typed in
+        (sudo's parent), handed down the chain."""
+        entries = fix("sudo")
+        sudo = next(e for e in entries if e.get("_AUDIT_TYPE_NAME") == "EXECVE"
+                    and '"sudo"' in e["MESSAGE"] and '"su"' in e["MESSAGE"])
+        sid = sudo["_AUDIT_ID"]
+        ppid = next(e["MESSAGE"].split(" ppid=")[1].split()[0] for e in entries
+                    if e.get("_AUDIT_ID") == sid and e.get("_AUDIT_TYPE_NAME") == "SYSCALL")
+        r = Run(prog=lambda pid, ts: "org.gnome.Ptyxis" if pid == ppid else None)
+        _, snap = r, r.collect(entries, end(entries) + 10)
+        got = {row["cells"][4]: row.get("progs") for row in snap["panels"][0]["rows"]}
+        for cmd in ("su", "bash", "id", "tty", "sudo -k"):
+            self.assertEqual(got[cmd], ["org.gnome.Ptyxis"], cmd)
+
     def test_auth_kernel_and_journal(self):
         entries = fix("unlock-fail")
         snap = Run(prog=lambda pid, ts: "gdm").collect(entries, end(entries) + 10)
