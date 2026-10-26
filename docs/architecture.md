@@ -222,7 +222,11 @@ that knows its program: every row of every box of every screen with the same pro
 as a table: select a row, `enter` = its full detail, `Esc` back (core/render.py card,
 docs/module-interface.md, Card). `enter` on a box row stays the detail.
 - Identity = core/proc.py program(): innermost unit / app id of the cgroup (moved from
-  modules/firewall/conns.py). Login / sudo session scopes are not programs.
+  modules/firewall/conns.py). Login / sudo session scopes are not programs: from such a
+  scope the live process tree is walked up (/proc/<pid>/stat ppid, max 8) to the first
+  process outside it, e.g. `sudo ./install.sh` -> systemctl -> the terminal (host
+  2026-10-26: install.sh commands had no program). A parent that ended hands its
+  children to pid 1: the walk stops there, no name.
 - Row `progs`: firewall programs / audit / peers (ss --cgroup); security commands,
   auth, kernel (modules, AVC, blocked loads), logs audit keys: the record's pid, else
   its parent, read from `/proc/<pid>/cgroup` in the same collect, only when

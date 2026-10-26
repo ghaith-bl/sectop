@@ -27,6 +27,7 @@ _RANDOM_RE = re.compile(
 _ESC_RE = re.compile(r"\\x([0-9a-fA-F]{2})")
 NAME_RE = re.compile(r"[\x21-\x7e]{1,64}")        # row "progs" (core/module.py)
 SESSION_RE = re.compile(r"session(-c?\d+)?")
+MAX_HOPS = 8             # parents walked up out of a session scope
 SLACK = 1.0              # btime has whole seconds; journald time is after the record
 MAX_READ = 64 * 1024
 
@@ -97,21 +98,41 @@ class Reader:
                 raise ValueError("no btime")
         return self._btime
 
-    def started(self, pid: str) -> float:
-        """Start of the process, epoch seconds. stat: comm may hold spaces and ')'."""
+    def _stat(self, pid: str) -> list:
+        """Fields after comm (comm may hold spaces and ')'): [state, ppid, ...]."""
         stat = self._read(f"{self.root}/{pid}/stat")
-        rest = stat[stat.rindex(")") + 2:].split()
-        return self.btime() + int(rest[19]) / self.hz      # field 22: starttime
+        return stat[stat.rindex(")") + 2:].split()
+
+    def started(self, pid: str) -> float:
+        """Start of the process, epoch seconds."""
+        return self.btime() + int(self._stat(pid)[19]) / self.hz   # field 22: starttime
+
+    def _cgroup(self, pid: str) -> str:
+        for line in self._read(f"{self.root}/{pid}/cgroup").splitlines():
+            if line.startswith("0::"):
+                return line[3:].strip()
+        return ""
 
     def program(self, pid: str | None, ts: float) -> str | None:
+        """Program of pid. In a login / sudo session scope (sudo, a root shell, a script
+        run with sudo: the scope is no program): the first parent outside it, walking
+        the live process tree up (/proc/<pid>/stat ppid; a running process's parent
+        chain is current: a parent that ended hands its children to pid 1 or a
+        subreaper, never to a stranger). 2026-10-26, host: `sudo ./install.sh` ->
+        systemctl got no program, its parents sat in sudo's session."""
         if not pid or not pid.isdigit() or pid == "0":
             return None
         try:
             if self.started(pid) > ts + SLACK:
                 return None                         # started after the record: reused
-            for line in self._read(f"{self.root}/{pid}/cgroup").splitlines():
-                if line.startswith("0::"):
-                    return card_name(line[3:].strip())
+            for _ in range(MAX_HOPS):
+                cgroup = self._cgroup(pid)
+                name = card_name(cgroup)
+                if name or not SESSION_RE.fullmatch(program(cgroup) or ""):
+                    return name                     # a program, or nothing to walk up
+                pid = self._stat(pid)[1]            # session scope: its parent
+                if pid in ("0", "1"):
+                    return None
         except (OSError, ValueError, IndexError):
             return None
         return None

@@ -20,11 +20,12 @@ class FakeProc:
         with open(os.path.join(self.root, "stat"), "w", encoding="ascii") as f:
             f.write(f"cpu  1 2 3\nbtime {BTIME}\nprocesses 9\n")
 
-    def add(self, pid: int, start_s: float, cgroup: str, comm: str = "bash") -> None:
+    def add(self, pid: int, start_s: float, cgroup: str, comm: str = "bash",
+            ppid: int = 1) -> None:
         d = os.path.join(self.root, str(pid))
         os.makedirs(d)
         ticks = int(start_s * os.sysconf("SC_CLK_TCK"))
-        rest = ["S"] + ["0"] * 18 + [str(ticks)] + ["0"] * 30     # field 22 = starttime
+        rest = ["S", str(ppid)] + ["0"] * 17 + [str(ticks)] + ["0"] * 30   # 22 = starttime
         with open(os.path.join(d, "stat"), "w", encoding="ascii") as f:
             f.write(f"{pid} ({comm}) " + " ".join(rest) + "\n")
         with open(os.path.join(d, "cgroup"), "w", encoding="ascii") as f:
@@ -62,6 +63,24 @@ class TestReader(unittest.TestCase):
         self.p.add(4326, 10.0, "/")
         for pid in ("4324", "4325", "4326", "9999", "x", "", None, "0"):
             self.assertIsNone(self.r.program(pid, BTIME + 20.0), pid)
+
+    def test_out_of_a_session_scope(self):
+        """sudo ./install.sh -> systemctl (host 2026-10-26): sudo, the script and systemctl
+        sit in sudo's session scope; the program is the terminal sudo was typed in."""
+        sess = "/user.slice/user-1000.slice/session-c5.scope"
+        self.p.add(200, 10.0, APP)                              # my shell in the terminal
+        self.p.add(300, 50.0, sess, "sudo", ppid=200)
+        self.p.add(400, 51.0, sess, "install.sh", ppid=300)
+        self.p.add(500, 52.0, sess, "systemctl", ppid=400)
+        self.assertEqual(self.r.program("500", BTIME + 53.0), "org.gnome.Ptyxis")
+        self.p.add(600, 52.0, sess, "orphan", ppid=1)           # parent gone: pid 1
+        self.assertIsNone(self.r.program("600", BTIME + 53.0))
+        chain = [(700 + i, 700 + i + 1) for i in range(proc.MAX_HOPS + 1)]
+        for pid, ppid in chain:
+            self.p.add(pid, 5.0, sess, ppid=ppid)
+        self.assertIsNone(self.r.program("700", BTIME + 53.0))  # walk limit
+        self.p.add(800, 52.0, "/system.slice/x.service", ppid=200)
+        self.assertEqual(self.r.program("800", BTIME + 53.0), "x")   # no walk: a unit
 
     def test_this_process(self):
         """The real /proc: no exception, a name or None."""
