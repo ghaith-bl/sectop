@@ -1,3 +1,4 @@
+import collections
 import json
 import os
 import tempfile
@@ -8,7 +9,7 @@ from core import journal as corejournal
 from core.config import ConfigError
 from core.module import Context, check_module, validate
 from core.screens import SCREENS, find
-from modules.security import auth, watch
+from modules.security import auth, kernel, watch
 
 FIX = os.path.join(os.path.dirname(__file__), "fixtures", "security")
 USERS = {"0": "root", "1000": "null", "1001": "sectop-locktest"}   # 1001: test user
@@ -26,10 +27,10 @@ def end(entries):
 class Run:
     """The module with a fake clock, fed like core's follower does."""
 
-    def __init__(self):
+    def __init__(self, taint=lambda: 0):
         self.now = 0.0
         self.st = sec.State(wall=lambda: self.now, user=lambda uid: USERS.get(uid, uid),
-                            stamp=lambda ts: f"T{int(ts)}")
+                            stamp=lambda ts: f"T{int(ts)}", taint=taint)
 
     def collect(self, entries, now):
         self.now = now
@@ -55,10 +56,14 @@ class TestModule(unittest.TestCase):
     def test_api(self):
         check_module(sec)
         sp = corejournal.spec(sec.JOURNAL)
-        self.assertEqual(sp.groups, ((("_TRANSPORT", "audit"),),
-                                     (("SYSLOG_IDENTIFIER", "sudo"), ("PRIORITY", "1"))))
+        self.assertEqual(sp.groups, (
+            (("_TRANSPORT", "audit"),),
+            (("SYSLOG_IDENTIFIER", "sudo"), ("PRIORITY", "1")),
+            (("_TRANSPORT", "kernel"),) + tuple(("PRIORITY", str(p)) for p in range(5)),
+            (("_TRANSPORT", "kernel"), ("_KERNEL_SUBSYSTEM", "usb"))))
         self.assertEqual(sp.fields, ("MESSAGE", "_AUDIT_ID", "_AUDIT_TYPE", "_AUDIT_TYPE_NAME",
-                                     "_AUDIT_LOGINUID", "_PID"))
+                                     "_AUDIT_LOGINUID", "_PID", "PRIORITY",
+                                     "_KERNEL_SUBSYSTEM", "_KERNEL_DEVICE"))
         with WatchFile(None):                                   # not the host's file
             self.assertIsInstance(sec.init({}), sec.State)
             with self.assertRaises(ValueError):
@@ -110,7 +115,7 @@ class TestCommands(unittest.TestCase):
         self.assertEqual((p["title"], p["width"], p["types"]),
                          ("commands 23  (28 root runs since start)", "full", sec.TYPES))
         self.assertEqual(snap["summary"],
-                         "root runs 28 | groups 23 | auth fails 0 | no watch list")
+                         "root runs 28 | groups 23 | auth fails 0 | kernel 0 | no watch list")
         d = got["su"][3]
         self.assertEqual((d["exe"], d["argv"], d["cwd"], d["ses"], d["key"]),
                          ("/usr/bin/su", "su", "/var/home/null/my-project/sectop", "18",
@@ -392,13 +397,17 @@ class TestAuth(unittest.TestCase):
 
     def test_only_what_the_follower_gives(self):
         """The real follower only passes JOURNAL matches: same rows as the whole fixture."""
-        for name in ("not-sudoers", "faillock", "su-fail", "unlock-fail"):
+        for name in ("not-sudoers", "faillock", "su-fail", "unlock-fail", "module", "avc",
+                     "kernel-warn", "usb"):
             entries = fix(name)
             a, b = Run(), Run()
             whole = a.collect(entries, end(entries) + 10)
             matched = b.collect(follower(entries), end(entries) + 10)
             self.assertEqual(whole["panels"], matched["panels"], name)
             self.assertEqual(whole["checks"], matched["checks"], name)
+            whole = a.collect([], end(entries) + 20)                    # timed-out events
+            matched = b.collect([], end(entries) + 20)
+            self.assertEqual(whole["panels"], matched["panels"], name)
 
     def test_sudo_alert_lines(self):
         a = auth.Auth()
@@ -428,6 +437,281 @@ class TestAuth(unittest.TestCase):
         auth._add(a, "a" * 40, "b" * 40, "sudo", "x" * 40, 9e9, "crit", "w")
         [c] = [c for c in auth.checks(a, 9e9, 10, str) if c["sev"] == "crit"]
         self.assertTrue(c["key"].startswith("auth:") and len(c["key"]) <= 128)
+
+
+def kernel_rows(snap):
+    """kind, from, what -> (n, sev, detail)."""
+    out = {}
+    for r in snap["panels"][2]["rows"]:
+        c = r["cells"]
+        out[(c[2], c[3], c[4])] = (c[1], r["sev"], {d["k"]: d["v"] for d in r["detail"]})
+    return out
+
+
+def _module_events(*calls) -> list:
+    """Audit journal entries (SYSCALL, KERN_MODULE, PROCTITLE) of module syscalls, one
+    second apart: (syscall, auid, exe, name or None, success, exit, argv)."""
+    out = []
+    for i, (nr, auid, exe, name, ok, code, argv) in enumerate(calls):
+        us, aid = str(300_000_000 + i * 1_000_000), str(95000 + i)
+        msgs = [("1300", "SYSCALL", f"SYSCALL arch=c000003e syscall={nr} success={ok} "
+                 f"exit={code} a0=3 a1=2 a2=0 a3=0 items=0 ppid=1 pid={600 + i} "
+                 f"auid={auid} uid=0 gid=0 euid=0 suid=0 fsuid=0 egid=0 sgid=0 fsgid=0 "
+                 f'tty=(none) ses=4294967295 comm="x" exe="{exe}" key="kernel_modules"')]
+        if name:
+            msgs.append(("1323", "KERN_MODULE", f'KERN_MODULE name="{name}"'))
+        msgs.append(("1327", "PROCTITLE", "PROCTITLE proctitle="
+                     + "00".join(a.encode().hex().upper() for a in argv)))
+        for typ, tname, msg in msgs:
+            out.append({"__REALTIME_TIMESTAMP": us, "_TRANSPORT": "audit", "_AUDIT_ID": aid,
+                        "_AUDIT_TYPE": typ, "_AUDIT_TYPE_NAME": tname, "MESSAGE": msg})
+    return out
+
+
+def _klog(*lines) -> list:
+    """Kernel log entries one second apart: (PRIORITY, MESSAGE[, _KERNEL_SUBSYSTEM])."""
+    out = []
+    for i, line in enumerate(lines):
+        e = {"__REALTIME_TIMESTAMP": str(400_000_000 + i * 1_000_000), "_TRANSPORT": "kernel",
+             "PRIORITY": line[0], "SYSLOG_IDENTIFIER": "kernel", "MESSAGE": line[1]}
+        if len(line) > 2:
+            e["_KERNEL_SUBSYSTEM"] = line[2]
+        out.append(e)
+    return out
+
+
+class TestKernel(unittest.TestCase):
+    """Kernel box: fixtures 2026-10-20 from my host (module, avc, kernel-warn, usb)."""
+
+    def test_panel(self):
+        r = Run(taint=lambda: 12288)
+        snap = r.collect([], 100.0)
+        p = snap["panels"][2]
+        self.assertEqual((p["id"], p["title"], p["width"], p["columns"], p["types"]),
+                         ("kernel", "kernel 0  (taint at start: O E)", "full", kernel.COLUMNS,
+                          kernel.TYPES))
+        self.assertEqual([q["id"] for q in snap["panels"]], ["commands", "auth", "kernel"])
+        self.assertIn("| kernel 0 |", snap["summary"])
+
+    def test_module_fixture(self):
+        _, snap = capture("module")
+        got = kernel_rows(snap)
+        self.assertEqual({k: v[:2] for k, v in got.items()}, {
+            ("module", "null", "load tcp_bbr"): ("1", "warn"),          # modprobe from a login
+            ("module", "null", "remove tcp_bbr"): ("1", "warn"),
+            ("module", "null", "blocked sctp"): ("1", "info"),          # install sctp /bin/false
+            ("usb", "3-2", "045e:0745 Microsoft\u00ae 2.4GHz Transceiver v8.0 (Microsoft)"):
+                ("1", "info")})
+        d = got[("module", "null", "load tcp_bbr")][2]
+        self.assertEqual((d["syscall"], d["cmdline"], d["exe"], d["result"], d["tty"]),
+                         ("finit_module", "modprobe tcp_bbr", "/usr/bin/kmod", "ok", "pts2"))
+        self.assertEqual(got[("module", "null", "remove tcp_bbr")][2]["syscall"],
+                         "delete_module")
+        d = got[("module", "null", "blocked sctp")][2]
+        self.assertEqual((d["cmdline"], d["install"]), ("modprobe sctp", "sh -c -- /bin/false"))
+        d = got[("usb", "3-2", "045e:0745 Microsoft\u00ae 2.4GHz Transceiver v8.0 (Microsoft)")][2]
+        self.assertEqual((d["id"], d["bcdDevice"], d["manufacturer"]),
+                         ("045e:0745", "6.76", "Microsoft"))
+        self.assertEqual(snap["checks"], [])                            # no red: no alert
+
+    def test_autoload_and_failed_load(self):
+        r = Run()
+        got = kernel_rows(r.collect(_module_events(
+            ("313", sec.UNSET, "/usr/lib/systemd/systemd-udevd", "snd_hda_intel", "yes", "0",
+             ["/usr/lib/systemd/systemd-udevd"]),
+            ("313", sec.UNSET, "/usr/bin/kmod", "tcp_bbr", "yes", "0",
+             ["/sbin/modprobe", "-q", "--", "tcp_bbr"]),
+            ("313", "1000", "/usr/bin/kmod", "nvidia", "no", "-19", ["modprobe", "nvidia"]),
+            ("313", "1000", "/usr/bin/kmod", "nvidia", "no", "-19", ["modprobe", "nvidia"]),
+            ("175", "1000", "/usr/bin/kmod", None, "no", "-1", ["insmod", "x.ko"]),
+            ("176", "1000", "/usr/bin/kmod", "x", "yes", "0", ["rmmod", "x"])), 400.0))
+        self.assertEqual({k: v[:2] for k, v in got.items()}, {
+            ("module", "-", "load snd_hda_intel"): ("1", "info"),       # udev: no login
+            ("module", "-", "load tcp_bbr"): ("1", "info"),             # kernel request
+            ("module", "null", "load nvidia failed ENODEV"): ("2", "warn"),
+            ("module", "null", "load ? failed EPERM"): ("1", "warn"),   # no KERN_MODULE
+            ("module", "null", "remove x"): ("1", "warn")})
+        self.assertEqual(got[("module", "null", "load ? failed EPERM")][2]["syscall"],
+                         "init_module")
+        self.assertEqual(r.st.kernel.loads, 6)
+        self.assertEqual(r.st.runs, 0)                                  # not commands rows
+
+    def test_avc_fixture(self):
+        entries = fix("avc")
+        r = Run()
+        r.collect(entries, end(entries) + 1)
+        snap = r.collect([], end(entries) + 10)                         # AVC alone: timed out
+        got = kernel_rows(snap)
+        self.assertEqual({k: v[:2] for k, v in got.items()}, {
+            ("avc", "chcon", "{ mac_admin } tuned_t -> tuned_t capability2"): ("156", "info"),
+            ("avc", "lsblk", "{ connectto } bootupd_t -> systemd_machined_t "
+                             "unix_stream_socket (allowed)"): ("44", "warn")})
+        d = got[("avc", "lsblk", "{ connectto } bootupd_t -> systemd_machined_t "
+                                 "unix_stream_socket (allowed)")][2]
+        self.assertEqual((d["scontext"], d["path"], d["record"]),
+                         ("system_u:system_r:bootupd_t:s0",
+                          "/run/systemd/userdb/io.systemd.Machine", "AVC"))
+        self.assertEqual(got[("avc", "chcon", "{ mac_admin } tuned_t -> tuned_t "
+                                              "capability2")][2]["capability"], "33")
+        self.assertEqual(snap["checks"], [])
+
+    def test_user_avc(self):
+        msg = ("USER_AVC pid=1 uid=0 auid=4294967295 ses=4294967295 subj=system_u:system_r:"
+               "init_t:s0 msg='avc:  denied  { status } for auid=n/a uid=0 gid=0 "
+               'path="/usr/lib/systemd/system/x.service" cmdline="systemctl status x" '
+               "scontext=system_u:system_r:unconfined_service_t:s0 tcontext=system_u:"
+               "object_r:systemd_unit_file_t:s0 tclass=service permissive=0 "
+               "exe=\"/usr/lib/systemd/systemd\" sauid=0 hostname=? addr=? terminal=?'")
+        policy = ("USER_AVC pid=1 uid=0 auid=4294967295 ses=4294967295 msg='avc:  received "
+                  "policyload notice (seqno=2)  exe=\"/usr/lib/systemd/systemd\" sauid=0'")
+        entries = [{"__REALTIME_TIMESTAMP": str(500_000_000 + i), "_TRANSPORT": "audit",
+                    "_AUDIT_ID": str(97000 + i), "_AUDIT_TYPE": "1107",
+                    "_AUDIT_TYPE_NAME": "USER_AVC", "MESSAGE": m}
+                   for i, m in enumerate((msg, policy))]
+        got = kernel_rows(Run().collect(entries, 600.0))
+        self.assertEqual(list(got), [("avc", "systemd", "{ status } unconfined_service_t -> "
+                                                        "systemd_unit_file_t service")])
+        d = next(iter(got.values()))[2]
+        self.assertEqual((d["record"], d["path"], d["exe"]),
+                         ("USER_AVC", "/usr/lib/systemd/system/x.service",
+                          "/usr/lib/systemd/systemd"))
+
+    def test_kernel_log_fixture(self):
+        _, snap = capture("kernel-warn")
+        got = kernel_rows(snap)
+        self.assertEqual(len(got), 33)                                  # 196 lines, 1 empty
+        self.assertEqual(got[("log", "kernel", "NVRM: No NVIDIA GPU found.")][:2], ("84", "warn"))
+        acpi = [v for k, v in got.items() if k[2].startswith("ACPI BIOS Error (bug): Failure")]
+        self.assertEqual([v[:2] for v in acpi], [("36", "warn")])       # [..] paths: one group
+        [row] = [r for r in snap["panels"][2]["rows"]
+                 if r["cells"][4].startswith("ACPI BIOS Error (bug): Failure")]
+        lines = [d["v"] for d in row["detail"] if d["k"] == "line"]
+        self.assertEqual(len(set(lines)), kernel.MAX_MSGS)              # newest 3, distinct
+        self.assertEqual(lines[0], row["cells"][4])
+        martian = got[("log", "kernel", "IPv4: martian source (src=192.168.8.1, "
+                                        "dst=192.168.8.102, dev=wlo1)")]
+        self.assertEqual(martian[:2], ("3", "info"))
+        self.assertEqual(martian[2]["priority"], "4 warning")
+        self.assertEqual(got[("log", "i2c", "spd5118 14-0052: Failed to write b = 0: -6")][:2],
+                         ("2", "warn"))                                 # two devices: one group
+        sevs = collections.Counter(v[1] for v in got.values())
+        self.assertEqual(dict(sevs), {"warn": 10, "info": 23})
+        self.assertEqual(snap["checks"], [])
+
+    def test_kernel_log_levels_and_alert(self):
+        r = Run()
+        entries = _klog(("0", "Kernel panic - not syncing: x"), ("2", "BUG: soft lockup - CPU#3 "
+                        "stuck for 23s! [x:123]"), ("2", "BUG: soft lockup - CPU#5 stuck for "
+                        "41s! [y:456]"), ("3", "e1000e: probe failed"), ("4", "warn line"),
+                        ("5", "notice line"), ("6", "HFW-OUT-NEW: IN= OUT=wlo1"),
+                        ("4", "HFW-IN-DROP: IN=wlo1"), ("6", "usb 1-1: new high-speed USB "
+                        "device number 2 using xhci_hcd", "usb"))
+        snap = r.collect(entries, 410.0)
+        got = kernel_rows(snap)
+        self.assertEqual(sorted((k[2][:15], v[0], v[1]) for k, v in got.items()), [
+            ("BUG: soft locku", "2", "crit"), ("Kernel panic - ", "1", "crit"),
+            ("e1000e: probe f", "1", "warn"), ("warn line", "1", "info")])   # no 5, 6, HFW
+        self.assertEqual(sorted((c["title"], c["n"]) for c in snap["checks"]),
+                         [("kernel crit: BUG: soft lockup - CPU#5 stuck for 41s! [y:456]", 2),
+                          ("kernel emerg: Kernel panic - not syncing: x", 1)])
+        self.assertTrue(all(c["key"].startswith("kernel:log:") for c in snap["checks"]))
+        snap = r.collect([], 410.0 + 60)
+        self.assertEqual([c["n"] for c in snap["checks"]], [0, 0])     # open, nothing new
+        snap = r.collect([], 405.0 + sec.WINDOW)                        # last at 402 s
+        self.assertEqual([c["title"][:12] for c in snap["checks"]], [])
+
+    def test_taint(self):
+        value = [12288]
+        r = Run(taint=lambda: value[0])
+        r.collect([], 100.0)
+        value[0] = 12288 | 1 << 9                                       # W
+        snap = r.collect([], 102.0)
+        got = kernel_rows(snap)
+        self.assertEqual({k: v[:2] for k, v in got.items()},
+                         {("taint", "kernel", "W  kernel warning"): ("1", "warn")})
+        self.assertEqual(snap["checks"], [])                            # warn: row only
+        self.assertEqual(snap["panels"][2]["title"],
+                         "kernel 1  (taint at start: O E, now: W O E)")
+        value[0] |= 1 << 7 | 1 << 14                                    # D, L
+        snap = r.collect([], 104.0)
+        self.assertEqual(sorted((c["key"], c["title"], c["n"]) for c in snap["checks"]), [
+            ("kernel:taint:D", "kernel tainted: D kernel died (oops or BUG)", 1),
+            ("kernel:taint:L", "kernel tainted: L soft lockup", 1)])
+        snap = r.collect([], 106.0)                                     # stays one row each
+        self.assertEqual([k[2] for k in kernel_rows(snap)],
+                         ["D  kernel died (oops or BUG)", "L  soft lockup", "W  kernel warning"])
+        self.assertEqual([c["n"] for c in snap["checks"]], [0, 0])
+        d = kernel_rows(snap)[("taint", "kernel", "D  kernel died (oops or BUG)")][2]
+        self.assertEqual((d["bit"], d["at start"]), ("7", "12288"))
+        snap = r.collect([], 104.0 + sec.WINDOW + 1)
+        self.assertEqual(snap["checks"], [])                            # rows stay, alert ends
+        self.assertEqual(len(kernel_rows(snap)), 3)
+
+    def test_taint_out_of_tree_later_is_red(self):
+        value = [0]
+        r = Run(taint=lambda: value[0])
+        r.collect([], 100.0)
+        value[0] = 1 << 12 | 1 << 13 | 1                                # O E P
+        snap = r.collect([], 102.0)
+        self.assertEqual(sorted(c["key"] for c in snap["checks"]),
+                         ["kernel:taint:E", "kernel:taint:O", "kernel:taint:P"])
+        value[0] |= 1 << 2                                               # S: not in the table
+        got = kernel_rows(r.collect([], 104.0))
+        self.assertEqual(got[("taint", "kernel", "S  system out of spec")][1], "warn")
+
+    def test_taint_unreadable(self):
+        def fail():
+            raise PermissionError(13, "Permission denied")
+        r = Run(taint=fail)
+        snap = r.collect([], 100.0)
+        self.assertEqual(snap["panels"][2]["title"], "kernel 0  (taint: Permission denied)")
+        value = [12288]
+        r.st.taint = lambda: value[0]
+        self.assertEqual(r.collect([], 102.0)["panels"][2]["title"],
+                         "kernel 0  (taint at start: O E)")
+        r.st.taint = lambda: int("x")
+        self.assertIn("(read: invalid literal", r.collect([], 104.0)["panels"][2]["title"])
+
+    def test_taint_file(self):
+        with tempfile.NamedTemporaryFile("w", encoding="ascii") as f:
+            f.write("12288\n")
+            f.flush()
+            self.assertEqual(kernel.read_taint(f.name), 12288)
+        self.assertEqual(kernel.letters(12288), "O E")
+        self.assertEqual(kernel.letters(1), "P")
+        self.assertEqual(kernel.letters(0), "")
+        self.assertEqual(kernel.letters(1 << 25), "bit25")
+
+    def test_usb_replug_and_product_later(self):
+        r = Run()
+        new = "usb 3-2: New USB device found, idVendor=045E, idProduct=0745, bcdDevice= 6.76"
+        snap = r.collect(_klog(("6", new, "usb")), 410.0)
+        self.assertEqual(list(kernel_rows(snap)), [("usb", "3-2", "045e:0745")])
+        snap = r.collect(_klog(("6", "usb 3-2: Product: Receiver", "usb"),
+                               ("6", "usb 3-1: Product: other port", "usb")), 411.0)
+        self.assertEqual(list(kernel_rows(snap)), [("usb", "3-2", "045e:0745 Receiver")])
+        snap = r.collect(_klog(("6", new.replace("3-2", "1-4"), "usb")), 412.0)
+        [(key, (n, sev, d))] = kernel_rows(snap).items()
+        self.assertEqual((key, n, sev, d["port"]),
+                         (("usb", "1-4", "045e:0745 Receiver"), "2", "info", "1-4"))
+
+    def test_normalize(self):
+        self.assertEqual(kernel.normalize("spd5118 14-0050: Failed  to write b = 0: -6"),
+                         "spd# #-#: Failed to write b = #: -#")
+        self.assertEqual(kernel.normalize("x [\\_SB.PC00.XHCI] at 0xfedc0000 192.168.8.1"),
+                         "x [.] at <hex> <ip>")
+
+    def test_limits(self):
+        k = kernel.Kernel()
+        for i in range(kernel.MAX_ROWS + 10):
+            word = "".join(chr(97 + int(d)) for d in str(i))
+            kernel.journal_entry(k, {"_TRANSPORT": "kernel", "PRIORITY": "4",
+                                     "MESSAGE": f"line {word}"}, float(i))
+        self.assertEqual(len(k.rows), kernel.MAX_ROWS)
+        kernel.taint(k, lambda: 0, 1.0)
+        kernel.taint(k, lambda: (1 << 20) - 1, 2.0)                     # every bit
+        self.assertEqual(len(kernel.rows(k, str)), kernel.MAX_ROWS + 20)
+        self.assertLessEqual(kernel.MAX_ROWS + 20, 200)                  # panel max
 
 
 class TestWatch(unittest.TestCase):

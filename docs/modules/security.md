@@ -1,20 +1,29 @@
 # security module
 
-Screen 2. `modules/security/`. Phase 4 steps 3 + 4: commands box + watch list, auth box
-(`auth.py`). Kernel, logs: next steps (docs/architecture.md, Phase 4 plan). Design:
-docs/architecture.md, Security screen.
+Screen 2. `modules/security/`. Phase 4 steps 3 - 5: commands box + watch list, auth box
+(`auth.py`), kernel box (`kernel.py`). Posture, logs: next steps (docs/architecture.md,
+Phase 4 plan). Design: docs/architecture.md, Security screen.
 
 ## Source
 
-Core's journal follower only (docs/module-interface.md, Journal). No commands. One file:
-the watch list `/etc/sectop/watch.toml`, read once in init (see Watch list).
+Core's journal follower (docs/module-interface.md, Journal). No commands. Files: the
+watch list `/etc/sectop/watch.toml`, read once in init (see Watch list), and
+`/proc/sys/kernel/tainted`, read each collect (kernel box).
 
-    JOURNAL = {"groups": [["_TRANSPORT=audit"], ["SYSLOG_IDENTIFIER=sudo", "PRIORITY=1"]],
+    JOURNAL = {"groups": [["_TRANSPORT=audit"], ["SYSLOG_IDENTIFIER=sudo", "PRIORITY=1"],
+                          ["_TRANSPORT=kernel", "PRIORITY=0", "PRIORITY=1", "PRIORITY=2",
+                           "PRIORITY=3", "PRIORITY=4"],
+                          ["_TRANSPORT=kernel", "_KERNEL_SUBSYSTEM=usb"]],
                "fields": ["MESSAGE", "_AUDIT_ID", "_AUDIT_TYPE", "_AUDIT_TYPE_NAME",
-                          "_AUDIT_LOGINUID", "_PID"]}
+                          "_AUDIT_LOGINUID", "_PID", "PRIORITY", "_KERNEL_SUBSYSTEM",
+                          "_KERNEL_DEVICE"]}
 
 Every audit entry since the last collect, assembled into events by `core/audit.py`
-(same `_AUDIT_ID`, complete at PROCTITLE), plus sudo's syslog alerts. Used:
+(same `_AUDIT_ID`, complete at PROCTITLE; an AVC without a syscall: 2 s timeout, next
+collect), plus sudo's syslog alerts, kernel log lines PRIORITY 0..4 and USB lines. Not
+the whole `_TRANSPORT=kernel` (the firewall's group): hostfw logs at level info
+(PRIORITY 6), a burst of HFW lines would push audit entries out of this module's buffer
+(5000 per collect). Used:
 
 | event | what |
 |---|---|
@@ -25,13 +34,21 @@ Every audit entry since the last collect, assembled into events by `core/audit.p
 | RESP_ACCT_LOCK (2207) | pam_faillock locked an account (suid) |
 | USER_MGMT (1102) `op=faillock-reset` | a lock reset (`faillock --reset`, id) |
 | syslog `sudo`, PRIORITY 1 | sudo's policy refusals: user NOT in sudoers, command not allowed |
+| SYSCALL init_module / finit_module / delete_module + KERN_MODULE | module load / remove (kernel box) |
+| execve of `modprobe` / `insmod` + its child `sh -c -- /bin/false` | blocked module load (kernel box) |
+| AVC (1400), USER_AVC (1107) | SELinux denials (kernel box) |
+| kernel, PRIORITY 0..4 | kernel log (kernel box), HFW-* left out |
+| kernel, `_KERNEL_SUBSYSTEM=usb` | `New USB device found`, Product, Manufacturer (kernel box) |
 
 User space records have no type name in the journal (`_AUDIT_TYPE_NAME=AUDIT1100`):
 matched by `_AUDIT_TYPE`. ANOM_LOGIN_FAILURES (2100) comes with every 2207 (same pid,
 same moment): not used.
 
-Rule keys come from the hardening audit rules (silverblue-cis-hardening). Other keys and
-events: ignored here (logs box, step 7).
+Rule keys come from the hardening audit rules (silverblue-cis-hardening). Module syscalls
+are matched by arch + syscall number (x86_64 175 / 313 / 176, i386 128 / 350 / 129), not
+by the key: the rule `-F path=/usr/bin/kmod -F perm=x -k kernel_modules` gives execve
+records with that key too (lsmod by a user). Other keys and events: ignored here (logs
+box, step 7).
 
 ## commands box
 
@@ -111,6 +128,67 @@ service, result, tty. Full width, below the commands box. Newest first. Title:
   password: only the agent helper's USER_AUTH), new users (`useradd`: commands box,
   watch rule). Logs box: step 7.
 
+## kernel box
+
+`modules/security/kernel.py`. What the kernel did since sectop started. Cols: last (age),
+n, kind, from, what. Full width, below the auth box. Newest first. Title:
+`kernel <rows>  (taint at start: <letters>[, now: <letters>])`; summary `kernel <n>`.
+
+| kind | row = group | from | what |
+|---|---|---|---|
+| taint | one bit set since the first read | kernel | `W  kernel warning` |
+| module | action, name, result, login, exe | login (auid), `-` autoload | `load tcp_bbr`, `remove x`, `load nvidia failed ENODEV`, `blocked sctp` |
+| avc | comm, scontext type, tcontext type, tclass, perms, permissive | comm (USER_AVC: exe name) | `{ mac_admin } tuned_t -> tuned_t capability2`, `(allowed)` when permissive=1 |
+| log | PRIORITY + normalized line (UUIDs, IPs, hex, `[..]`, numbers) | `_KERNEL_SUBSYSTEM`, else kernel | newest line |
+| usb | idVendor:idProduct | port (newest) | `045e:0745 <Product> (<Manufacturer>)` |
+
+- Taint: `/proc/sys/kernel/tainted` each collect (a file, no command). Baseline = first
+  read since start (a restart of sectop.service takes the value then as baseline).
+  Letters: docs.kernel.org admin-guide/tainted-kernels (bit 0 = P). Bits never clear
+  until reboot: one row per bit, n 1. Read error: title `taint: <error>`, tried again
+  each collect. Host check 2026-10-26: readable in the sectop.service sandbox
+  (`ProtectKernelTunables=yes` = read-only, systemd.exec(5)): 12288 as user sectop.
+- Modules: result `ok` or `failed <errno>` (exit code). Detail: why, first, exe, cmdline
+  (PROCTITLE), syscall, result, pid / ppid, tty, ses. No KERN_MODULE (failed early):
+  name `?`.
+- Blocked load (CIS `install <mod> /bin/false`, hardening section 1): modprobe /
+  insmod run as root (root_cmds / user_emulation execve) is kept 60 s by pid; its child
+  `sh -c -- /bin/false` (or `/bin/true`, or the program itself) -> `blocked <mod>`, one
+  row per modprobe run. Module = first argument without `-`. Detail: cmdline, install,
+  pid / ppid. Autoload of a blocked module (no login): not seen (no root_cmds record).
+- AVC: `avc: denied { .. }` only (granted, policy load notices: skipped). Detail:
+  record, scontext, tcontext, pid, path / name / exe / capability when present.
+- Log: newest 3 distinct lines in the detail (`line`), priority, device. Empty lines
+  and `HFW-*`: left out.
+- USB: `New USB device found, idVendor=.., idProduct=..` (PRIORITY 6) starts or counts
+  the row; `Product:` / `Manufacturer:` lines of the same port fill it in. Serial
+  numbers: never read. Disconnects: not rows.
+- Severity (table agreed 2026-10-25: red = dangerous or suspicious, worth following up):
+
+      crit  new taint D L M B (oops, lockup, machine check, bad page)
+            new taint O E P (out-of-tree / unsigned / proprietary module loaded later)
+            kernel log emerg / alert / crit (PRIORITY 0-2)
+      warn  module loaded or removed from a login (auid set: modprobe, nvidia-modprobe)
+            new taint W (kernel warning); any other new bit (F R S U A C I K X T N J:
+            not in the table, decided 2026-10-26)
+            SELinux denial allowed (permissive=1: permissive domain or mode)
+            kernel log error (PRIORITY 3: NVRM, ACPI BIOS errors)
+      info  module autoload (auid unset: udev, kernel request), blocked load, SELinux
+            denial blocked (enforcing), kernel log warning (PRIORITY 4), new USB device
+
+- Alerts: a crit row whose last one is under 1 h old (same window as watch list / auth)
+  -> check `kernel:taint:<letter>` (title `kernel tainted: <letter>  <meaning>`) or
+  `kernel:log:<12 hex>` (sha256 of the normalized line; title `kernel <priority>:
+  <line>`), n = new. A taint row stays red after the hour, its alert ends.
+- Host fixtures 2026-10-20 (module, avc, kernel-warn, usb): `modprobe tcp_bbr` / `-r`
+  warn, `modprobe sctp` blocked (info), Microsoft receiver USB (info); AVC 156 chcon
+  tuned_t mac_admin (info), 44 lsblk bootupd_t connectto (allowed, warn); boot kernel
+  log 196 lines -> 33 groups (10 warn, 23 info: NVRM 84, ACPI BIOS errors 36 in one
+  group), no crit. Built in the test: autoload, failed nvidia load, init_module without
+  KERN_MODULE, USER_AVC, PRIORITY 0-2 lines, taint changes.
+- Not here: kernel log PRIORITY 5-7 (logs box, step 7), taint value checked against the
+  baseline (posture, step 6).
+
 ## Watch list
 
 `/etc/sectop/watch.toml` (`modules/security/watch.py`). Defaults: `deploy/watch.toml`,
@@ -159,7 +237,8 @@ Groups 200, pids 4096 (parents), parent chain 8, launches 256 / 600 s, USER_CMD 
 per group 5, uid names 256 (cache, cleared when full). Assembler: core/audit.py (1000 open
 events, 2 s timeout). Watch list: 200 rules, 16 words, cmd 200 chars, why 120; checks 50.
 Rating cost: ~0.1 ms per root command with the 57 default rules (2026-10-25, 3.14).
-Auth box: 200 rows, checks 50.
+Auth box: 200 rows, checks 50. Kernel box: 180 rows + up to 20 taint rows (panel max
+200), 3 lines per log row, modprobe runs 64 / 60 s, checks 50.
 
 ## Fixtures
 
@@ -171,4 +250,6 @@ screen). 2026-10-25, auth (re-masked for my wifi name with the fixed tool): unlo
 password, faillock reset), not-sudoers (`sudo -u sectop-locktest sudo -k true`, 3 wrong:
 user NOT in sudoers), faillock (6 wrong more: locked at the 5th failure, reset; userdel
 refused while user@1001.service ran). Built in the test (same record format): sudo run
-by root, nvidia-modprobe -> modprobe nvidia, su.
+by root, nvidia-modprobe -> modprobe nvidia, su. Kernel box: module (modprobe tcp_bbr,
+-r, blocked sctp, USB plug lines), usb (disconnect), avc (200), kernel-warn (boot,
+PRIORITY <= 4); built in the test: see kernel box.

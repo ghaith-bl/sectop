@@ -93,8 +93,9 @@ true. Built in phase 4, after the privilege split.
     | logs (full width)                                     |
     +-------------------------------------------------------+
 
-Built so far (2026-10-25): commands and auth, each full width, one under the other (the
-cmd column needs the room). The grid is looked at again when kernel / posture come.
+Built so far (2026-10-26): commands, auth and kernel, each full width, one under the
+other (the cmd / what columns need the room). The grid is looked at again when posture
+comes.
 
 Source: the one journal reader. Audit records via journald
 (`systemd-journald-audit.socket` enabled + active, 2026-10-20). Not `/var/log/audit` or
@@ -178,17 +179,24 @@ dangerous or suspicious, worth following up, not everything.
 
 ### Kernel
 
+Built 2026-10-26 (docs/modules/security.md, kernel box; table agreed 2026-10-25).
+
 - Taint: `/proc/sys/kernel/tainted` (file). Bit new since the first read this boot:
   W -> warn; D L M B -> crit (docs.kernel.org tainted-kernels: the kernel stays tainted
   after the cause is gone). Boot value decoded in posture. 2026-10-20: 12288 = O + E.
-- Modules: audit `kernel_modules` (SYSCALL + KERN_MODULE name). Group: name, syscall,
-  exe, result. auid set (manual load) -> warn, auid unset (autoload) -> info.
+  O E P new -> crit (2026-10-25), any other new bit -> warn (2026-10-26). Host check
+  2026-10-26: the sectop.service sandbox reads it (`ProtectKernelTunables=yes` makes
+  `/proc/sys` read-only, not unreadable; nsenter into the unit as user sectop: 12288).
+- Modules: audit `kernel_modules` (SYSCALL + KERN_MODULE name), matched by syscall
+  number (the kmod `perm=x` rule gives execve records with the same key). Group: name,
+  action, exe, result, login. auid set (manual load) -> warn, auid unset (autoload) ->
+  info.
   Boot 2026-10-20: 38 autoloads ok; 37 failed loads of `nvidia` by kmod, auid 60578
   (GDM greeter, systemd.io UIDS-GIDS: 60578-60705) and 1000, dGPU off (Integrated).
   Noise entry until akmod-nvidia is removed.
 - Blocked load (CIS `install <mod> /bin/false`, e.g. `modprobe sctp`): no init_module
   call, so no `kernel_modules` record. Shown in the modules group from the root command
-  (modprobe / insmod / rmmod argv) and its result.
+  (modprobe / insmod argv): its child `sh -c -- /bin/false` = blocked -> info.
 - AVC: audit AVC / USER_AVC. Group: comm, scontext type, tcontext type, tclass, perms.
   `permissive=1` -> warn, else info.
   Journal, last 200 (2026-10-14 .. 10-20): 2 groups. `tuned` -> `chcon` capability2
@@ -199,7 +207,9 @@ dangerous or suspicious, worth following up, not everything.
 - Audit entries carry `_PID`, `_COMM` (from the record), never `_SYSTEMD_CGROUP` /
   `_SYSTEMD_UNIT` / `_UID` (fixture avc 2026-10-20, 200 of 200).
 - Kernel log: `_TRANSPORT=kernel`, PRIORITY <= 4, minus `HFW-*` (firewall screen).
-  Boot 2026-10-20 (5.3 h): 196 lines, ~39 groups. `NVRM` 84 (akmod-nvidia, dGPU off) and
+  PRIORITY 0-2 -> crit, 3 -> warn, 4 -> info. Grouped by normalized line (`[..]` too:
+  ACPI paths).
+  Boot 2026-10-20 (5.3 h): 196 lines, 33 groups. `NVRM` 84 (akmod-nvidia, dGPU off) and
   ACPI BIOS errors ~70 at boot: noise entries. `nvidia: loading out-of-tree module
   taints kernel` = the O taint.
 - USB: "New USB device found" -> idVendor:idProduct + Product -> info.
@@ -441,7 +451,7 @@ Best practice decides (Red Hat for the host). Fixtures from my host first
   3. commands box + watch.toml: done 2026-10-25 (modules/security,
      docs/modules/security.md).
   4. auth box: done 2026-10-25 (modules/security/auth.py, fixtures 2026-10-25).
-  5. kernel box
+  5. kernel box: done 2026-10-26 (modules/security/kernel.py).
   6. posture module + posture.toml
   7. logs box: groups, noise on groups, audit keys
   8. program card
