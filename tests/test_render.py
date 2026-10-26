@@ -1063,12 +1063,38 @@ class TestCard(unittest.TestCase):
         self.assertTrue(find(f.lines, "card: firefox   2 rows in 2 boxes, all screens"))
         self.assertTrue(find(f.lines, "firewall/conns"))
         self.assertTrue(find(f.lines, "security/commands"))   # not on this screen
-        self.assertTrue(find(f.lines, "10s !"))                 # age + warn glyph
+        row = find(f.lines, "security/commands")[0]
+        self.assertIn("10s", row)                                # its age
+        self.assertIn("id", row)
         self.assertFalse(find(f.lines, " ls"))                  # bash only: not in the card
+        self.assertTrue(find(f.lines, "enter detail (Esc back to the card)"))
         self.ui.key(27)
         self.draw()
         self.assertIsNone(self.ui.card)
         self.assertFalse(self.ui.paused)
+
+    def test_enter_a_card_row_and_back(self):
+        self.ui.key(ord("c"))
+        self.draw()
+        keys = [b.key for b in self.ui.boxes]
+        self.assertEqual(keys, ["card"])
+        self.ui.key(ord("j"))                                    # 2nd card row: the command
+        self.draw()
+        self.ui.key(10)                                          # enter: its detail
+        f = self.draw()
+        self.assertEqual(self.ui.detail, "card")
+        self.assertTrue(find(f.lines, "box title"))                # the box it is in
+        self.assertTrue(find(f.lines, "commands 2"))
+        self.assertTrue(find(f.lines, "cmd"))
+        self.assertTrue(find(f.lines, "2026-10-25 12:00:00"))   # age column: full time
+        self.ui.key(27)                                          # Esc: back to the card
+        f = self.draw()
+        self.assertEqual((self.ui.card, self.ui.detail), ("firefox", None))
+        self.assertTrue(self.ui.paused)
+        self.assertEqual(self.ui.sel["card"], 1)                 # same row still selected
+        self.ui.key(27)
+        self.draw()
+        self.assertIsNone(self.ui.card)
 
     def test_no_progs_no_card(self):
         self.ui.key(ord("j"))                                    # 2nd row: no progs
@@ -1076,12 +1102,18 @@ class TestCard(unittest.TestCase):
         self.ui.key(ord("c"))
         self.assertIsNone(self.ui.card)
 
-    def test_search_in_card(self):
+    def test_filter_in_card(self):
         self.ui.key(ord("c"))
         self.draw()
         for k in "/id":
             self.ui.key(ord(k))
         self.ui.key(10)
         f = self.draw()
-        self.assertEqual(self.ui.find, "id")
-        self.assertTrue(find(f.lines, "card: firefox"))
+        self.assertEqual(self.ui.filters.get("card"), "id")
+        self.assertTrue(find(f.lines, "security/commands"))
+        self.assertFalse(find(f.lines, "firewall/conns"))
+        self.ui.key(27)                                          # closes the card
+        self.draw()
+        self.ui.key(ord("c"))
+        self.assertEqual(self.ui.card, "firefox")
+        self.assertNotIn("card", self.ui.filters)                # a new card: no filter

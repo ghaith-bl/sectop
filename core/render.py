@@ -87,12 +87,13 @@ HELP = (
     ("f", "on a row with a filter (programs): filter the other tables of the screen to "
           "it; again: clear"),
     ("c", "program card: every row of every screen with the selected row's program "
-          "(rows that know their program)"),
+          "(rows that know their program); select a row, enter = its detail"),
     ("x", "on such a row (one word): hide it in every table of the screen (adds !name, "
           "Esc clears)"),
     ("p", "pause / resume the screen (data is still collected)"),
     ("m", "mask public IPs on / off"),
-    ("Esc  q  enter", "close help / detail / card"),
+    ("Esc  q  enter", "close help / detail / card (a detail opened in the card: back to "
+                      "the card)"),
     ("q", "quit"),
 )
 FOOTER = ("1-{n} screen  tab <- -> box  up down j k select  enter detail  c card  / filter  "
@@ -102,6 +103,7 @@ TYPING_FIND = "  enter keep  esc cancel  (any case, text of a line)"
 FOOTER_DETAIL = (" up down PgUp PgDn scroll  g G Home End top / end  / search  n N match  "
                  "w whois  Esc close")
 FOOTER_HELP = " up down PgUp PgDn scroll  g G Home End top / end  Esc close"
+FOOTER_CARD = " up down j k select  enter detail (Esc back to the card)  / filter  Esc close"
 FILTER_MAX = 60
 
 _ATTR = {}                                   # style -> curses attr, set in setup()
@@ -381,12 +383,14 @@ def _header(m: dict, width: int, mask: bool) -> list:
 
 def _footer(n_screens: int, width: int, ui=None) -> list:
     typing = getattr(ui, "typing", None)
-    detail = getattr(ui, "detail", None) is not None or getattr(ui, "card", None) is not None
+    detail = getattr(ui, "detail", None) is not None
     if typing is not None:
         return _line(width, False, (" / ", "focus"), (typing + "_", "plain"),
                      (TYPING_FIND if detail else TYPING, "dim"))
     if detail:
         return _line(width, False, (FOOTER_DETAIL, "dim"))
+    if getattr(ui, "card", None) is not None:
+        return _line(width, False, (FOOTER_CARD, "dim"))
     if getattr(ui, "help", False):
         return _line(width, False, (FOOTER_HELP, "dim"))
     return _line(width, False, (" " + FOOTER.format(n=n_screens), "dim"))
@@ -683,33 +687,44 @@ def _boxes(screen, mods: list, feed: list) -> list:
     return out
 
 
-def _card(view: list, prog: str, ref, tsfmt, stampfmt) -> tuple:
-    """Pairs of a program card: each box with rows naming prog, its rows newest first as
-    `age  sev  cells` (ages as in the box). -> (pairs, rows, boxes)."""
-    pairs, n_rows, n_boxes = [], 0, 0
+CARD_COLUMNS = ["last", "box", "what"]
+CARD_TYPES = ["age", "text", "text"]
+
+
+def _card(view: list, prog: str, stampfmt=_stamp) -> tuple:
+    """Table of a program card: every table row of every module that names prog, box by
+    box (module order), rows as the box orders them. A row: its first age cell, the box,
+    its other cells; its detail = the columns of its box + its own detail, so enter shows
+    everything the box's detail shows. -> (panel, rows, boxes)."""
+    rows, n_boxes = [], 0
     for m in view:
         for p in m.get("panels", ()):
             if p.get("type") != "table":
                 continue
-            rows = [r for r in p["rows"] if prog in r.get("progs", ())]
-            if not rows:
+            hits = [r for r in p["rows"] if prog in r.get("progs", ())]
+            if not hits:
                 continue
-            b = _Box(f"{m['name']}/{p['id']}", p["title"], p["sev"], "table", p)
-            b.ref, b.tsfmt, b.stampfmt = ref, tsfmt, stampfmt
-            types = b.types()
-            if pairs:
-                pairs.append(("", ""))
-            pairs.append((f"{m['name']}/{p['id']}", p["title"]))
-            for r in rows:
-                cells = [b.cell(c, t) for c, t in zip(r["cells"], types)]
-                ages = [c for c, t in zip(cells, types) if t == "age"]
-                rest = [c for c, t in zip(cells, types) if t != "age"]
-                glyph = {"crit": "!!", "warn": "!", "info": "i"}.get(r["sev"], "")
-                pairs.append(((ages[0] if ages else "-") + (" " + glyph if glyph else ""),
-                              "  ".join(rest)))
-            n_rows += len(rows)
             n_boxes += 1
-    return pairs, n_rows, n_boxes
+            types = p.get("types") or ["text"] * len(p["columns"])
+            where = f"{m['name']}/{p['id']}"
+            for r in hits:
+                ages = [c for c, t in zip(r["cells"], types) if t == "age"]
+                rest = [c for c, t in zip(r["cells"], types) if t != "age"]
+                detail = [{"k": "box title", "v": p["title"]}]
+                for col, c, t in zip(p["columns"], r["cells"], types):
+                    when = _when(c) if t == "age" else None
+                    detail.append({"k": col, "v": stampfmt(when) if when is not None else c})
+                detail += list(r.get("detail", ()))
+                row = {"cells": [ages[0] if ages else "-", where, "  ".join(rest)],
+                       "sev": r.get("sev", "ok"), "id": f"{where}|{r.get('id') or r['cells']}",
+                       "detail": detail}
+                for k in ("tone", "ip"):
+                    if k in r:
+                        row[k] = r[k]
+                rows.append(row)
+    panel = {"id": "card", "title": "", "type": "table", "sev": "ok",
+             "columns": list(CARD_COLUMNS), "types": list(CARD_TYPES), "rows": rows}
+    return panel, len(rows), n_boxes
 
 
 def _overlay(boxes: list, ui, mask: bool, tsfmt, view=(), ref=None, stampfmt=_stamp):
@@ -718,14 +733,14 @@ def _overlay(boxes: list, ui, mask: bool, tsfmt, view=(), ref=None, stampfmt=_st
         return _Box("help", "keys", "ok", "note", [f"{k:<22}{v}" for k, v in HELP])
     card = getattr(ui, "card", None)
     if card is not None:
-        pairs, n, nb = _card(view, card, ref, tsfmt, stampfmt)
-        title = f"card: {card}   {n} rows in {nb} boxes, all screens   Esc close"
-        box = _Box("detail", title, "ok", "detail",
-                   pairs or [("", "no row names this program now")])
-        box.src_ip = None
-        box.find, box.seek, box.mark = (getattr(ui, "find", ""), getattr(ui, "seek", None),
-                                        getattr(ui, "mark", None))
-        return box
+        panel, n, nb = _card(view, card, stampfmt)
+        title = f"card: {card}   {n} rows in {nb} boxes, all screens"
+        cbox = _Box("card", title, "ok", "table", panel)
+        cbox.ref, cbox.tsfmt, cbox.stampfmt = ref, tsfmt, stampfmt
+        cbox.filt = getattr(ui, "filters", {}).get("card", "")
+        if ui.detail != "card":
+            return cbox                          # a table: select, / filter, enter detail
+        boxes = [cbox]
     if ui.detail is None:
         return None
     b = next((b for b in boxes if b.key == ui.detail), None)

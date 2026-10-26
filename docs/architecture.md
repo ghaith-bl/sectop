@@ -218,8 +218,9 @@ Built 2026-10-26 (docs/modules/security.md, kernel box; table agreed 2026-10-25)
 ### Program card (phase 4)
 
 Built 2026-10-26 (agreed: key `c`, ProtectProc=default for the collector). `c` on any row
-that knows its program: every row of every box of every screen with the same program
-(core/render.py card, docs/module-interface.md, Card). `enter` stays the detail.
+that knows its program: every row of every box of every screen with the same program,
+as a table: select a row, `enter` = its full detail, `Esc` back (core/render.py card,
+docs/module-interface.md, Card). `enter` on a box row stays the detail.
 - Identity = core/proc.py program(): innermost unit / app id of the cgroup (moved from
   modules/firewall/conns.py). Login / sudo session scopes are not programs.
 - Row `progs`: firewall programs / audit / peers (ss --cgroup); security commands,

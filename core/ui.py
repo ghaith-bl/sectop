@@ -29,9 +29,9 @@ the other filterable boxes of the screen (f again: clears them). x adds
 filters: shown in the box titles, Esc clears.
 
 Card: c on a row with `progs` (program names) opens the program card of its first
-program: every row of every box of every screen that names the same program, grouped by
-box (docs/architecture.md, Program card). A text overlay like the detail (scroll, / search,
-n N), pauses while open.
+program: every row of every box of every screen that names the same program, box by box
+(docs/architecture.md, Program card). A table overlay (box key "card"): select, / filter,
+enter = the detail of that row (Esc: back to the card), Esc closes. Pauses while open.
 
 Ack: a acks every engine alert in the last alert bar (Frame.alerts): key ->
 (count, sev) at ack. render.acked() dims it until its count or severity
@@ -117,13 +117,17 @@ class UI:
         elif k in (ord("a"), ord("A")):
             self._ack()
         elif self.overlay:
-            if k in BACK_KEYS + ENTER_KEYS + (ord("q"), ord("Q"), ord("?")):
+            if k in ENTER_KEYS and self.card is not None and self.detail is None:
+                self._open()                         # the selected card row's detail
+            elif k in BACK_KEYS + ENTER_KEYS + (ord("q"), ord("Q"), ord("?")):
                 self._close()
-            elif k == ord("/") and (self.detail is not None or self.card is not None):
+            elif k == ord("/") and self.detail is None and self.card is not None:
+                self._typing_box, self._typing_old = "card", self.filters.get("card", "")
+                self.typing = self._typing_old       # filter the card like a table
+            elif k == ord("/") and self.detail is not None:
                 self._typing_box, self._typing_old = "detail", self.find
                 self.typing = self.find
-            elif k in (ord("n"), ord("N")) and (self.detail is not None
-                                                 or self.card is not None):
+            elif k in (ord("n"), ord("N")) and self.detail is not None:
                 if self.find.strip():
                     self.seek = "next" if k == ord("n") else "prev"
             else:
@@ -269,13 +273,18 @@ class UI:
         if b is None or not b.progs:
             return
         self.card = b.progs[0]
-        self.sel["detail"] = self.scroll["detail"] = 0
-        self.anchor.pop("detail", None)
+        self.sel["card"] = self.scroll["card"] = 0
+        self.anchor.pop("card", None)
+        self.filters.pop("card", None)
         self._set_find("")
         if not self.paused:                      # freeze while reading the card
             self.paused = self._auto_pause = True
 
     def _close(self) -> None:
+        if self.card is not None and self.detail is not None:
+            self.detail = None                   # back to the card, still paused
+            self._set_find("")
+            return
         self.help, self.detail, self.card = False, None, None
         self._set_find("")
         if self._auto_pause:

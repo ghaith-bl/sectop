@@ -307,10 +307,14 @@ A condition that is not true any more is left out.
   `enter` detail; `/` filter (in a detail: search, `n` `N` next / previous match);
   `Esc` clear filter; `f` follow; `x` hide; `c` card; `w` whois; `a` ack; `p` pause;
   `m` mask; `?` help; `q` quit.
-- Card (`c`, on a row with `progs`): a text overlay like the detail with every table row
-  of every module (all screens) whose `progs` holds the first name of the selected row,
-  grouped by box (`<module>/<panel>` + title), each `age glyph  other cells`. Scroll,
-  `/` search, `n` `N`; pauses while open (2026-10-26).
+- Card (`c`, on a row with `progs`): a table overlay (box key `card`) with every table
+  row of every module (all screens) whose `progs` holds the first name of the selected
+  row, box by box. Cols: last (its first age cell), box (`<module>/<panel>`), what (its
+  other cells); sev and tone kept. Select with the line keys, `/` filters it, `enter`
+  opens the row's detail (the box title, every column of its box with full times, its
+  own detail; `w` works on its address), `Esc` there goes back to the card, `Esc` in the
+  card closes it. Pauses while open (2026-10-26; a selectable table since his first try:
+  he wanted to open each line).
 - Follow (`f`, on a row with `filter`): that filter on every other filterable box of the
   screen; `f` again (all of them on it): cleared. Hide (`x`, filter of one word): adds
   `!word` to every filterable box of the screen (once; skipped when it would pass 60
