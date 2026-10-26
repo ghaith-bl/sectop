@@ -14,7 +14,8 @@ Stays in the repo (install.sh drops tests/). Run as my login user.
 - Masked in every value, also inside audit hex (proctitle, argv): public IPs ->
   documentation ranges (same address, same mask), MACs (also the byte dump of a
   kernel `ll header:` line), login name, real name, host name, machine id, boot id,
-  USB serial numbers, wifi names (my NetworkManager wifi profiles from `nmcli`,
+  USB serial numbers, LUKS uuids (`luks-<uuid>`, `CRYPT-LUKS2-<32 hex>`: they name my
+  disk; 2026-10-26 a systemd-escape line had one), wifi names (my NetworkManager wifi profiles from `nmcli`,
   usually the SSID, and any wpa_supplicant `SSID='...'`): an SSID next to a BSSID
   locates the place (2026-10-25: NetworkManager and wpa_supplicant lines of an unlock
   fixture had my home wifi name). Names that are common log words (null, root ...)
@@ -61,6 +62,9 @@ IP4_RE = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?!\w|\.\d)")
 COLON_RE = re.compile(r"(?<![\w:.])[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f.]*){2,}(?![\w:])")
 HEX_RE = re.compile(r"(?<==)(?:[0-9A-F]{2}){2,}(?![0-9A-Za-z])")
 SERIAL_RE = re.compile(r"(?<=SerialNumber: )\S+")
+LUKS_RE = re.compile(r"(?<=luks-)[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                     r"[0-9a-fA-F]{12}|(?<=CRYPT-LUKS[12]-)[0-9a-fA-F]{32}")
+LUKS_ZERO = {36: "00000000-0000-0000-0000-000000000000", 32: "0" * 32}
 LL_RE = re.compile(r"(?<=ll header: )([0-9a-fA-F]+:)((?: [0-9a-fA-F]{2})+)")
 KEY_RE = re.compile(r'\bkey=(?:"([^"]*)"|\(null\)|((?:[0-9A-F]{2})+))')
 KEEP_MACS = {"00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff"}
@@ -100,6 +104,7 @@ class Masker:
         s = COLON_RE.sub(self._colon, s)
         s = IP4_RE.sub(self._ip4, s)
         s = SERIAL_RE.sub(lambda m: self._hit("serial", "SERIAL"), s)
+        s = LUKS_RE.sub(lambda m: self._hit("luks", LUKS_ZERO[len(m.group(0))]), s)
         s = SSID_RE.sub(lambda m: self._hit("wifi", WIFI), s)
         for rx, rep in self.names:
             s = rx.sub(lambda m, rep=rep: self._hit("wifi" if rep == WIFI else "name", rep), s)

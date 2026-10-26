@@ -99,6 +99,19 @@ class TestMasker(unittest.TestCase):
         self.assertEqual(m.text("usb 3-6: SerialNumber: 4C5300012345"),
                          "usb 3-6: SerialNumber: SERIAL")
 
+    def test_luks_uuid(self):
+        m = jf.Masker(NAMES)
+        line = ("Input 'luks-01234567-89ab-4cde-8f01-23456789abcd' is not an absolute path; "
+                "dm uuid CRYPT-LUKS2-0123456789ab4cde8f0123456789abcd-luks-x")
+        self.assertEqual(m.text(line), "Input 'luks-00000000-0000-0000-0000-000000000000' is "
+                                       "not an absolute path; dm uuid CRYPT-LUKS2-" + "0" * 32
+                                       + "-luks-x")
+        self.assertEqual(m.n["luks"], 2)
+        title = "proctitle=" + "systemd-escape luks-01234567-89ab-4cde-8f01-23456789abcd" \
+            .encode().hex().upper()                                # inside audit hex too
+        decoded = bytes.fromhex(m.text(title)[len("proctitle="):]).decode()
+        self.assertEqual(decoded, "systemd-escape luks-00000000-0000-0000-0000-000000000000")
+
     def test_values(self):
         m = jf.Masker(NAMES)
         b = list("to 8.8.8.8 \xff".encode("latin-1"))

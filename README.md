@@ -97,4 +97,4 @@ No sudo: collector, net unit and UI refuse to run as root.
 
 - Test fixtures come from my own host, made with tests/journal_fixture.py (journalctl
   -o json -> fields kept, cursors renumbered, public IPs, MACs, names, ids, USB serials,
-  wifi names masked). Usage in the file. Check the result before commit.
+  wifi names, LUKS uuids masked). Usage in the file. Check the result before commit.
