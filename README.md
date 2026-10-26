@@ -27,8 +27,12 @@ Status: in progress (phase 3: privilege split, docs/architecture.md).
   the audit records in the journal, rated by `/etc/sectop/watch.toml` (crit / warn /
   info); auth box: sudo / su / unlock / polkit passwords, faillock locks, sudo refusals
   (docs/modules/security.md); kernel box: new taint bits, module loads / removals /
-  blocked loads, SELinux denials, kernel log errors / warnings, new USB devices. Posture,
-  logs: phase 4
+  blocked loads, SELinux denials, kernel log errors / warnings, new USB devices. Logs:
+  phase 4
+- posture: is my hardening baseline still true, checked every 5 min against
+  `/etc/sectop/posture.toml` (SELinux, audit, firewalld, accounts, sysctls, LUKS,
+  system image, listeners, ...): pass / fail / accepted / unknown
+  (docs/modules/posture.md)
 
 ## Screen legend
 

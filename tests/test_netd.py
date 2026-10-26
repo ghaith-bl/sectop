@@ -22,6 +22,8 @@ class TestCommands(unittest.TestCase):
                                                "latest-handshakes"))
         self.assertEqual({k for k, (_a, kind) in c.items() if kind == netd.SLOW},
                          {"endpoints", "fwmark", "fwmark_set"})
+        self.assertEqual(c["listen_port"], (("/usr/bin/wg", "show", "proton0", "listen-port"),
+                                            netd.FAST))           # posture: listeners
         self.assertTrue(all(os.path.basename(a[0]) in netd.NET_BINS for a, _k in c.values()))
 
     def test_bad_tunnel(self):

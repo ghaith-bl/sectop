@@ -27,6 +27,8 @@ sectop runs as separate parts (docs/architecture.md, Privilege split):
 - `/etc/sectop/watch.toml` (security screen, rating of root commands): copied from
   deploy/watch.toml when missing, never over mine. Mine differs from the shipped one:
   `kept` in the log (`diff` it to see new defaults).
+- `/etc/sectop/posture.toml` (security screen, posture checks): same as watch.toml,
+  from deploy/posture.toml when missing, never over mine.
 - Units from deploy/ -> `/etc/systemd/system`, daemon-reload, enable, restart:
   sectop-net.service, sectop.service, sectop-whois.socket.
 - SELinux labels: restorecon on everything it wrote.

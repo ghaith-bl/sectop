@@ -82,18 +82,24 @@ install_users() {  # $1 = login user
   log "users: $(id sectop), $(id sectop-net)"
 }
 
+put_default() {    # $1 = watch | posture: deploy/$1.toml -> $CONF/$1.toml when missing
+  local name=$1
+  local file=$CONF/$name.toml defaults=$DEST/deploy/$name.toml
+  if [[ ! -e $file && ! -L $file ]]; then            # mine stays mine: never over it
+    install -m 0644 -o root -g root "$defaults" "$file"
+    relabel "$file"
+    log "$name: $file (new, from deploy/$name.toml)"
+  elif [[ $(sha256sum < "$file") != "$(sha256sum < "$defaults")" ]]; then
+    log "$name: $file kept (differs from $defaults)"
+  else
+    log "$name: $file (same as deploy/$name.toml)"
+  fi
+}
+
 check_conf() {     # collector and net unit read the config as non-root users
   install -d -m 0755 -o root -g root "$CONF"
-  local watch=$CONF/watch.toml defaults=$DEST/deploy/watch.toml
-  if [[ ! -e $watch && ! -L $watch ]]; then          # mine stays mine: never over it
-    install -m 0644 -o root -g root "$defaults" "$watch"
-    relabel "$watch"
-    log "watch: $watch (new, from deploy/watch.toml)"
-  elif [[ $(sha256sum < "$watch") != "$(sha256sum < "$defaults")" ]]; then
-    log "watch: $watch kept (differs from $defaults)"
-  else
-    log "watch: $watch (same as deploy/watch.toml)"
-  fi
+  put_default watch
+  put_default posture
   local f
   for f in "$CONF"/*.toml; do
     [[ -e $f ]] || continue

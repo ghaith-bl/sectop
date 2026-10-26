@@ -1,0 +1,364 @@
+# sectop posture policy: my baseline (silverblue-cis-hardening) as checks.
+# Installed to /etc/sectop/posture.toml when missing, never over mine (install.sh).
+# Read once at start: sudo systemctl restart sectop.service after a change.
+# Kinds and keys: docs/modules/posture.md. No commands in this file: each kind is code.
+# sev = severity when the check fails. Red (crit) + alert only when a protection is off
+# (decided 2026-10-25). ref = accepted deviation: shown dim, no alert.
+
+# ---- SELinux ----
+
+[[check]]
+id = "selinux-enforcing"
+kind = "file"
+sev = "crit"
+why = "SELinux enforcing now"
+path = "/sys/fs/selinux/enforce"
+want = "1"
+
+[[check]]
+id = "selinux-config"
+kind = "file"
+sev = "warn"
+why = "SELinux enforcing at next boot"
+path = "/etc/selinux/config"
+key = "SELINUX"
+want = "enforcing"
+
+[[check]]
+id = "selinux-type"
+kind = "file"
+sev = "warn"
+why = "SELinux policy targeted (CIS 1.3.1)"
+path = "/etc/selinux/config"
+key = "SELINUXTYPE"
+want = "targeted"
+
+# ---- audit ----
+
+[[check]]
+id = "audit-boot"
+kind = "cmdline"
+sev = "crit"
+why = "audit on from boot (kernel args)"
+want = ["audit=1", "audit_backlog_limit=8192"]
+
+[[check]]
+id = "audit-enabled"
+kind = "audit-enabled"
+sev = "crit"
+why = "audit not switched off (auditctl -e 0)"
+
+[[check]]
+id = "auditd-active"
+kind = "units"
+sev = "crit"
+why = "auditd running"
+units = { "auditd.service" = "active" }
+
+[[check]]
+id = "audit-rules"
+kind = "audit-rules"
+sev = "warn"
+why = "audit rules loaded (verification.md: ~70)"
+want = 70
+
+[[check]]
+id = "journald-audit"
+kind = "units"
+sev = "warn"
+why = "journald reads audit (sectop's security screen needs it)"
+units = { "systemd-journald-audit.socket" = "active" }
+
+# ---- firewall ----
+# hostfw mode and boot mode: firewall screen checks (alerts there, not twice).
+
+[[check]]
+id = "firewalld-active"
+kind = "units"
+sev = "crit"
+why = "firewalld running"
+units = { "firewalld.service" = "active" }
+
+[[check]]
+id = "firewalld-zone"
+kind = "firewalld-zone"
+sev = "crit"
+why = "firewalld default zone drop"
+want = "drop"
+
+# ---- accounts and login ----
+
+[[check]]
+id = "uid0"
+kind = "uid0"
+sev = "crit"
+why = "only root has UID 0 (CIS, STIG V-258059)"
+want = ["root"]
+
+[[check]]
+id = "wheel"
+kind = "group"
+sev = "crit"
+why = "wheel (sudo) members"
+group = "wheel"
+want = ["null"]
+
+[[check]]
+id = "su-group"
+kind = "group"
+sev = "warn"
+why = "su closed: sugroup empty"
+group = "sugroup"
+want = []
+
+[[check]]
+id = "su-pam"
+kind = "lines"
+sev = "warn"
+why = "su closed: pam_wheel group=sugroup"
+path = "/etc/pam.d/su"
+want = ["auth required pam_wheel.so use_uid group=sugroup"]
+
+[[check]]
+id = "faillock-deny"
+kind = "file"
+sev = "warn"
+why = "faillock locks after 5 failures"
+path = "/etc/security/faillock.conf"
+key = "deny"
+op = "<="
+want = "5"
+
+[[check]]
+id = "faillock-unlock"
+kind = "file"
+sev = "warn"
+why = "faillock lock lasts 15 min"
+path = "/etc/security/faillock.conf"
+key = "unlock_time"
+op = ">="
+want = "900"
+
+[[check]]
+id = "pwquality-minlen"
+kind = "file"
+sev = "warn"
+why = "passwords 14 chars or more"
+path = "/etc/security/pwquality.conf"
+key = "minlen"
+op = ">="
+want = "14"
+
+[[check]]
+id = "pwquality-minclass"
+kind = "file"
+sev = "warn"
+why = "passwords with 4 character classes"
+path = "/etc/security/pwquality.conf"
+key = "minclass"
+op = ">="
+want = "4"
+
+[[check]]
+id = "shadow-perms"
+kind = "perms"
+sev = "warn"
+why = "/etc/shadow mode 0 (CIS 7.1)"
+path = "/etc/shadow"
+mode = "0"
+owner = "root:root"
+
+[[check]]
+id = "gshadow-perms"
+kind = "perms"
+sev = "warn"
+why = "/etc/gshadow mode 0 (CIS 7.1)"
+path = "/etc/gshadow"
+mode = "0"
+owner = "root:root"
+
+[[check]]
+id = "passwd-perms"
+kind = "perms"
+sev = "warn"
+why = "/etc/passwd mode 644 (CIS 7.1)"
+path = "/etc/passwd"
+mode = "644"
+owner = "root:root"
+
+[[check]]
+id = "group-perms"
+kind = "perms"
+sev = "warn"
+why = "/etc/group mode 644 (CIS 7.1)"
+path = "/etc/group"
+mode = "644"
+owner = "root:root"
+
+# ---- kernel ----
+
+[[check]]
+id = "sysctl-kernel"
+kind = "sysctl"
+sev = "warn"
+why = "kernel sysctls of 90-hardening.conf"
+# net.core.bpf_jit_harden: root-only file (0600), not checked
+values = { "kernel.dmesg_restrict" = "1", "kernel.kptr_restrict" = "2", "kernel.yama.ptrace_scope" = "1", "kernel.randomize_va_space" = "2", "kernel.kexec_load_disabled" = "1", "kernel.unprivileged_bpf_disabled" = "1", "fs.suid_dumpable" = "0", "fs.protected_hardlinks" = "1", "fs.protected_symlinks" = "1" }
+
+[[check]]
+id = "sysctl-ipv4"
+kind = "sysctl"
+sev = "warn"
+why = "IPv4 sysctls of 90-hardening.conf"
+values = { "net.ipv4.conf.all.accept_redirects" = "0", "net.ipv4.conf.default.accept_redirects" = "0", "net.ipv4.conf.all.secure_redirects" = "0", "net.ipv4.conf.default.secure_redirects" = "0", "net.ipv4.conf.all.send_redirects" = "0", "net.ipv4.conf.default.send_redirects" = "0", "net.ipv4.conf.all.accept_source_route" = "0", "net.ipv4.conf.default.accept_source_route" = "0", "net.ipv4.conf.all.log_martians" = "1", "net.ipv4.conf.default.log_martians" = "1", "net.ipv4.conf.all.rp_filter" = "2", "net.ipv4.conf.default.rp_filter" = "2", "net.ipv4.icmp_echo_ignore_broadcasts" = "1", "net.ipv4.icmp_ignore_bogus_error_responses" = "1", "net.ipv4.tcp_syncookies" = "1" }
+
+[[check]]
+id = "sysctl-ipv6"
+kind = "sysctl"
+sev = "warn"
+why = "IPv6 sysctls of 90-hardening.conf"
+values = { "net.ipv6.conf.all.accept_ra" = "0", "net.ipv6.conf.default.accept_ra" = "0", "net.ipv6.conf.all.accept_redirects" = "0", "net.ipv6.conf.default.accept_redirects" = "0", "net.ipv6.conf.all.accept_source_route" = "0", "net.ipv6.conf.default.accept_source_route" = "0", "net.ipv6.conf.all.forwarding" = "0", "net.ipv6.conf.default.forwarding" = "0" }
+
+[[check]]
+id = "taint"
+kind = "taint"
+sev = "warn"
+why = "kernel taint only what is known"
+want = "O E"                        # akmod-nvidia probes; "" after step 9 removes it
+
+[[check]]
+id = "modules-blocked"
+kind = "lines"
+sev = "warn"
+why = "CIS modules blocked (90-cis-blacklist.conf)"
+path = "/etc/modprobe.d/90-cis-blacklist.conf"
+want = ["install cramfs /bin/false", "install freevxfs /bin/false", "install hfs /bin/false", "install hfsplus /bin/false", "install jffs2 /bin/false", "install squashfs /bin/false", "install udf /bin/false", "install atm /bin/false", "install can /bin/false", "install dccp /bin/false", "install rds /bin/false", "install sctp /bin/false", "install tipc /bin/false", "install firewire-core /bin/false"]
+
+[[check]]
+id = "secure-boot"
+kind = "secureboot"
+sev = "warn"
+why = "Secure Boot on"
+ref = "off until akmod-nvidia is removed (step 9)"
+
+[[check]]
+id = "lockdown"
+kind = "lockdown"
+sev = "warn"
+why = "kernel lockdown (on with Secure Boot)"
+want = "integrity|confidentiality"
+ref = "none until Secure Boot is on (step 9)"
+
+# ---- disk, system image ----
+
+[[check]]
+id = "luks-var"
+kind = "luks"
+sev = "crit"
+why = "/var (home, logs) on LUKS"
+path = "/var"
+
+[[check]]
+id = "ostree-locked"
+kind = "ostree-unlocked"
+sev = "crit"
+why = "system image not unlocked (/usr read-only)"
+
+[[check]]
+id = "ostree-gpg"
+kind = "ostree-gpg"
+sev = "crit"
+why = "updates verified (ostree remotes gpg-verify)"
+
+[[check]]
+id = "ostree-age"
+kind = "ostree-age"
+sev = "warn"
+why = "booted system not older than 14 days"
+max_days = 14
+
+[[check]]
+id = "ostree-staged"
+kind = "ostree-staged"
+sev = "info"
+why = "no update waiting for a reboot"
+
+[[check]]
+id = "crypto-policy"
+kind = "file"
+sev = "warn"
+why = "crypto policy not LEGACY (CIS 1.6.1)"
+path = "/etc/crypto-policies/config"
+op = "!="
+want = "LEGACY"
+
+# ---- services ----
+
+[[check]]
+id = "units-masked"
+kind = "units"
+sev = "warn"
+why = "services off by the hardening (masked)"
+units = { "sshd.service" = "masked", "sshd.socket" = "masked", "nftables.service" = "masked", "rpcbind.service" = "masked", "rpcbind.socket" = "masked", "nfs-server.service" = "masked" }
+
+[[check]]
+id = "failed-units"
+kind = "failed-units"
+sev = "warn"
+why = "no failed units"
+
+[[check]]
+id = "coredump-storage"
+kind = "file"
+sev = "warn"
+why = "core dumps not stored (CIS 1.5)"
+path = "/etc/systemd/coredump.conf.d/90-cis.conf"
+key = "Storage"
+want = "none"
+
+[[check]]
+id = "coredump-size"
+kind = "file"
+sev = "warn"
+why = "core dumps size 0 (CIS 1.5)"
+path = "/etc/systemd/coredump.conf.d/90-cis.conf"
+key = "ProcessSizeMax"
+want = "0"
+
+[[check]]
+id = "journald-persistent"
+kind = "file"
+sev = "warn"
+why = "journal kept on disk (CIS 6.2)"
+path = "/etc/systemd/journald.conf.d/90-cis.conf"
+key = "Storage"
+want = "persistent"
+
+[[check]]
+id = "gnome-locks"
+kind = "lines"
+sev = "warn"
+why = "GNOME automount off + screen lock, locked (CIS 1.8)"
+path = "/etc/dconf/db/local.d/locks/90-cis-hardening"
+want = ["/org/gnome/desktop/media-handling/automount", "/org/gnome/desktop/media-handling/automount-open", "/org/gnome/desktop/media-handling/autorun-never", "/org/gnome/desktop/screensaver/lock-enabled", "/org/gnome/desktop/screensaver/lock-delay", "/org/gnome/desktop/session/idle-delay"]
+
+# ---- network ----
+
+[[check]]
+id = "wifi-ipv6"
+kind = "wifi-ipv6"
+sev = "warn"
+why = "IPv6 off on every wifi profile (NetworkManager makes new ones auto)"
+want = "disabled"
+
+[[check]]
+id = "listeners"
+kind = "listeners"
+sev = "crit"
+why = "nothing listens outside loopback but the allowlist"
+# libvirt default network (virbr0): dnsmasq DNS for the VMs on the bridge address, DHCP
+# bound to virbr0 (/proc/net shows 0.0.0.0:67). Loopback (resolved, chronyd): always ok.
+allow = ["udp 192.168.122.1:53", "tcp 192.168.122.1:53", "udp 0.0.0.0:67"]
+# WireGuard proton0: Proton picks a new random port on every connect: its udp 0.0.0.0 /
+# [::] port is taken from `wg show proton0 listen-port` (net unit), not a glob here.
+wireguard = "proton0"

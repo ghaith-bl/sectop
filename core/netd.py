@@ -60,7 +60,8 @@ def bin_path(name: str) -> str:
 
 
 def commands(tunnel: str, binary=bin_path) -> dict:
-    """name -> (argv, FAST or SLOW). Exactly what modules/firewall asks for."""
+    """name -> (argv, FAST or SLOW). Exactly what modules/firewall asks for, plus
+    listen_port for modules/posture (listeners: Proton picks a new port each connect)."""
     if not isinstance(tunnel, str) or not IFACE_RE.fullmatch(tunnel):
         raise ValueError("tunnel: interface name required")
     nft, wg = binary("nft"), binary("wg")
@@ -68,6 +69,7 @@ def commands(tunnel: str, binary=bin_path) -> dict:
         "table": ((nft, "-j", "-t", "list", "table", *TABLE), FAST),
         "handshakes": ((wg, "show", tunnel, "latest-handshakes"), FAST),
         "transfer": ((wg, "show", tunnel, "transfer"), FAST),
+        "listen_port": ((wg, "show", tunnel, "listen-port"), FAST),
         "endpoints": ((wg, "show", tunnel, "endpoints"), SLOW),
         "fwmark": ((wg, "show", tunnel, "fwmark"), SLOW),
         "fwmark_set": ((nft, "-j", "list", "set", *TABLE, "wg_fwmark"), SLOW),

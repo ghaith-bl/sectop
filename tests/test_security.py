@@ -86,7 +86,8 @@ class TestModule(unittest.TestCase):
 
     def test_on_screen_2(self):
         s = SCREENS[find("security")]
-        self.assertEqual((s.modules, s.focus, s.feed), (("security",), "security/commands", False))
+        self.assertEqual((s.modules, s.focus, s.feed),
+                         (("security", "posture"), "security/commands", False))
 
     def test_normalize(self):
         self.assertEqual(sec.normalize(["/proc/44494/exe"]), "/proc/#/exe")

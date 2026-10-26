@@ -93,9 +93,9 @@ true. Built in phase 4, after the privilege split.
     | logs (full width)                                     |
     +-------------------------------------------------------+
 
-Built so far (2026-10-26): commands, auth and kernel, each full width, one under the
-other (the cmd / what columns need the room). The grid is looked at again when posture
-comes.
+Built so far (2026-10-26): commands, auth, kernel and posture, each full width, one under
+the other (the cmd / what columns need the room). Grid: looked at again with the logs
+box.
 
 Source: the one journal reader. Audit records via journald
 (`systemd-journald-audit.socket` enabled + active, 2026-10-20). Not `/var/log/audit` or
@@ -289,6 +289,10 @@ Target: < 1% CPU, < 30 MiB RSS.
 
 ## Security posture
 
+Built 2026-10-26 (docs/modules/posture.md): module `posture`, below the security boxes.
+Agreed table + host checks (sandbox, user sectop) 2026-10-26; the list below is the
+plan of 2026-10-20, kept for history.
+
 - Baseline = my repo silverblue-cis-hardening. No invented standard.
 - Policy file `/etc/sectop/posture.toml` (root-owned): check id, what, expected value,
   source (file / command), optional `ref` into the repo's `docs/deviations.md`.
@@ -307,7 +311,8 @@ Target: < 1% CPU, < 30 MiB RSS.
   - updates: `rpm-ostree status --json`, cached only, once per day (collector has no
     network)
   - wifi: `ipv6.method` disabled on every wifi profile (nmcli)
-- Open: firewalld default zone without root; flatpak updates without network.
+- Open: flatpak updates without network. Solved 2026-10-26: firewalld default zone
+  via `firewall-cmd --get-default-zone` (works as user sectop).
 - Needs root, not checked: `auditctl -l` / `-s` (CAP_AUDIT_CONTROL), `/var/run/faillock`.
 
 ## Logs
@@ -374,7 +379,8 @@ Design (least privilege: NIST SP 800-53 / 800-171 AC-6, systemd.exec(5), capabil
   `CapabilityBoundingSet=`. Fixed argv (`modules/firewall/netcmds.py`: argv only, the
   only firewall code it imports), takes no input. Raw result per command:
   `/run/sectop-net/<name>.json` (argv, rc, out, err, ts), group `sectop`. Every half
-  firewall interval: nft table, wg handshakes + transfer. Every half SLOW: wg endpoints +
+  firewall interval: nft table, wg handshakes + transfer + listen-port (posture
+  listeners, 2026-10-26). Every half SLOW: wg endpoints +
   fwmark, nft set wg_fwmark. Not in the collector: ambient capabilities pass to every
   child (capabilities(7)).
 - Program names: `ss -p` needs CAP_SYS_PTRACE (capabilities(7): /proc/pid/fd of other
@@ -454,7 +460,8 @@ Best practice decides (Red Hat for the host). Fixtures from my host first
      docs/modules/security.md).
   4. auth box: done 2026-10-25 (modules/security/auth.py, fixtures 2026-10-25).
   5. kernel box: done 2026-10-26 (modules/security/kernel.py).
-  6. posture module + posture.toml
+  6. posture module + posture.toml: done 2026-10-26 (modules/posture,
+     docs/modules/posture.md).
   7. logs box: groups, noise on groups, audit keys
   8. program card
 - Then screen 3 (processes): its design is decided after step 8 (2026-10-25).

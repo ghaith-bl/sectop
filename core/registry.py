@@ -22,6 +22,7 @@ from core.module import check_module
 MODULES: tuple[str, ...] = (
     "modules.firewall",
     "modules.security",
+    "modules.posture",
 )
 
 IMPORT_RE = re.compile(r"modules\.([a-z0-9_]+)")
