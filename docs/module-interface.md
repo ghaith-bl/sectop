@@ -195,7 +195,7 @@ A condition that is not true any more is left out.
 - Module not loaded (registry error) -> status unknown, header shows the error.
   Disabled -> shown as OFF.
 - Collector -> UI: `/run/sectop/state.json` (State files) after every collect and every
-  5 s. UI (`core/app.py`): no new state for 3 x the longest module interval (min 15 s),
+  5 s. UI (`core/app.py`): no new state for 3 x the state's `interval` (min 15 s),
   no file, a bad file, user sectop missing or no access -> crit alert `core/collector`
   "collector: <why>" (the bar shows titles only, so the title says why), last good data
   kept, modules marked stale (status unknown). User sectop is looked up again on every
@@ -461,7 +461,8 @@ JSON files between sectop's parts (docs/architecture.md, Privilege split).
 
 - `/run/sectop/state.json`: collector -> UI. `{v, ts, interval, modules, feed, alerts}`:
   the module view, the events feed (newest first) and the active alerts
-  (`core/alerts.py` active(), noise applied). `interval` = longest module interval.
+  (`core/alerts.py` active(), noise applied). `interval` = longest time between two
+  writes outside a collect: the longest module interval, at most the 5 s heartbeat.
 - `/run/sectop-net/<name>.json`: net unit -> collector, one command result
   (`core/netd.py`).
 - Write: temp file in the same directory, `fchmod`, then rename over the old file

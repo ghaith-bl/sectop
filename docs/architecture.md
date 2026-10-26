@@ -363,8 +363,10 @@ Design (least privilege: NIST SP 800-53 / 800-171 AC-6, systemd.exec(5), capabil
   journal files).
 - Output: `RuntimeDirectory=sectop`, mode 0750 -> `/run/sectop/state.json` (write +
   rename). My user in group `sectop`, read only. File, not socket: one-way, less code.
-  Written after every collect and every 5 s. No update for 3 x the longest module
-  interval (min 15 s) -> UI shows crit alert "collector: <why>".
+  Written after every collect and every 5 s. No update for 3 x `interval` of the state
+  (longest module interval, at most the 5 s heartbeat; min 15 s) -> UI shows crit alert
+  "collector: <why>". Capped 2026-10-26: posture runs every 300 s, uncapped the UI would
+  notice a dead collector after 15 min.
 - Capabilities only where the kernel requires them: `nft list` and `wg show` need
   CAP_NET_ADMIN even to read (tested 2026-10-20, transient unit as nobody: works with
   the capability only, "Operation not permitted" without). CAP_NET_ADMIN can also change

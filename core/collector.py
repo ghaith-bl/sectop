@@ -138,8 +138,15 @@ class Core:
         return max(SLEEP_MIN, min(left, limit, SLEEP_MAX))
 
     def longest(self) -> float:
-        """Longest configured interval of the active modules (UI: stale limit)."""
+        """Longest configured interval of the active modules."""
         return max((r.base for r in self.runs if r.loaded.active), default=MIN_INTERVAL)
+
+    def period(self) -> float:
+        """Longest time between two state writes outside a collect (UI: stale limit is 3 x
+        this, min 15 s): the state is written after every collect and every HEARTBEAT s,
+        so a slow module (posture, 300 s) does not make the UI wait 15 min to notice a dead
+        collector (2026-10-26)."""
+        return min(self.longest(), HEARTBEAT)
 
     def active(self) -> list:
         """Open and held alerts (core/alerts.py, wall clock, noise list)."""
@@ -188,7 +195,7 @@ class Core:
     def state(self) -> dict:
         """state.json document (core/statefile.py)."""
         alerts = self.active()
-        return statefile.state(self.wall(), self.longest(), self.view(alerts),
+        return statefile.state(self.wall(), self.period(), self.view(alerts),
                                list(self.feed), alerts)
 
 

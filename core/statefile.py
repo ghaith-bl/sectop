@@ -81,7 +81,8 @@ def load(path: str, owner_uid: int, max_size: int = MAX_SIZE):
 # --- state.json -----------------------------------------------------------
 
 def state(ts: float, interval: float, view: list, feed: list, alerts: list) -> dict:
-    """What the collector writes. interval = longest module interval (UI: stale limit)."""
+    """What the collector writes. interval = longest time between two writes outside a
+    collect (core/collector.py period(); UI: stale limit)."""
     return {"v": VERSION, "ts": ts, "interval": interval, "modules": view,
             "feed": feed[:MAX_FEED], "alerts": alerts}
 

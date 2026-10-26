@@ -32,7 +32,7 @@ STATE_PATH = "/run/sectop/state.json"
 COLLECTOR_USER = "sectop"
 TICK_MS = 250
 STALE_MIN = 15.0         # seconds without a new state -> collector alert
-STALE_FACTOR = 3         # ... or 3 x the longest module interval, if longer
+STALE_FACTOR = 3         # ... or 3 x the state's interval (write period), if longer
 ALERT_KEY = "core/collector"
 
 

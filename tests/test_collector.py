@@ -336,6 +336,14 @@ class TestState(unittest.TestCase):
         self.assertAlmostEqual(c.wait(0.1), 0.1)                 # heartbeat sooner
         self.assertEqual(Core([], clock=clock).longest(), 1.0)
 
+    def test_period_capped_by_heartbeat(self):
+        """posture runs every 300 s: the UI must not wait 3 x 300 s for a dead collector."""
+        c = Core([loaded("a", interval=2.0), loaded("p", interval=300.0)], clock=Clock())
+        self.assertEqual((c.longest(), c.period()), (300.0, collector.HEARTBEAT))
+        self.assertEqual(c.state()["interval"], collector.HEARTBEAT)
+        c = Core([loaded("a", interval=2.0)], clock=Clock())
+        self.assertEqual(c.period(), 2.0)
+
     def test_state_passes_ui_check(self):
         clock, wall = Clock(), Clock(1760950000.0)
         crit = {**snap(events=[ev(1760949999.0)]), "v": 2,
