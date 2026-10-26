@@ -135,7 +135,8 @@ Audit records in the journal (host sample 2026-10-20: 2 sudo calls, 195 entries)
   `use_pty` gives the command a new pty. Join: `root_cmds` argv == USER_CMD `cmd`, same
   ses, within 5 s -> via `sudo <tty of the sudo launch>`. Else parent = exe of an execve
   already seen (pid), else `ppid <n>`. No `/proc` lookup (2026-10-20): read seconds
-  later, the pid may be reused -> wrong parent. `ProtectProc=invisible` stays.
+  later, the pid may be reused -> wrong parent. (ProtectProc=default since 2026-10-26
+  for the program card, which checks the process start; via / parents unchanged.)
 - `unix_chkpwd` (1-2 per password prompt): never a row, folded into its parent's row
   (sudo launch, sudo run by root, gdm-session-worker). Parent not seen: counted only.
 - Launch without a root child (sudo -k / -l, sudoedit, denied sudo):
@@ -216,15 +217,24 @@ Built 2026-10-26 (docs/modules/security.md, kernel box; table agreed 2026-10-25)
 
 ### Program card (phase 4)
 
-`enter` on a program: everything sectop can tie to it.
-- Identity = cgroup app id / unit (Firewall audit, program name). Process -> cgroup:
-  `/proc/<pid>/cgroup` while it runs. Audit entries have no cgroup (see Kernel), so this
-  needs `/proc` of other users: `ProtectProc=default` for sectop.service in this step,
-  with this reason in the commit.
-- Network flows; root commands / setuid launches with a parent in it; polkit requests
-  from it; its AVC denials; its journal warnings / errors (`_SYSTEMD_USER_UNIT`,
-  `_SYSTEMD_UNIT`).
-- Not shown: file access and plain (non-root) execs. Not audited (volume).
+Built 2026-10-26 (agreed: key `c`, ProtectProc=default for the collector). `c` on any row
+that knows its program: every row of every box of every screen with the same program
+(core/render.py card, docs/module-interface.md, Card). `enter` stays the detail.
+- Identity = core/proc.py program(): innermost unit / app id of the cgroup (moved from
+  modules/firewall/conns.py). Login / sudo session scopes are not programs.
+- Row `progs`: firewall programs / audit / peers (ss --cgroup); security commands,
+  auth, kernel (modules, AVC, blocked loads), logs audit keys: the record's pid, else
+  its parent, read from `/proc/<pid>/cgroup` in the same collect, only when
+  `/proc/<pid>/stat` says the process started before the record (no name rather than a
+  wrong one: the 2026-10-20 rule "no /proc lookup, pid reuse" kept for via / parents);
+  logs journal lines: `_SYSTEMD_CGROUP` of the entry.
+- sectop.service `ProtectProc=default` (was invisible): the collector reads other users'
+  `/proc/<pid>/{stat,cgroup}`. The same view as any local user on Fedora (no hidepid);
+  environ, fd, mem need ptrace access (no CAP_SYS_PTRACE): closed. Net and whois units
+  stay invisible. Screen 3 needs the same.
+- Not shown: file access and plain (non-root) execs (not audited, volume); a process
+  gone before the collect reads it (short root commands from a terminal: the parent's
+  program when it still runs, else none).
 
 ## Alerts
 
@@ -469,7 +479,7 @@ Best practice decides (Red Hat for the host). Fixtures from my host first
      docs/modules/posture.md).
   7. logs box: groups, noise on groups, audit keys: done 2026-10-26
      (modules/security/logs.py).
-  8. program card
+  8. program card: done 2026-10-26 (key c, core/proc.py, ProtectProc=default).
 - Then screen 3 (processes): its design is decided after step 8 (2026-10-25).
 
 ## Contract changes (Snapshot v2)

@@ -90,6 +90,14 @@ class TestUnits(unittest.TestCase):
                 self.assertEqual(s.get(k), v, f"{name} {k}")
             self.assertEqual(unit(name)["Service"]["SystemCallFilter"][0], "@system-service")
 
+    def test_proc_view(self):
+        """Only the collector sees other users' processes (program card, 2026-10-26)."""
+        self.assertEqual(svc("sectop.service")["ProtectProc"], "default")
+        for name in ("sectop-net.service", "sectop-whois@.service"):
+            self.assertEqual(svc(name)["ProtectProc"], "invisible", name)
+        self.assertNotIn("CAP_SYS_PTRACE", svc("sectop.service").get("CapabilityBoundingSet",
+                                                                      ""))
+
     def test_network(self):
         for name in ("sectop.service", "sectop-net.service"):
             s = svc(name)

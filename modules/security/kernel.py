@@ -33,6 +33,7 @@ import os
 import re
 
 from core import audit
+from core import proc as procmod
 from core.journal import values
 from core.sanitize import _ADDR
 
@@ -110,6 +111,7 @@ class Row:
         self.detail = {}                                 # k -> v, newest values
         self.msgs = collections.deque(maxlen=MAX_MSGS)   # log: distinct raw lines
         self.subject = ""                                # check: what the alert is about
+        self.progs = procmod.names()                     # c = program card
         self.label = ""                                  # check title: log priority name
         self.reported = 0                                # n at the last check
 
@@ -195,7 +197,11 @@ def _result(ev) -> str:
         return "failed"
 
 
-def _module(k: Kernel, ev, call: str, ts: float, name) -> None:
+def _none(pid, ts):
+    return None
+
+
+def _module(k: Kernel, ev, call: str, ts: float, name, prog=_none) -> None:
     rec = ev.first("KERN_MODULE")
     mod = (audit.text(rec.raw, "name") if rec else None) or "?"
     auid = ev.get("auid")
@@ -210,6 +216,7 @@ def _module(k: Kernel, ev, call: str, ts: float, name) -> None:
     what = f"{action} {mod}" + ("" if result == "ok" else f" {result}")
     key = "\x1f".join(("module", action, mod, result, login, exe))
     r = _add(k, key, "module", login, what, sev, why, ts)
+    procmod.add(r.progs, prog(ev.get("pid"), ts) or prog(ev.get("ppid"), ts))
     k.loads += 1
     r.detail = {"exe": exe, "cmdline": ev.proctitle or ev.get("comm") or "-",
                 "syscall": call, "result": result, "pid / ppid":
@@ -222,7 +229,7 @@ def _ctx_type(ctx: str | None) -> str:
     return parts[2] if len(parts) >= 3 else (ctx or "?")
 
 
-def _avc(k: Kernel, rec, ts: float) -> None:
+def _avc(k: Kernel, rec, ts: float, prog=_none) -> None:
     m = AVC_RE.search(rec.message)
     if m is None:
         return                                   # granted, policy load notice, ...
@@ -240,6 +247,7 @@ def _avc(k: Kernel, rec, ts: float) -> None:
     what = f"{{ {perms} }} {stype} -> {ttype} {tclass}" + (" (allowed)" if allowed else "")
     key = "\x1f".join(("avc", comm, stype, ttype, tclass, perms, "1" if allowed else "0"))
     r = _add(k, key, "avc", comm, what, sev, why, ts)
+    procmod.add(r.progs, prog(raw.get("pid"), ts))
     d = {"record": "AVC" if rec.type == AVC else "USER_AVC",
          "scontext": raw.get("scontext") or "-", "tcontext": raw.get("tcontext") or "-",
          "pid": raw.get("pid") or "-"}
@@ -250,15 +258,15 @@ def _avc(k: Kernel, rec, ts: float) -> None:
     r.detail = d
 
 
-def audit_event(k: Kernel, ev, ts: float, name) -> None:
+def audit_event(k: Kernel, ev, ts: float, name, prog=_none) -> None:
     """One audit event (core/audit.py Event): module syscalls, AVC, USER_AVC."""
     if ev.kind == "SYSCALL":
         call = MODULE_CALLS.get(ev.get("arch") or "", {}).get(ev.get("syscall") or "")
         if call:
-            _module(k, ev, call, ts, name)
+            _module(k, ev, call, ts, name, prog)
     for rec in ev.records:
         if rec.type in (AVC, USER_AVC):
-            _avc(k, rec, ts)
+            _avc(k, rec, ts, prog)
 
 
 def _modname(argv: list) -> str:
@@ -268,7 +276,7 @@ def _modname(argv: list) -> str:
     return "?"
 
 
-def exec_event(k: Kernel, ev, ts: float, name) -> None:
+def exec_event(k: Kernel, ev, ts: float, name, prog=_none) -> None:
     """A root command / setuid exec (commands box keys). modprobe runs are kept a short
     time; its `sh -c -- /bin/false` (or /bin/false itself) = the load was blocked."""
     for pid in list(k.modprobes):
@@ -293,6 +301,7 @@ def exec_event(k: Kernel, ev, ts: float, name) -> None:
     r = _add(k, key, "module", login, f"blocked {mod}", "info",
              f"load blocked: install {mod} {argv[-1]} (modprobe.d)", ts)
     r.detail = {"cmdline": line, "install": " ".join(argv), "pid / ppid": f"{pid} / {ppid}"}
+    procmod.add(r.progs, prog(pid, ts) or prog(ppid, ts))
 
 
 # --- kernel log + USB ------------------------------------------------------
@@ -374,9 +383,12 @@ def rows(k: Kernel, stamp) -> list:
         detail = [("why", r.why), ("first", stamp(r.first))]
         detail += [("line", m) for m in r.msgs]
         detail += list(r.detail.items())
-        out.append({"cells": [f"{r.last:.3f}", str(r.n), r.kind, r.src, r.what],
-                    "sev": r.sev, "id": f"{r.kind}:{key}" if r.kind == "taint" else key,
-                    "detail": [{"k": a, "v": b} for a, b in detail]})
+        row = {"cells": [f"{r.last:.3f}", str(r.n), r.kind, r.src, r.what],
+               "sev": r.sev, "id": f"{r.kind}:{key}" if r.kind == "taint" else key,
+               "detail": [{"k": a, "v": b} for a, b in detail]}
+        if r.progs:
+            row["progs"] = list(r.progs)
+        out.append(row)
     return out
 
 

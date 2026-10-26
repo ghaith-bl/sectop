@@ -27,6 +27,8 @@ import hashlib
 import os
 import re
 
+from core import proc as procmod
+
 USER_AUTH = 1100
 USER_MGMT = 1102
 ACCT_LOCK = 2207
@@ -51,6 +53,7 @@ class Row:
         self.tty = self.exe = self.pid = self.by = ""
         self.ttys = collections.deque(maxlen=5)        # distinct, newest first
         self.reported = 0                               # n at the last check
+        self.progs = procmod.names()                    # c = program card
 
 
 class Auth:
@@ -70,7 +73,8 @@ def service(exe: str | None) -> str:
 
 
 def _add(a: Auth, login: str, user: str, svc: str, result: str, ts: float, sev: str,
-         why: str, tty: str = "-", exe: str = "", pid: str = "", by: str = "") -> Row:
+         why: str, tty: str = "-", exe: str = "", pid: str = "", by: str = "",
+         prog: str | None = None) -> Row:
     key = "\x1f".join((login, user, svc, result))
     r = a.rows.pop(key, None) or Row(login, user, svc, result, ts)
     a.rows[key] = r                                     # most recent last
@@ -83,13 +87,20 @@ def _add(a: Auth, login: str, user: str, svc: str, result: str, ts: float, sev: 
     if tty in r.ttys:
         r.ttys.remove(tty)
     r.ttys.appendleft(tty)
+    procmod.add(r.progs, prog)
     return r
 
 
-def audit_event(a: Auth, ev, ts: float, name) -> None:
-    """One audit event (core/audit.py Event). name(uid) -> user name."""
+def _none(pid, ts):
+    return None
+
+
+def audit_event(a: Auth, ev, ts: float, name, prog=_none) -> None:
+    """One audit event (core/audit.py Event). name(uid) -> user name, prog(pid, ts) ->
+    program (core/proc.py)."""
     if not ev.records:
         return
+    p = prog(ev.get("pid"), ts)
     t = ev.records[0].type
     login = name(ev.get("auid"))
     if t == USER_AUTH:
@@ -104,20 +115,20 @@ def audit_event(a: Auth, ev, ts: float, name) -> None:
         else:
             sev, why = "warn", "authentication failed (wrong password, or a locked account)"
         _add(a, login, user, svc, "ok" if ok else "failed", ts, sev, why,
-             _tty(ev.get("terminal")), exe, ev.get("pid") or "", name(uid))
+             _tty(ev.get("terminal")), exe, ev.get("pid") or "", name(uid), p)
     elif t == ACCT_LOCK:
         exe = ev.get("exe") or ""
         _add(a, login, name(ev.get("suid")), service(exe), "locked", ts, "crit",
              "account locked by pam_faillock (deny reached)", _tty(ev.get("terminal")),
-             exe, ev.get("pid") or "")
+             exe, ev.get("pid") or "", prog=p)
     elif t == USER_MGMT and ev.get("op") == "faillock-reset":
         exe = ev.get("exe") or ""
         _add(a, login, name(ev.get("id")), "faillock", "lock reset", ts, "info",
              "faillock --reset", _tty(ev.get("terminal")), exe, ev.get("pid") or "",
-             name(ev.get("uid")))
+             name(ev.get("uid")), p)
 
 
-def sudo_alert(a: Auth, entry: dict, ts: float, name) -> None:
+def sudo_alert(a: Auth, entry: dict, ts: float, name, prog=_none) -> None:
     """sudo syslog line with PRIORITY 1: `<user> : <reason> ; TTY=.. ; PWD=.. ; ...`."""
     msg = entry.get("MESSAGE")
     if not isinstance(msg, str):
@@ -132,7 +143,8 @@ def sudo_alert(a: Auth, entry: dict, ts: float, name) -> None:
     sev = "crit" if result else "warn"
     _add(a, name(entry.get("_AUDIT_LOGINUID")), user.strip() or "?", "sudo",
          result or reason[:40], ts, sev, f"sudo: {reason}", _tty(kv.get("TTY")),
-         "/usr/bin/sudo", str(entry.get("_PID") or ""))
+         "/usr/bin/sudo", str(entry.get("_PID") or ""),
+         prog=prog(str(entry.get("_PID") or ""), ts))
 
 
 def rows(a: Auth, stamp) -> list:
@@ -142,9 +154,12 @@ def rows(a: Auth, stamp) -> list:
                   ("ran as", r.by or "-"), ("pid", r.pid or "-")]
         if len(r.ttys) > 1:
             detail.append(("tty seen", ", ".join(r.ttys)))
-        out.append({"cells": [f"{r.last:.3f}", str(r.n), f"{r.login}>{r.user}", r.service,
-                              r.result, r.tty],
-                    "sev": r.sev, "id": key, "detail": [{"k": k, "v": v} for k, v in detail]})
+        row = {"cells": [f"{r.last:.3f}", str(r.n), f"{r.login}>{r.user}", r.service,
+                         r.result, r.tty],
+               "sev": r.sev, "id": key, "detail": [{"k": k, "v": v} for k, v in detail]}
+        if r.progs:
+            row["progs"] = list(r.progs)
+        out.append(row)
     return out
 
 

@@ -692,6 +692,9 @@ class TestCollect(Base):
                          ["brave", "1000", "4", "1", "0", "0", "2", "t51"])
         self.assertEqual(p["types"], ["text", "text", "num", "num", "num", "num", "num", "age"])
         self.assertEqual((rows["brave"]["tone"], rows["brave"]["filter"]), ("blue", "brave"))
+        self.assertEqual(rows["brave"]["progs"], ["brave"])                # c = program card
+        for other in ("? uid 1000", "? uid -", "vm", "(inbound)"):
+            self.assertNotIn("progs", rows[other], other)
         # no ss match: grouped by uid; the leak (blocked) and two allowed flows of uid 1000
         self.assertEqual(rows["? uid 1000"]["cells"][:6], ["?", "1000", "0", "2", "1", "0"])
         self.assertEqual(rows["? uid 1000"]["filter"], "? 1000")
@@ -895,6 +898,9 @@ class TestCollect(Base):
         row = self.panel(self.collect(), "audit")["rows"][0]
         self.assertEqual(row["cells"][6], "brave,curl")             # '?' line adds nothing
         self.assertEqual({it["k"]: it["v"] for it in row["detail"]}["programs"], "brave, curl")
+        self.assertEqual(row["progs"], ["brave", "curl"])
+        peer = self.panel(self.collect(), "peers")["rows"][0]
+        self.assertEqual(peer["progs"], ["brave", "curl"])
 
     @mock.patch.object(fw, "MAX_AUDIT", 20)
     def test_audit_keeps_newest(self):

@@ -46,6 +46,7 @@ import time
 from core import audit
 from core.sanitize import _ADDR, mask_secrets
 from core import noise as noisemod
+from core import proc as procmod
 from modules.security import auth, kernel, logs, watch
 
 NAME = "security"
@@ -56,7 +57,7 @@ JOURNAL = {"groups": [["_TRANSPORT=audit"], ["SYSLOG_IDENTIFIER=sudo", "PRIORITY
            "fields": ["MESSAGE", "_AUDIT_ID", "_AUDIT_TYPE", "_AUDIT_TYPE_NAME",
                       "_AUDIT_LOGINUID", "_PID", "PRIORITY", "_KERNEL_SUBSYSTEM",
                       "_KERNEL_DEVICE", "SYSLOG_IDENTIFIER", "_COMM", "_SYSTEMD_UNIT",
-                      "_SYSTEMD_USER_UNIT"]}
+                      "_SYSTEMD_USER_UNIT", "_SYSTEMD_CGROUP"]}
 
 ROOT_KEY = "root_cmds"          # hardening audit rules: execve as root after a login
 LAUNCH_KEY = "user_emulation"   # setuid exec: uid != euid (sudo, pkexec, nvidia-modprobe)
@@ -95,6 +96,12 @@ def normalize(args: list) -> str:
     return NUM_RE.sub("#", s)
 
 
+def _prog(st, ev, ts: float) -> str | None:
+    """Program of an audit record's process, else of its parent (core/proc.py: only
+    when the process started before the record)."""
+    return st.prog(ev.get("pid"), ts) or st.prog(ev.get("ppid"), ts)
+
+
 def _user(uid: str) -> str:
     try:
         return pwd.getpwuid(int(uid)).pw_name
@@ -120,6 +127,7 @@ class Group:
         self.rule = None                                     # watch rule (part of the key)
         self.subject = self.shown = ""                       # alert: command from program on
         self.reported = 0                                    # n at the last check
+        self.progs = procmod.names()                         # c = program card
 
 
 class Launch:
@@ -131,8 +139,9 @@ class Launch:
 
 class State:
     def __init__(self, wall=time.time, user=_user, stamp=_stamp, rules=None,
-                 taint=kernel.read_taint, noise=()):
+                 taint=kernel.read_taint, noise=(), prog=None):
         self.wall, self.user, self.stamp, self.taint = wall, user, stamp, taint
+        self.prog = prog or procmod.Reader().program   # (pid, ts) -> program (card)
         self.rules = rules or ()                  # watch rules
         self.watch_file = rules is not None       # False: /etc/sectop/watch.toml missing
         self.asm = audit.Assembler()
@@ -196,6 +205,7 @@ def _group(st: State, ev, argv: list, ts: float, rule=None) -> Group:
     if line in g.argvs:
         g.argvs.remove(line)
     g.argvs.appendleft(line)
+    procmod.add(g.progs, _prog(st, ev, ts))
     g.cwd, g.ses = ev.cwd or "-", ev.get("ses") or "-"
     g.pid, g.ppid = ev.get("pid") or "-", ev.get("ppid") or "-"
     g.key = ",".join(ev.keys)
@@ -376,6 +386,8 @@ def _row(st: State, key: str, g: Group) -> dict:
            "detail": [{"k": k, "v": v} for k, v in detail]}
     if result:
         row["tone"] = "dim"                              # launch without a root command
+    if g.progs:
+        row["progs"] = list(g.progs)
     return row
 
 
@@ -417,15 +429,15 @@ def collect(st: State, ctx) -> dict:
     kernel.taint(st.kernel, st.taint, now)
     for ev in st.asm.feed(ctx.journal, now):
         ts = ev.ts or now
-        kernel.audit_event(st.kernel, ev, ts, st.name)   # module syscalls, AVC, USER_AVC
-        logs.audit_event(st.logs, ev, ts, st.name)       # other keys, SELINUX_ERR
+        kernel.audit_event(st.kernel, ev, ts, st.name, st.prog)  # modules, AVC, USER_AVC
+        logs.audit_event(st.logs, ev, ts, st.name, st.prog)      # other keys, SELINUX_ERR
         if ev.kind == USER_CMD:
             _usercmd(st, ev, ts)
         elif ev.kind == "SYSCALL" and ev.get("syscall") in EXECVE:
             exe = ev.get("exe") or ""
             if LAUNCH_KEY not in ev.keys and ROOT_KEY not in ev.keys:
                 continue
-            kernel.exec_event(st.kernel, ev, ts, st.name)  # blocked module loads
+            kernel.exec_event(st.kernel, ev, ts, st.name, st.prog)  # blocked module loads
             if exe.endswith("/unix_chkpwd"):
                 _chkpwd(st, ev)                  # either key: never a row
             elif LAUNCH_KEY not in ev.keys:
@@ -435,11 +447,11 @@ def collect(st: State, ctx) -> dict:
             else:
                 _root(st, ev, ts, setuid=True)   # the setuid program runs as root itself
         elif ev.kind != "SYSCALL" and ev.records:
-            auth.audit_event(st.auth, ev, ts, st.name)
+            auth.audit_event(st.auth, ev, ts, st.name, st.prog)
             _su_denied(st, ev)
     for e in ctx.journal:                        # after the audit events: their logins
         if _sudo_alert(e):
-            auth.sudo_alert(st.auth, e, _ts(e, now), st.name)
+            auth.sudo_alert(st.auth, e, _ts(e, now), st.name, st.prog)
         elif e.get("_TRANSPORT") == "kernel":
             kernel.journal_entry(st.kernel, e, _ts(e, now))
         else:

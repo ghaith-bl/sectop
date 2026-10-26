@@ -27,10 +27,10 @@ def end(entries):
 class Run:
     """The module with a fake clock, fed like core's follower does."""
 
-    def __init__(self, taint=lambda: 0):
+    def __init__(self, taint=lambda: 0, prog=lambda pid, ts: None):
         self.now = 0.0
         self.st = sec.State(wall=lambda: self.now, user=lambda uid: USERS.get(uid, uid),
-                            stamp=lambda ts: f"T{int(ts)}", taint=taint)
+                            stamp=lambda ts: f"T{int(ts)}", taint=taint, prog=prog)
 
     def collect(self, entries, now):
         self.now = now
@@ -64,7 +64,8 @@ class TestModule(unittest.TestCase):
         self.assertEqual(sp.fields, ("MESSAGE", "_AUDIT_ID", "_AUDIT_TYPE", "_AUDIT_TYPE_NAME",
                                      "_AUDIT_LOGINUID", "_PID", "PRIORITY",
                                      "_KERNEL_SUBSYSTEM", "_KERNEL_DEVICE", "SYSLOG_IDENTIFIER",
-                                     "_COMM", "_SYSTEMD_UNIT", "_SYSTEMD_USER_UNIT"))
+                                     "_COMM", "_SYSTEMD_UNIT", "_SYSTEMD_USER_UNIT",
+                                     "_SYSTEMD_CGROUP"))
         with WatchFile(None):                                   # not the host's file
             self.assertIsInstance(sec.init({}), sec.State)
             with self.assertRaises(ValueError):
@@ -873,12 +874,49 @@ class TestLogs(unittest.TestCase):
         self.assertEqual(len(lg.rows), logs.MAX_ROWS)
 
 
+
+class TestProgs(unittest.TestCase):
+    """Row progs (c = program card): the program of the audit record's process, else of
+    its parent (core/proc.py checks the pid was not reused); journal: its cgroup."""
+
+    PROGS = {"601": "org.gnome.Ptyxis", "4124": "gdm", "1376": "bootupd", "700": None}
+
+    def run_(self):
+        return Run(prog=lambda pid, ts: self.PROGS.get(pid))
+
+    def test_commands_and_logs_audit(self):
+        r = self.run_()
+        snap = r.collect(_events((602, 601, "0", "/usr/bin/id", ["id"], "root_cmds"),
+                                 (603, 999, "0", "/usr/bin/tty", ["tty"], "root_cmds")), 200.0)
+        got = {row["cells"][4]: row.get("progs") for row in snap["panels"][0]["rows"]}
+        self.assertEqual(got, {"id": ["org.gnome.Ptyxis"], "tty": None})   # via the parent
+        snap = r.collect(_watch_events(("identity", "/usr/bin/vim", "/etc/shadow", "1000")),
+                         800.0)
+        self.assertEqual([row.get("progs") for row in snap["panels"][3]["rows"]], [None])
+
+    def test_auth_kernel_and_journal(self):
+        entries = fix("unlock-fail")
+        snap = Run(prog=lambda pid, ts: "gdm").collect(entries, end(entries) + 10)
+        self.assertTrue(all(row.get("progs") == ["gdm"] for row in snap["panels"][1]["rows"]))
+        entries = fix("avc")
+        r = self.run_()
+        r.collect(entries, end(entries) + 1)
+        snap = r.collect([], end(entries) + 10)
+        progs = {row["cells"][3]: row.get("progs") for row in snap["panels"][2]["rows"]}
+        self.assertEqual(progs["lsblk"], ["bootupd"])                    # pid 1376 of the AVC
+        line = {"__REALTIME_TIMESTAMP": "700000000", "_TRANSPORT": "journal", "PRIORITY": "4",
+                "SYSLOG_IDENTIFIER": "gnome-shell", "MESSAGE": "w",
+                "_SYSTEMD_CGROUP": "/user.slice/user-1000.slice/user@1000.service/session.slice"
+                                   "/org.gnome.Shell@wayland.service"}
+        snap = r.collect([line], 710.0)
+        self.assertEqual(snap["panels"][3]["rows"][0]["progs"], ["org.gnome.Shell"])
+
 class TestWatch(unittest.TestCase):
     def run_(self, *execs, now=200.0, r=None):
         r = r or Run()
         if not r.st.rules:
             r.st = sec.State(wall=r.st.wall, user=r.st.user, stamp=r.st.stamp,
-                             rules=watch.parse(RULES))
+                             rules=watch.parse(RULES), prog=r.st.prog)
         return r, r.collect(_events(*execs), now)
 
     def test_rows_rated(self):

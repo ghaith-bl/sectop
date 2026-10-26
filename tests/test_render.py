@@ -1029,3 +1029,59 @@ class TestLook(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCard(unittest.TestCase):
+    """c = program card: rows of every module (every screen) that name the program."""
+
+    def setUp(self):
+        self.fw = mod()
+        self.fw["panels"][1]["rows"][0]["progs"] = ["firefox"]
+        self.sec = {"name": "security", "status": "ok", "summary": "", "flags": [],
+                    "stale": False, "waiting": False,
+                    "panels": [{"id": "commands", "title": "commands 2", "type": "table",
+                                "sev": "ok", "columns": ["last", "cmd"],
+                                "types": ["age", "text"],
+                                "rows": [{"cells": ["1760870770.0", "id"], "sev": "warn",
+                                          "progs": ["firefox", "bash"]},
+                                         {"cells": ["1760870700.0", "ls"], "sev": "ok",
+                                          "progs": ["bash"]}]}]}
+        self.ui = UI(len(SCR))
+        self.ui.focus[0] = "firewall/conns"
+        self.draw()
+
+    def draw(self):
+        f = frame([self.fw, self.sec], ui=self.ui, now=1760870780.0)
+        self.ui.update(f)
+        return f
+
+    def test_open_lists_every_module(self):
+        self.ui.key(ord("c"))
+        f = self.draw()
+        self.assertEqual(self.ui.card, "firefox")
+        self.assertTrue(self.ui.paused)
+        self.assertTrue(find(f.lines, "card: firefox   2 rows in 2 boxes, all screens"))
+        self.assertTrue(find(f.lines, "firewall/conns"))
+        self.assertTrue(find(f.lines, "security/commands"))   # not on this screen
+        self.assertTrue(find(f.lines, "10s !"))                 # age + warn glyph
+        self.assertFalse(find(f.lines, " ls"))                  # bash only: not in the card
+        self.ui.key(27)
+        self.draw()
+        self.assertIsNone(self.ui.card)
+        self.assertFalse(self.ui.paused)
+
+    def test_no_progs_no_card(self):
+        self.ui.key(ord("j"))                                    # 2nd row: no progs
+        self.draw()
+        self.ui.key(ord("c"))
+        self.assertIsNone(self.ui.card)
+
+    def test_search_in_card(self):
+        self.ui.key(ord("c"))
+        self.draw()
+        for k in "/id":
+            self.ui.key(ord(k))
+        self.ui.key(10)
+        f = self.draw()
+        self.assertEqual(self.ui.find, "id")
+        self.assertTrue(find(f.lines, "card: firefox"))

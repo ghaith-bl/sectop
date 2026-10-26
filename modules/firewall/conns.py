@@ -1,7 +1,8 @@
 """Parse `ss -tunaH --cgroup state established`. Pure functions.
 
 Program = the innermost systemd unit of the socket's cgroup (no CAP_SYS_PTRACE
-needed, docs/architecture.md, Privilege split). Desktop apps run in
+needed, docs/architecture.md, Privilege split; core/proc.py program(), shared with the
+security module since 2026-10-26). Desktop apps run in
 app[-<launcher>]-<ApplicationID>-<RANDOM>.scope or
 app[-<launcher>]-<ApplicationID>[@<RANDOM>].service (systemd.io
 DESKTOP_ENVIRONMENTS): the program is the ApplicationID. Other units: the unit
@@ -12,14 +13,11 @@ import ipaddress
 import re
 from dataclasses import dataclass
 
+from core.proc import _RANDOM_RE, _UNIT_SUFFIXES, _unescape, program  # noqa: F401 (moved)
+
 # users:(("brave",pid=8100,fd=27),("other",pid=1,fd=3))
 _PROC_RE = re.compile(r'\("((?:[^"\\]|\\.)*)",pid=(\d+)')
 _CGROUP_RE = re.compile(r"(?:^|\s)cgroup:(\S+)")
-_UNIT_SUFFIXES = (".service", ".scope")
-# random part of a transient unit: -<uuid>, -<hex id>, -<number>
-_RANDOM_RE = re.compile(
-    r"-(?:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|[0-9a-f]{32,64}|[0-9]+)$")
-_ESC_RE = re.compile(r"\\x([0-9a-fA-F]{2})")
 
 
 @dataclass(frozen=True)
@@ -28,28 +26,6 @@ class Conn:
     local: str
     peer: str
     procs: tuple       # process names, unique, in ss order
-
-
-def _unescape(name: str) -> str:
-    """systemd unit name escaping: \\xNN -> the character."""
-    return _ESC_RE.sub(lambda m: chr(int(m.group(1), 16)), name)
-
-
-def program(cgroup: str) -> str | None:
-    """cgroup v2 path -> program name, None if no unit in it (or unreachable)."""
-    units = [p for p in cgroup.split("/") if p.endswith(_UNIT_SUFFIXES)]
-    if not cgroup.startswith("/") or not units:
-        return None
-    base, _dot, kind = units[-1].rpartition(".")
-    if kind == "service":
-        base = base.split("@", 1)[0]
-    if base.startswith("app-") and len(base) > 4:
-        rest = base[4:]
-        if kind == "scope":
-            rest = rest.rpartition("-")[0] or rest      # drop -<RANDOM>
-        # escaped: a dash inside the ApplicationID is \x2d, so the last part is the id
-        return _unescape(rest.rsplit("-", 1)[-1]) or None
-    return _unescape(_RANDOM_RE.sub("", base) if kind == "scope" else base) or None
 
 
 def _procs(text: str) -> tuple:

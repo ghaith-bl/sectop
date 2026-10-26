@@ -18,6 +18,8 @@ Status: in progress (phase 3: privilege split, docs/architecture.md).
 - alert bar on every screen (alert engine, warn / crit), key a acks what it shows
 - public IPs masked by default, toggle with key m. The detail view (enter) shows them
 - w: whois (RDAP) of the selected IP, by a socket service with its own dynamic user
+- c: program card, every row of every screen that belongs to the selected row's program
+  (firewall flows, root commands, logins, SELinux denials, logs)
 
 ## Modules
 

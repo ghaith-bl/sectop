@@ -34,7 +34,11 @@ ProtectKernelLogs=yes
 ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
-ProtectProc=invisible
+# default, not invisible (2026-10-26, program card): the collector reads
+# /proc/<pid>/stat + cgroup of other users' processes to name the program of an audit
+# record (core/proc.py). Same view as any local user on Fedora (no hidepid); environ,
+# fd, mem stay closed (ptrace access, no CAP_SYS_PTRACE here).
+ProtectProc=default
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes

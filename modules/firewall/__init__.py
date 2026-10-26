@@ -23,7 +23,7 @@ import stat
 import time
 
 from core import netd
-from core.module import SEV_RANK, worst
+from core.module import MAX_PROGS as ROW_PROGS, PROG_RE, SEV_RANK, worst
 from core.run import run as _run
 from modules.firewall import conns, journal, nft, vpn
 
@@ -608,6 +608,15 @@ def _audit(st: State, entries: list, cs: list, live: str) -> dict:
             "type": "table", "columns": list(AUDIT_COLUMNS), "types": list(AUDIT_TYPES), "rows": rows}
 
 
+def _progs(names) -> list:
+    """Row `progs` (c = program card, core/ui.py): real program names only."""
+    out = []
+    for n in names:
+        if PROG_RE.fullmatch(n) and n not in out and len(out) < ROW_PROGS:
+            out.append(n)
+    return out
+
+
 def _flow_row(st: State, key: tuple, fl: Flow) -> dict:
     kind, d, proto, uid, _src, _dst, iface = key
     if fl.progs:
@@ -630,6 +639,8 @@ def _flow_row(st: State, key: tuple, fl: Flow) -> dict:
     ip = _remote(fl.entry)
     if ip:
         row["ip"] = ip
+    if _progs(fl.progs):
+        row["progs"] = _progs(fl.progs)
     return row
 
 
@@ -970,8 +981,11 @@ def _peer_row(st: State, ip: str, p: Peer, socks: list) -> dict:
                ("first seen", st.stamp(p.first)), ("last seen", st.stamp(p.last)),
                ("programs", ", ".join(p.progs) or "-"), ("uids", ", ".join(p.uids) or "-"),
                ("ports", ", ".join(p.ports) or "-"), ("ifaces", ", ".join(p.ifaces) or "-")]
-    return {"cells": [ip, str(len(socks)), str(p.new), str(p.drop), prog, _when(p.last)],
-            "tone": tone, "id": ip, "ip": ip, "detail": [{"k": k, "v": v} for k, v in detail]}
+    row = {"cells": [ip, str(len(socks)), str(p.new), str(p.drop), prog, _when(p.last)],
+           "tone": tone, "id": ip, "ip": ip, "detail": [{"k": k, "v": v} for k, v in detail]}
+    if _progs(p.progs):
+        row["progs"] = _progs(p.progs)
+    return row
 
 
 class App:
@@ -1075,6 +1089,8 @@ def _app_row(st: State, key: str, a: App, socks: list) -> dict:
            "tone": tone, "id": key, "detail": [{"k": k, "v": v} for k, v in detail]}
     if PICK_RE.fullmatch(pick) and pick.strip():
         row["filter"] = pick                                # f follow / x hide (core/ui.py)
+    if not other and not key.startswith("? uid ") and _progs([key]):
+        row["progs"] = _progs([key])                        # c = program card
     return row
 
 

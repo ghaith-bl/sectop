@@ -42,6 +42,8 @@ MIN_INTERVAL = 1.0
 
 NAME_RE = re.compile(r"[a-z0-9_]+")
 PICK_RE = re.compile(r"[ -~]{1,60}")    # row filter: printable ASCII, the filter prompt's chars
+PROG_RE = re.compile(r"[\x21-\x7e]{1,64}")         # row progs: program names (core/proc.py)
+MAX_PROGS = 5
 KEY_RE = re.compile(r"[A-Za-z0-9_.:/@%+-]{1,128}")    # check key: rule + subject
 
 
@@ -179,6 +181,13 @@ def _table(p: dict, w: str) -> dict:
             if not isinstance(v, str) or not PICK_RE.fullmatch(v) or not v.strip():
                 raise InvalidSnapshot(f"{wr}.filter: 1..60 printable ASCII chars required")
             row["filter"] = v
+        if "progs" in r:                 # c = program card (core/ui.py, docs: Rows)
+            v = r["progs"]
+            if not isinstance(v, list) or not 1 <= len(v) <= MAX_PROGS or not all(
+                    isinstance(x, str) and PROG_RE.fullmatch(x) for x in v):
+                raise InvalidSnapshot(f"{wr}.progs: 1..{MAX_PROGS} names of 1..64 printable "
+                                      "ASCII chars, no space, required")
+            row["progs"] = list(v)
         if "detail" in r:
             row["detail"] = _detail(r, wr)
         rows.append(row)

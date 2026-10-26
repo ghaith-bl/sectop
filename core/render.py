@@ -86,14 +86,16 @@ HELP = (
     ("Esc", "clear the filter of the focused table"),
     ("f", "on a row with a filter (programs): filter the other tables of the screen to "
           "it; again: clear"),
+    ("c", "program card: every row of every screen with the selected row's program "
+          "(rows that know their program)"),
     ("x", "on such a row (one word): hide it in every table of the screen (adds !name, "
           "Esc clears)"),
     ("p", "pause / resume the screen (data is still collected)"),
     ("m", "mask public IPs on / off"),
-    ("Esc  q  enter", "close help / detail"),
+    ("Esc  q  enter", "close help / detail / card"),
     ("q", "quit"),
 )
-FOOTER = ("1-{n} screen  tab <- -> box  up down j k select  enter detail  / filter  "
+FOOTER = ("1-{n} screen  tab <- -> box  up down j k select  enter detail  c card  / filter  "
           "w whois  a ack  p pause  m mask  ? help  q quit")
 TYPING = "  enter apply  esc cancel  (all words match, !word must not)"
 TYPING_FIND = "  enter keep  esc cancel  (any case, text of a line)"
@@ -118,6 +120,7 @@ class BoxInfo:
     ip: str | None = None      # address of the selected line (w = whois)
     pick: str | None = None    # row filter of the selected line (f follow, x hide)
     mark: int | None = None    # detail search: pair index of the current match
+    progs: tuple = ()          # program names of the selected line (c = card)
 
 
 @dataclass(frozen=True)
@@ -378,7 +381,7 @@ def _header(m: dict, width: int, mask: bool) -> list:
 
 def _footer(n_screens: int, width: int, ui=None) -> list:
     typing = getattr(ui, "typing", None)
-    detail = getattr(ui, "detail", None) is not None
+    detail = getattr(ui, "detail", None) is not None or getattr(ui, "card", None) is not None
     if typing is not None:
         return _line(width, False, (" / ", "focus"), (typing + "_", "plain"),
                      (TYPING_FIND if detail else TYPING, "dim"))
@@ -576,6 +579,11 @@ class _Box:
             return self.data["items"][i].get("ip")
         return getattr(self, "src_ip", None) if self.kind == "detail" else None
 
+    def progs_at(self, i: int) -> tuple:
+        if self.kind == "table" and 0 <= i < len(self.view):
+            return tuple(self.view[i].get("progs", ()))
+        return ()
+
     def pick_at(self, i: int) -> str | None:
         if self.kind == "table" and 0 <= i < len(self.view):
             return self.view[i].get("filter")
@@ -675,10 +683,49 @@ def _boxes(screen, mods: list, feed: list) -> list:
     return out
 
 
-def _overlay(boxes: list, ui, mask: bool, tsfmt):
-    """Help or detail box instead of the grid, or None."""
+def _card(view: list, prog: str, ref, tsfmt, stampfmt) -> tuple:
+    """Pairs of a program card: each box with rows naming prog, its rows newest first as
+    `age  sev  cells` (ages as in the box). -> (pairs, rows, boxes)."""
+    pairs, n_rows, n_boxes = [], 0, 0
+    for m in view:
+        for p in m.get("panels", ()):
+            if p.get("type") != "table":
+                continue
+            rows = [r for r in p["rows"] if prog in r.get("progs", ())]
+            if not rows:
+                continue
+            b = _Box(f"{m['name']}/{p['id']}", p["title"], p["sev"], "table", p)
+            b.ref, b.tsfmt, b.stampfmt = ref, tsfmt, stampfmt
+            types = b.types()
+            if pairs:
+                pairs.append(("", ""))
+            pairs.append((f"{m['name']}/{p['id']}", p["title"]))
+            for r in rows:
+                cells = [b.cell(c, t) for c, t in zip(r["cells"], types)]
+                ages = [c for c, t in zip(cells, types) if t == "age"]
+                rest = [c for c, t in zip(cells, types) if t != "age"]
+                glyph = {"crit": "!!", "warn": "!", "info": "i"}.get(r["sev"], "")
+                pairs.append(((ages[0] if ages else "-") + (" " + glyph if glyph else ""),
+                              "  ".join(rest)))
+            n_rows += len(rows)
+            n_boxes += 1
+    return pairs, n_rows, n_boxes
+
+
+def _overlay(boxes: list, ui, mask: bool, tsfmt, view=(), ref=None, stampfmt=_stamp):
+    """Help, detail or card box instead of the grid, or None."""
     if ui.help:
         return _Box("help", "keys", "ok", "note", [f"{k:<22}{v}" for k, v in HELP])
+    card = getattr(ui, "card", None)
+    if card is not None:
+        pairs, n, nb = _card(view, card, ref, tsfmt, stampfmt)
+        title = f"card: {card}   {n} rows in {nb} boxes, all screens   Esc close"
+        box = _Box("detail", title, "ok", "detail",
+                   pairs or [("", "no row names this program now")])
+        box.src_ip = None
+        box.find, box.seek, box.mark = (getattr(ui, "find", ""), getattr(ui, "seek", None),
+                                        getattr(ui, "mark", None))
+        return box
     if ui.detail is None:
         return None
     b = next((b for b in boxes if b.key == ui.detail), None)
@@ -958,7 +1005,8 @@ def _grid(boxes: list, ui, width: int, room: int, mask: bool, tsfmt, pref) -> tu
                     sel = off
             infos.append(BoxInfo(b.key, len(body), vis, sel, off,
                                  ids[sel] if ids and b.cursor else None, b.cursor,
-                                 b.filterable, b.ip_at(sel), b.pick_at(sel), mark))
+                                 b.filterable, b.ip_at(sel), b.pick_at(sel), mark,
+                                 b.progs_at(sel)))
             on = b.key == focus
             left = _title(b, on and b.cursor, mask)
             titles.append((x, left, max(0, cw - 3)))
@@ -1025,7 +1073,7 @@ def layout(screens, view: list, feed: list, ui, width: int, height: int,
         b.ref, b.tsfmt, b.stampfmt = ref, tsfmt, stampfmt
         if b.filterable:
             b.filt = filters.get(b.key, "")
-    over = _overlay(boxes, ui, mask, tsfmt)
+    over = _overlay(boxes, ui, mask, tsfmt, view, ref, stampfmt)
     if over is not None:
         over.ref, over.tsfmt, over.stampfmt = ref, tsfmt, stampfmt
         over.secrets = mask                  # m shows the raw argv, like the IPs

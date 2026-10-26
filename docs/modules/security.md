@@ -17,7 +17,7 @@ box), read once in init, and `/proc/sys/kernel/tainted`, read each collect (kern
                "fields": ["MESSAGE", "_AUDIT_ID", "_AUDIT_TYPE", "_AUDIT_TYPE_NAME",
                           "_AUDIT_LOGINUID", "_PID", "PRIORITY", "_KERNEL_SUBSYSTEM",
                           "_KERNEL_DEVICE", "SYSLOG_IDENTIFIER", "_COMM", "_SYSTEMD_UNIT",
-                          "_SYSTEMD_USER_UNIT"]}
+                          "_SYSTEMD_USER_UNIT", "_SYSTEMD_CGROUP"]}
 
 2026-10-26 (logs box): the PRIORITY group is every transport now (kernel lines for the
 kernel box, the rest for the logs box). Host 2026-10-26: 127 such lines in 1.75 h
@@ -249,6 +249,14 @@ from, what. Full width, below the kernel box. Newest first. Title:
   (systemd-tmpfiles `/home` `/root` `/srv` already exist: Silverblue symlinks, noise
   candidate), no crit. Noise candidates: pam_systemd `/run/user/0/bus` (every sudo),
   gsd-smartcard, appstreamcli icons.
+
+## Program card
+
+Rows carry `progs` (key `c`, docs/architecture.md, Program card): commands (the root
+command's process, else its parent), auth (the pid of the record, sudo alert `_PID`),
+kernel (module syscall, AVC pid, blocked load), logs (journal `_SYSTEMD_CGROUP`, audit
+pid). From `/proc/<pid>/cgroup` only when the process started before the record
+(core/proc.py), max 5 per row, newest kept. JOURNAL field `_SYSTEMD_CGROUP` added.
 
 ## Watch list
 

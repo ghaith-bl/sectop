@@ -30,6 +30,7 @@ import os
 import re
 
 from core import audit, noise
+from core import proc as procmod
 from core.journal import values
 from core.sanitize import _ADDR
 
@@ -88,6 +89,7 @@ class Row:
         self.detail = {}
         self.label = ""                  # check title: priority name or audit key
         self.reported = 0
+        self.progs = procmod.names()     # c = program card
 
 
 class Logs:
@@ -148,6 +150,7 @@ def journal_entry(lg: Logs, e: dict, ts: float) -> None:
         r.msgs.remove(msg)
     r.msgs.appendleft(msg)
     r.label = PRIORITIES[prio]
+    procmod.add(r.progs, procmod.card_name(_first(e.get("_SYSTEMD_CGROUP"))))
     unit = _first(e.get("_SYSTEMD_UNIT")) or _first(e.get("_SYSTEMD_USER_UNIT")) or "-"
     r.detail = {"priority": f"{prio} {PRIORITIES[prio]}",
                 "unit": SCOPE_RE.sub("session-#.scope", unit) if unit != "-" else "-"}
@@ -182,7 +185,11 @@ def _rate(key: str, exe: str) -> tuple:
     return "info", f"audit key {key}"
 
 
-def audit_event(lg: Logs, ev, ts: float, name) -> None:
+def _none(pid, ts):
+    return None
+
+
+def audit_event(lg: Logs, ev, ts: float, name, prog=_none) -> None:
     """One audit event: a keyed SYSCALL no other box takes, or SELINUX_ERR."""
     for rec in ev.records:
         if rec.type == SELINUX_ERR:
@@ -198,6 +205,7 @@ def audit_event(lg: Logs, ev, ts: float, name) -> None:
         r = _add(lg, "\x1f".join(("a", key, exe, TMP_RE.sub(".<tmp>", path))), f"audit {key}",
                  f"{os.path.basename(exe)} {path}", sev, why, ts)
         r.label = key
+        procmod.add(r.progs, prog(ev.get("pid"), ts) or prog(ev.get("ppid"), ts))
         ok = "ok" if ev.get("success") != "no" else "failed"
         r.detail = {"exe": exe, "file": path, "login": who,
                     "syscall": f"{ev.get('syscall') or '?'} {ok}",
@@ -232,6 +240,8 @@ def rows(lg: Logs, stamp, now: float) -> list:
                "detail": [{"k": a, "v": b} for a, b in detail]}
         if why_noise:
             row["tone"] = "dim"
+        if r.progs:
+            row["progs"] = list(r.progs)
         out.append(row)
     return out
 

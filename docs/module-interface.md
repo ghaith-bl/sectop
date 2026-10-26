@@ -112,6 +112,10 @@ Row `id` optional (str): stable key of the row (e.g. a grouped flow). The cursor
 it when the row moves or its text changes. Not shown.
 Row `filter` optional (str, 1..60 printable ASCII, not blank): filter text for keys `f` /
 `x` on that row (e.g. a program name). Not shown.
+Row `progs` optional (list of 1..5 str, each 1..64 printable ASCII without space): the
+programs the row belongs to (core/proc.py names: unit / app id of the cgroup). Key `c`
+opens the card of the first one. Not shown. Only names that are sure: a pid read later
+than its record counts only when the process started before it (2026-10-26).
 
 `ip` optional on kv items and table rows: the address of that line (a valid IPv4 / IPv6
 address, stored normalized). Core can look it up on key `w` (whois, see Screen).
@@ -301,8 +305,12 @@ A condition that is not true any more is left out.
 - Keys: `1-9` screen; `tab` / right / `l` next box, `shift-tab` / left / `h` previous box;
   down / up / `j` `k` line; `space` `PgDn` / `PgUp` page; `g` `G` / `Home` `End` first / last;
   `enter` detail; `/` filter (in a detail: search, `n` `N` next / previous match);
-  `Esc` clear filter; `f` follow; `x` hide; `w` whois; `a` ack; `p` pause; `m` mask;
-  `?` help; `q` quit.
+  `Esc` clear filter; `f` follow; `x` hide; `c` card; `w` whois; `a` ack; `p` pause;
+  `m` mask; `?` help; `q` quit.
+- Card (`c`, on a row with `progs`): a text overlay like the detail with every table row
+  of every module (all screens) whose `progs` holds the first name of the selected row,
+  grouped by box (`<module>/<panel>` + title), each `age glyph  other cells`. Scroll,
+  `/` search, `n` `N`; pauses while open (2026-10-26).
 - Follow (`f`, on a row with `filter`): that filter on every other filterable box of the
   screen; `f` again (all of them on it): cleared. Hide (`x`, filter of one word): adds
   `!word` to every filterable box of the screen (once; skipped when it would pass 60
@@ -311,7 +319,7 @@ A condition that is not true any more is left out.
   alert bar is acked: key -> (count, sev) at ack (`core/ui.py`). Shown dim, last, until
   its count or severity rises. Acks of alerts no longer in the bar are dropped. Phase 2:
   memory only (sectop still runs as root, no file in my home).
-  In help / detail: `Esc` `q` `enter` `?` close, line keys scroll. Esc delay 25 ms.
+  In help / detail / card: `Esc` `q` `enter` `?` close, line keys scroll. Esc delay 25 ms.
 - Redraw: full after a collect (not while paused) or a key (incl. resize); between those
   only the clock line, once a second.
 - Every string goes through `display()`. Width counted in terminal cells (wide chars = 2).
