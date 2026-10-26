@@ -1,22 +1,27 @@
 # security module
 
-Screen 2. `modules/security/`. Phase 4 steps 3 - 5: commands box + watch list, auth box
-(`auth.py`), kernel box (`kernel.py`). Posture, logs: next steps (docs/architecture.md,
-Phase 4 plan). Design: docs/architecture.md, Security screen.
+Screen 2. `modules/security/`. Phase 4 steps 3 - 5, 7: commands box + watch list, auth
+box (`auth.py`), kernel box (`kernel.py`), logs box (`logs.py`). Posture: own module
+(docs/modules/posture.md). Design: docs/architecture.md, Security screen.
 
 ## Source
 
 Core's journal follower (docs/module-interface.md, Journal). No commands. Files: the
-watch list `/etc/sectop/watch.toml`, read once in init (see Watch list), and
-`/proc/sys/kernel/tainted`, read each collect (kernel box).
+watch list `/etc/sectop/watch.toml` and the noise list `/etc/sectop/noise.toml` (logs
+box), read once in init, and `/proc/sys/kernel/tainted`, read each collect (kernel box).
 
     JOURNAL = {"groups": [["_TRANSPORT=audit"], ["SYSLOG_IDENTIFIER=sudo", "PRIORITY=1"],
-                          ["_TRANSPORT=kernel", "PRIORITY=0", "PRIORITY=1", "PRIORITY=2",
-                           "PRIORITY=3", "PRIORITY=4"],
+                          ["PRIORITY=0", "PRIORITY=1", "PRIORITY=2", "PRIORITY=3",
+                           "PRIORITY=4"],
                           ["_TRANSPORT=kernel", "_KERNEL_SUBSYSTEM=usb"]],
                "fields": ["MESSAGE", "_AUDIT_ID", "_AUDIT_TYPE", "_AUDIT_TYPE_NAME",
                           "_AUDIT_LOGINUID", "_PID", "PRIORITY", "_KERNEL_SUBSYSTEM",
-                          "_KERNEL_DEVICE"]}
+                          "_KERNEL_DEVICE", "SYSLOG_IDENTIFIER", "_COMM", "_SYSTEMD_UNIT",
+                          "_SYSTEMD_USER_UNIT"]}
+
+2026-10-26 (logs box): the PRIORITY group is every transport now (kernel lines for the
+kernel box, the rest for the logs box). Host 2026-10-26: 127 such lines in 1.75 h
+besides the kernel's, so the buffer (5000 per collect) is far away.
 
 Every audit entry since the last collect, assembled into events by `core/audit.py`
 (same `_AUDIT_ID`, complete at PROCTITLE; an AVC without a syscall: 2 s timeout, next
@@ -42,6 +47,9 @@ Red Hat: own design. Used:
 | AVC (1400), USER_AVC (1107) | SELinux denials (kernel box) |
 | kernel, PRIORITY 0..4 | kernel log (kernel box), HFW-* left out |
 | kernel, `_KERNEL_SUBSYSTEM=usb` | `New USB device found`, Product, Manufacturer (kernel box) |
+| journal, syslog, stdout PRIORITY 0..4 (not sudo PRIORITY 1) | logs box |
+| SYSCALL with a key no other box takes | audit file watches and exec rules (logs box) |
+| SELINUX_ERR (1401) | SELinux errors that are not denials (logs box) |
 
 User space records have no type name in the journal (`_AUDIT_TYPE_NAME=AUDIT1100`):
 matched by `_AUDIT_TYPE`. ANOM_LOGIN_FAILURES (2100) comes with every 2207 (same pid,
@@ -50,8 +58,8 @@ same moment): not used.
 Rule keys come from the hardening audit rules (silverblue-cis-hardening). Module syscalls
 are matched by arch + syscall number (x86_64 175 / 313 / 176, i386 128 / 350 / 129), not
 by the key: the rule `-F path=/usr/bin/kmod -F perm=x -k kernel_modules` gives execve
-records with that key too (lsmod by a user). Other keys and events: ignored here (logs
-box, step 7).
+records with that key too (lsmod by a user). Keys root_cmds / user_emulation /
+kernel_modules: commands and kernel box; every other key: logs box.
 
 ## commands box
 
@@ -192,6 +200,56 @@ n, kind, from, what. Full width, below the auth box. Newest first. Title:
 - Not here: kernel log PRIORITY 5-7 (logs box, step 7), taint value checked against the
   baseline (posture, step 6).
 
+## logs box
+
+`modules/security/logs.py`. What the rest of the system logged. Cols: last (age), n,
+from, what. Full width, below the kernel box. Newest first. Title:
+`logs <rows>  (<n> lines since start, <n> noise)`; summary `logs <n>`.
+
+| from | row = group | what |
+|---|---|---|
+| SYSLOG_IDENTIFIER (else _COMM, unit), `(own)` for sectop | identifier + PRIORITY + normalized message (quoted names, UUIDs, IPs, hex, numbers) | newest line |
+| `audit <key>` | key + exe + file (mkstemp suffix `.XXXXXX` folded) | `<exe name> <file>` |
+| `selinux` | op + invalid context type | `setxattr invalid context <type>` |
+
+- Severity (decided 2026-10-26, red = dangerous or suspicious):
+
+      crit  journal PRIORITY 0-2 (emerg, alert, crit), not sudo's alerts (auth box)
+      warn  journal PRIORITY 3 (err)
+            file watch written by a program that does not own the file:
+              sudo_log_file (sudo), logins (pam: sudo su gdm-session-worker polkit
+              helper pkexec login sshd faillock unix_chkpwd), session (sudo su gdm
+              gdm-session-worker login sshd systemd-update-utmp systemd-logind),
+              system-locale (NetworkManager systemd-hostnamed), time-change
+              (systemd-timedated), identity (shadow-utils, passwd, chage, gpasswd,
+              systemd-sysusers)
+            scope (sudoers) and MAC-policy (SELinux policy files): any writer
+      info  journal PRIORITY 4 (warning); a file watch written by its owner; exec rules
+            perm_chng usermod privileged; volume keys mounts delete perm_mod access;
+            SELINUX_ERR
+
+  Why owners (2026-10-26, fixture logs-2h): each sudo writes /var/log/sudo.log
+  (sudo_log_file), /var/run/utmp (session) and its faillock file (logins); NetworkManager
+  writes its profiles (system-locale: the 4 wifi profiles fixed that day). As warn,
+  every sudo would color 3 rows yellow; the same file written by vi or sed is the
+  suspicious case.
+- Detail: why, first, last 3 distinct lines, priority, unit (`session-#.scope` for
+  sudo / login scopes), user unit; audit: exe, file, login, syscall ok / failed, pid,
+  cmdline; `noise key security/log:<12 hex>`; noise reason when one matches.
+- Own entries: sectop.service, sectop-net.service, sectop-whois@*.service or
+  SYSLOG_IDENTIFIER sectop, sectop-collector, sectop-net: `<id> (own)`, never dropped.
+- Noise (`/etc/sectop/noise.toml`, read once in init, same list as the alert engine): an
+  entry whose match fits `security/log:<id>` (copy the noise key from the detail) marks
+  the row dim with the reason in the detail; the row stays and counts. Expired entries
+  stop matching. A crit row in noise: still a check, the engine keeps it out of the bar.
+- Alerts: a crit row whose last one is under 1 h old -> check `log:<12 hex>`, title
+  `<from> <priority>: <line>`.
+- Host fixture logs-2h (2026-10-26, 1.75 h, masked; LUKS uuid of one systemd-escape line
+  masked by hand, the tool masks it since): 50 groups, 47 info, 3 warn
+  (systemd-tmpfiles `/home` `/root` `/srv` already exist: Silverblue symlinks, noise
+  candidate), no crit. Noise candidates: pam_systemd `/run/user/0/bus` (every sudo),
+  gsd-smartcard, appstreamcli icons.
+
 ## Watch list
 
 `/etc/sectop/watch.toml` (`modules/security/watch.py`). Defaults: `deploy/watch.toml`,
@@ -241,7 +299,8 @@ per group 5, uid names 256 (cache, cleared when full). Assembler: core/audit.py 
 events, 2 s timeout). Watch list: 200 rules, 16 words, cmd 200 chars, why 120; checks 50.
 Rating cost: ~0.1 ms per root command with the 57 default rules (2026-10-25, 3.14).
 Auth box: 200 rows, checks 50. Kernel box: 180 rows + up to 20 taint rows (panel max
-200), 3 lines per log row, modprobe runs 64 / 60 s, checks 50.
+200), 3 lines per log row, modprobe runs 64 / 60 s, checks 50. Logs box: 200 rows, 3
+lines per row, checks 50.
 
 ## Fixtures
 
@@ -255,4 +314,7 @@ user NOT in sudoers), faillock (6 wrong more: locked at the 5th failure, reset; 
 refused while user@1001.service ran). Built in the test (same record format): sudo run
 by root, nvidia-modprobe -> modprobe nvidia, su. Kernel box: module (modprobe tcp_bbr,
 -r, blocked sctp, USB plug lines), usb (disconnect), avc (200), kernel-warn (boot,
-PRIORITY <= 4); built in the test: see kernel box.
+PRIORITY <= 4); built in the test: see kernel box. Logs box: logs-2h (2026-10-26,
+journal PRIORITY <= 4 + audit without root_cmds / user_emulation / kernel_modules /
+mounts, 1.75 h); built in the test: file watches by other writers, PRIORITY 0-2, own
+lines, noise.

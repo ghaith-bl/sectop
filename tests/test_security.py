@@ -9,7 +9,7 @@ from core import journal as corejournal
 from core.config import ConfigError
 from core.module import Context, check_module, validate
 from core.screens import SCREENS, find
-from modules.security import auth, kernel, watch
+from modules.security import auth, kernel, logs, watch
 
 FIX = os.path.join(os.path.dirname(__file__), "fixtures", "security")
 USERS = {"0": "root", "1000": "null", "1001": "sectop-locktest"}   # 1001: test user
@@ -59,11 +59,12 @@ class TestModule(unittest.TestCase):
         self.assertEqual(sp.groups, (
             (("_TRANSPORT", "audit"),),
             (("SYSLOG_IDENTIFIER", "sudo"), ("PRIORITY", "1")),
-            (("_TRANSPORT", "kernel"),) + tuple(("PRIORITY", str(p)) for p in range(5)),
+            tuple(("PRIORITY", str(p)) for p in range(5)),
             (("_TRANSPORT", "kernel"), ("_KERNEL_SUBSYSTEM", "usb"))))
         self.assertEqual(sp.fields, ("MESSAGE", "_AUDIT_ID", "_AUDIT_TYPE", "_AUDIT_TYPE_NAME",
                                      "_AUDIT_LOGINUID", "_PID", "PRIORITY",
-                                     "_KERNEL_SUBSYSTEM", "_KERNEL_DEVICE"))
+                                     "_KERNEL_SUBSYSTEM", "_KERNEL_DEVICE", "SYSLOG_IDENTIFIER",
+                                     "_COMM", "_SYSTEMD_UNIT", "_SYSTEMD_USER_UNIT"))
         with WatchFile(None):                                   # not the host's file
             self.assertIsInstance(sec.init({}), sec.State)
             with self.assertRaises(ValueError):
@@ -116,7 +117,8 @@ class TestCommands(unittest.TestCase):
         self.assertEqual((p["title"], p["width"], p["types"]),
                          ("commands 23  (28 root runs since start)", "full", sec.TYPES))
         self.assertEqual(snap["summary"],
-                         "root runs 28 | groups 23 | auth fails 0 | kernel 0 | no watch list")
+                         "root runs 28 | groups 23 | auth fails 0 | kernel 0 | logs 8 | "
+                         "no watch list")
         d = got["su"][3]
         self.assertEqual((d["exe"], d["argv"], d["cwd"], d["ses"], d["key"]),
                          ("/usr/bin/su", "su", "/var/home/null/my-project/sectop", "18",
@@ -399,7 +401,7 @@ class TestAuth(unittest.TestCase):
     def test_only_what_the_follower_gives(self):
         """The real follower only passes JOURNAL matches: same rows as the whole fixture."""
         for name in ("not-sudoers", "faillock", "su-fail", "unlock-fail", "module", "avc",
-                     "kernel-warn", "usb"):
+                     "kernel-warn", "usb", "logs-2h"):
             entries = fix(name)
             a, b = Run(), Run()
             whole = a.collect(entries, end(entries) + 10)
@@ -491,7 +493,8 @@ class TestKernel(unittest.TestCase):
         self.assertEqual((p["id"], p["title"], p["width"], p["columns"], p["types"]),
                          ("kernel", "kernel 0  (taint at start: O E)", "full", kernel.COLUMNS,
                           kernel.TYPES))
-        self.assertEqual([q["id"] for q in snap["panels"]], ["commands", "auth", "kernel"])
+        self.assertEqual([q["id"] for q in snap["panels"]],
+                         ["commands", "auth", "kernel", "logs"])
         self.assertIn("| kernel 0 |", snap["summary"])
 
     def test_module_fixture(self):
@@ -715,6 +718,161 @@ class TestKernel(unittest.TestCase):
         self.assertLessEqual(kernel.MAX_ROWS + 20, 200)                  # panel max
 
 
+def log_rows(snap):
+    """from, what -> (n, sev, detail, tone)."""
+    out = {}
+    for r in snap["panels"][3]["rows"]:
+        c = r["cells"]
+        out[(c[2], c[3])] = (c[1], r["sev"], {d["k"]: d["v"] for d in r["detail"]}, r.get("tone"))
+    return out
+
+
+def _watch_events(*writes) -> list:
+    """Audit entries of file watch hits, one second apart: (key, exe, path, auid)."""
+    out = []
+    for i, (key, exe, path, auid) in enumerate(writes):
+        us, aid = str(600_000_000 + i * 1_000_000), str(98000 + i)
+        for typ, name, msg in (
+                ("1300", "SYSCALL", f"SYSCALL arch=c000003e syscall=257 success=yes exit=3 a0=1 "
+                 f"a1=2 a2=3 a3=4 items=2 ppid=1 pid={700 + i} auid={auid} uid=0 gid=0 euid=0 "
+                 f'suid=0 fsuid=0 egid=0 sgid=0 fsgid=0 tty=pts0 ses=3 comm="x" exe="{exe}" '
+                 f'subj=unconfined_u:unconfined_r:unconfined_t:s0 key="{key}"'),
+                ("1302", "PATH", f'PATH item=0 name="{os.path.dirname(path)}/" inode=1 '
+                 f"nametype=PARENT"),
+                ("1302", "PATH", f'PATH item=1 name="{path}" inode=2 nametype=NORMAL'),
+                ("1327", "PROCTITLE", "PROCTITLE proctitle=" + os.path.basename(exe)
+                 .encode().hex().upper())):
+            out.append({"__REALTIME_TIMESTAMP": us, "_TRANSPORT": "audit", "_AUDIT_ID": aid,
+                        "_AUDIT_TYPE": typ, "_AUDIT_TYPE_NAME": name, "MESSAGE": msg})
+    return out
+
+
+def _jlines(*lines) -> list:
+    """Journal entries one second apart: (PRIORITY, SYSLOG_IDENTIFIER, MESSAGE, unit)."""
+    return [{"__REALTIME_TIMESTAMP": str(700_000_000 + i * 1_000_000), "_TRANSPORT": "journal",
+             "PRIORITY": p, "SYSLOG_IDENTIFIER": ident, "MESSAGE": msg, "_SYSTEMD_UNIT": unit}
+            for i, (p, ident, msg, unit) in enumerate(lines)]
+
+
+class TestLogs(unittest.TestCase):
+    """Logs box: fixture logs-2h 2026-10-26 (journal PRIORITY <= 4 + audit, 1.75 h, masked)."""
+
+    def test_fixture(self):
+        entries = fix("logs-2h")
+        r = Run()
+        r.collect(entries, end(entries) + 1)
+        snap = r.collect([], end(entries) + 10)                      # timed-out audit events
+        got = log_rows(snap)
+        p = snap["panels"][3]
+        self.assertEqual((p["id"], p["width"], p["columns"], len(got)),
+                         ("logs", "full", logs.COLUMNS, 50))
+        self.assertEqual(collections.Counter(v[1] for v in got.values()), {"info": 47, "warn": 3})
+        self.assertEqual(snap["checks"], [])                          # nothing red in 2 h
+        self.assertEqual(got[("audit sudo_log_file", "sudo /var/log/sudo.log")][:2],
+                         ("20", "info"))                              # sudo writes its own log
+        self.assertEqual(got[("audit session", "sudo /var/run/utmp")][:2], ("40", "info"))
+        pam = got[("sudo", "pam_systemd(sudo:session): Failed to check if /run/user/0/bus "
+                           "exists, ignoring: Permission denied")]
+        self.assertEqual((pam[0], pam[1], pam[2]["unit"]), ("14", "info", "session-#.scope"))
+        app = [v for k, v in got.items() if k[0] == "appstreamcli"]
+        self.assertEqual([v[0] for v in app], ["9"])                  # quoted app ids: 1 group
+        self.assertEqual(got[("selinux", "setxattr invalid context "
+                                         "invalid_bootcinstall_testlabel_t")][:2], ("6", "info"))
+        tmp = [v for k, v in got.items() if k[0] == "systemd-tmpfiles"]
+        self.assertEqual([(v[0], v[1]) for v in tmp], [("3", "warn")])
+        locale = [v for k, v in got.items() if k[0] == "audit system-locale"]
+        self.assertEqual(sorted(int(v[0]) for v in locale), [4, 8])   # temp files: 1 group
+        self.assertFalse(any(k[0] == "kernel" for k in got))           # kernel box has them
+        d = got[("audit sudo_log_file", "sudo /var/log/sudo.log")][2]
+        self.assertEqual((d["exe"], d["file"], d["noise key"][:13]),
+                         ("/usr/bin/sudo", "/var/log/sudo.log", "security/log:"))
+
+    def test_owners(self):
+        r = Run()
+        got = log_rows(r.collect(_watch_events(
+            ("sudo_log_file", "/usr/bin/sudo", "/var/log/sudo.log", "1000"),
+            ("sudo_log_file", "/usr/bin/vi", "/var/log/sudo.log", "1000"),
+            ("identity", "/usr/bin/systemd-sysusers", "/etc/passwd", "4294967295"),
+            ("identity", "/usr/bin/vim", "/etc/shadow", "1000"),
+            ("scope", "/usr/sbin/visudo", "/etc/sudoers.d/90-cis", "1000"),
+            ("MAC-policy", "/usr/sbin/semodule", "/var/lib/selinux/targeted/active", "1000"),
+            ("system-locale", "/usr/bin/sed", "/etc/hosts", "1000"),
+            ("perm_chng", "/usr/bin/chcon", "/usr/bin/chcon", "1000")), 800.0))
+        sev = {k: v[1] for k, v in got.items()}
+        self.assertEqual(sev, {
+            ("audit sudo_log_file", "sudo /var/log/sudo.log"): "info",
+            ("audit sudo_log_file", "vi /var/log/sudo.log"): "warn",
+            ("audit identity", "systemd-sysusers /etc/passwd"): "info",
+            ("audit identity", "vim /etc/shadow"): "warn",
+            ("audit scope", "visudo /etc/sudoers.d/90-cis"): "warn",
+            ("audit MAC-policy", "semodule /var/lib/selinux/targeted/active"): "warn",
+            ("audit system-locale", "sed /etc/hosts"): "warn",
+            ("audit perm_chng", "chcon /usr/bin/chcon"): "info"})
+        d = got[("audit identity", "vim /etc/shadow")][2]
+        self.assertEqual((d["login"], d["why"][:38]), ("null", "audit key identity: written by vim, no"))
+        self.assertEqual(r.st.runs, 0)                               # not commands rows
+
+    def test_levels_alert_and_own(self):
+        r = Run()
+        snap = r.collect(_jlines(
+            ("2", "systemd", "Freezing execution.", "init.scope"),
+            ("3", "sectop-collector", "security: collect failed", "sectop.service"),
+            ("4", "gnome-shell", "warn 1", "user@1000.service"),
+            ("1", "sudo", "bob : user NOT in sudoers ; TTY=pts/0", "session-c1.scope"),
+            ("5", "systemd", "notice line", "init.scope")), 710.0)
+        got = log_rows(snap)
+        self.assertEqual({k: v[1] for k, v in got.items()}, {
+            ("systemd", "Freezing execution."): "crit",
+            ("sectop-collector (own)", "security: collect failed"): "warn",
+            ("gnome-shell", "warn 1"): "info"})                       # sudo alert: auth box
+        self.assertIn("own", got[("sectop-collector (own)", "security: collect failed")][2])
+        [c] = [c for c in snap["checks"] if c["key"].startswith("log:")]
+        self.assertEqual((c["title"], c["n"]), ("systemd crit: Freezing execution.", 1))
+        snap = r.collect([], 700.0 + sec.WINDOW + 1)
+        self.assertEqual([c for c in snap["checks"] if c["key"].startswith("log:")], [])
+
+    def test_noise(self):
+        lines = _jlines(("3", "systemd-tmpfiles", '"/home" already exists', "x.service"),
+                        ("3", "systemd-tmpfiles", '"/srv" already exists', "x.service"),
+                        ("4", "gnome-shell", "other", "user@1000.service"))
+        r = Run()
+        key = log_rows(r.collect(lines, 710.0))[("systemd-tmpfiles", '"/srv" already exists')
+                                                 ][2]["noise key"]
+        import datetime
+        from core.noise import Entry
+        r.st.logs.noise = (Entry(key, "Silverblue: /home is a symlink", datetime.date(2099, 1, 1)),)
+        snap = r.collect([], 711.0)
+        got = log_rows(snap)
+        tmp = got[("systemd-tmpfiles", '"/srv" already exists')]
+        self.assertEqual((tmp[0], tmp[3], tmp[2]["noise"]),
+                         ("2", "dim", "Silverblue: /home is a symlink"))
+        self.assertIsNone(got[("gnome-shell", "other")][3])
+        self.assertIn("1 noise)", snap["panels"][3]["title"])
+        r.st.logs.noise = (Entry(key, "old", datetime.date(1969, 12, 31)),)  # expired
+        self.assertIsNone(log_rows(r.collect([], 712.0))[("systemd-tmpfiles",
+                                                           '"/srv" already exists')][3])
+
+    def test_init_reads_noise_file(self):
+        with WatchFile(None), NoiseFile(b'[[noise]]\nmatch = "security/log:*"\nreason = "r"\n'
+                                        b"expires = 2099-01-01\n"):
+            st = sec.init({})
+        self.assertEqual([e.match for e in st.logs.noise], ["security/log:*"])
+
+    def test_normalize(self):
+        self.assertEqual(logs.normalize("Found icon in 'a/b/*', skipping it."),
+                         logs.normalize("Found icon in 'c/d/*', skipping it."))
+        self.assertEqual(logs.normalize("PID 4898 at 0x55fc5ab35cf8 from 10.1.2.3"),
+                         "PID # at <hex> from <ip>")
+
+    def test_limits(self):
+        lg = logs.Logs()
+        for i in range(logs.MAX_ROWS + 5):
+            word = "".join(chr(97 + int(d)) for d in str(i))
+            logs.journal_entry(lg, {"_TRANSPORT": "journal", "PRIORITY": "4",
+                                    "SYSLOG_IDENTIFIER": word, "MESSAGE": "x"}, float(i))
+        self.assertEqual(len(lg.rows), logs.MAX_ROWS)
+
+
 class TestWatch(unittest.TestCase):
     def run_(self, *execs, now=200.0, r=None):
         r = r or Run()
@@ -814,6 +972,25 @@ class WatchFile:
 
     def __exit__(self, *exc):
         sec.WATCH_PATH, sec.WATCH_OWNER = self.saved
+        self.dir.cleanup()
+
+
+class NoiseFile(WatchFile):
+    """sec.NOISE_PATH -> a file with this content, owned by me."""
+
+    def __enter__(self):
+        self.dir = tempfile.TemporaryDirectory()
+        os.chmod(self.dir.name, 0o755)
+        path = os.path.join(self.dir.name, "noise.toml")
+        with open(path, "wb") as f:
+            f.write(self.data)
+        os.chmod(path, 0o644)
+        self.saved_noise = (sec.NOISE_PATH, sec.NOISE_OWNER)
+        sec.NOISE_PATH, sec.NOISE_OWNER = path, os.getuid()
+        return self
+
+    def __exit__(self, *exc):
+        sec.NOISE_PATH, sec.NOISE_OWNER = self.saved_noise
         self.dir.cleanup()
 
 

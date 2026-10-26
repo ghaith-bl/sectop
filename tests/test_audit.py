@@ -34,11 +34,12 @@ def execve(*msgs):
 class TestFixtures(unittest.TestCase):
     def test_sha256sums(self):
         """tests/fixtures/security = sectop-fixtures-2026-10-20.tar + the auth fixtures of
-        2026-10-25 (sectop-fix-auth.tar faillock -> su-fail, sectop-fix-auth2.tar), all
-        made with journal_fixture.py; the 2026-10-25 ones re-masked for my wifi name."""
+        2026-10-25 (sectop-fix-auth.tar faillock -> su-fail, sectop-fix-auth2.tar) + logs-2h
+        of 2026-10-26, all made with journal_fixture.py; the 2026-10-25 ones re-masked for
+        my wifi name, logs-2h for my LUKS uuid (one systemd-escape line)."""
         with open(os.path.join(FIX, "SHA256SUMS"), encoding="ascii") as f:
             sums = [line.split() for line in f if line.strip()]
-        self.assertEqual(len(sums), 14)
+        self.assertEqual(len(sums), 15)
         self.assertEqual(sorted(n for _, n in sums),
                          sorted(n for n in os.listdir(FIX) if n.endswith(".json")))
         for digest, name in sums:

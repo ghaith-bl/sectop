@@ -1,11 +1,12 @@
 """security: screen 2 (docs/architecture.md, Security screen; docs/modules/security.md).
 
-Phase 4 steps 3 - 5: commands box, auth box (auth.py), kernel box (kernel.py). Source:
-core's journal follower (JOURNAL: every audit record, sudo's syslog alerts, kernel log
-PRIORITY 0..4 and USB lines), audit records assembled into events by core/audit.py,
-plus /proc/sys/kernel/tainted (kernel box). Commands rows: what ran as root after a login
-(rule key root_cmds: execve with euid 0 and a login auid) and setuid execs
-(user_emulation: uid != euid), grouped by who > as, exe and normalized argv.
+Phase 4 steps 3 - 5, 7: commands box, auth box (auth.py), kernel box (kernel.py), logs
+box (logs.py). Source: core's journal follower (JOURNAL: every audit record, sudo's
+syslog alerts, every journal line PRIORITY 0..4, kernel USB lines), audit records
+assembled into events by core/audit.py, plus /proc/sys/kernel/tainted (kernel box).
+Commands rows: what ran as root after a login (rule key root_cmds: execve with euid 0
+and a login auid) and setuid execs (user_emulation: uid != euid), grouped by who > as,
+exe and normalized argv.
 
 Setuid execs: a launcher (sudo, pkexec, su: runs another command as root) is a launch;
 any other setuid program (nvidia-modprobe, fusermount3, the polkit agent helper ...)
@@ -44,17 +45,18 @@ import time
 
 from core import audit
 from core.sanitize import _ADDR, mask_secrets
-from modules.security import auth, kernel, watch
+from core import noise as noisemod
+from modules.security import auth, kernel, logs, watch
 
 NAME = "security"
 INTERVAL = 2.0
 JOURNAL = {"groups": [["_TRANSPORT=audit"], ["SYSLOG_IDENTIFIER=sudo", "PRIORITY=1"],
-                      ["_TRANSPORT=kernel", "PRIORITY=0", "PRIORITY=1", "PRIORITY=2",
-                       "PRIORITY=3", "PRIORITY=4"],
+                      ["PRIORITY=0", "PRIORITY=1", "PRIORITY=2", "PRIORITY=3", "PRIORITY=4"],
                       ["_TRANSPORT=kernel", "_KERNEL_SUBSYSTEM=usb"]],
            "fields": ["MESSAGE", "_AUDIT_ID", "_AUDIT_TYPE", "_AUDIT_TYPE_NAME",
                       "_AUDIT_LOGINUID", "_PID", "PRIORITY", "_KERNEL_SUBSYSTEM",
-                      "_KERNEL_DEVICE"]}
+                      "_KERNEL_DEVICE", "SYSLOG_IDENTIFIER", "_COMM", "_SYSTEMD_UNIT",
+                      "_SYSTEMD_USER_UNIT"]}
 
 ROOT_KEY = "root_cmds"          # hardening audit rules: execve as root after a login
 LAUNCH_KEY = "user_emulation"   # setuid exec: uid != euid (sudo, pkexec, nvidia-modprobe)
@@ -74,6 +76,8 @@ WINDOW = 3600.0                 # crit command: alert while its last run is this
 MAX_CHECKS = 50
 WATCH_PATH = watch.DEFAULT_PATH
 WATCH_OWNER = 0                 # root-owned (tests: their own uid)
+NOISE_PATH = noisemod.DEFAULT_PATH   # logs box: noise rows (same list as the alert engine)
+NOISE_OWNER = 0
 COLUMNS = ["last", "n", "who>as", "via", "cmd"]
 TYPES = ["age", "num", "text", "text", "text"]
 
@@ -127,7 +131,7 @@ class Launch:
 
 class State:
     def __init__(self, wall=time.time, user=_user, stamp=_stamp, rules=None,
-                 taint=kernel.read_taint):
+                 taint=kernel.read_taint, noise=()):
         self.wall, self.user, self.stamp, self.taint = wall, user, stamp, taint
         self.rules = rules or ()                  # watch rules
         self.watch_file = rules is not None       # False: /etc/sectop/watch.toml missing
@@ -142,6 +146,7 @@ class State:
         self.lost_checks = 0                      # unix_chkpwd, parent not seen
         self.auth = auth.Auth()                   # auth box
         self.kernel = kernel.Kernel()             # kernel box
+        self.logs = logs.Logs(noise)              # logs box
 
     def name(self, uid: str | None) -> str:
         if not uid or uid == UNSET:
@@ -403,7 +408,8 @@ def _checks(st: State, now: float) -> list:
 def init(cfg: dict) -> State:
     if cfg:
         raise ValueError(f"unknown option(s): {', '.join(sorted(cfg))}")
-    return State(rules=watch.load(WATCH_PATH, WATCH_OWNER))   # bad file: init fails
+    return State(rules=watch.load(WATCH_PATH, WATCH_OWNER),   # bad file: init fails
+                 noise=noisemod.load(NOISE_PATH, NOISE_OWNER))
 
 
 def collect(st: State, ctx) -> dict:
@@ -412,6 +418,7 @@ def collect(st: State, ctx) -> dict:
     for ev in st.asm.feed(ctx.journal, now):
         ts = ev.ts or now
         kernel.audit_event(st.kernel, ev, ts, st.name)   # module syscalls, AVC, USER_AVC
+        logs.audit_event(st.logs, ev, ts, st.name)       # other keys, SELINUX_ERR
         if ev.kind == USER_CMD:
             _usercmd(st, ev, ts)
         elif ev.kind == "SYSCALL" and ev.get("syscall") in EXECVE:
@@ -435,6 +442,8 @@ def collect(st: State, ctx) -> dict:
             auth.sudo_alert(st.auth, e, _ts(e, now), st.name)
         elif e.get("_TRANSPORT") == "kernel":
             kernel.journal_entry(st.kernel, e, _ts(e, now))
+        else:
+            logs.journal_entry(st.logs, e, _ts(e, now))
     _prune(st, now)
     groups = sorted(st.groups.items(), key=lambda kv: -kv[1].last)
     rows = [_row(st, key, g) for key, g in groups]
@@ -452,10 +461,17 @@ def collect(st: State, ctx) -> dict:
     kpanel = {"id": "kernel", "title": f"kernel {len(krows)}  ({kernel.title_note(st.kernel)})",
               "type": "table", "columns": list(kernel.COLUMNS), "types": list(kernel.TYPES),
               "rows": krows, "width": "full"}
+    lrows = logs.rows(st.logs, st.stamp, now)
+    lnoise = logs.noise_count(st.logs, now)
+    lpanel = {"id": "logs", "title": f"logs {len(lrows)}  ({st.logs.lines} lines since start"
+                                     f", {lnoise} noise)",
+              "type": "table", "columns": list(logs.COLUMNS), "types": list(logs.TYPES),
+              "rows": lrows, "width": "full"}
     summary = f"root runs {st.runs} | groups {len(rows)} | auth fails {st.auth.fails} | " \
-        f"kernel {len(krows)} | " + \
+        f"kernel {len(krows)} | logs {len(lrows)} | " + \
         (f"watch {len(st.rules)} rules" if st.watch_file else "no watch list")
-    return {"v": 2, "status": "ok", "summary": summary, "panels": [panel, apanel, kpanel],
-            "events": [],
+    return {"v": 2, "status": "ok", "summary": summary,
+            "panels": [panel, apanel, kpanel, lpanel], "events": [],
             "checks": _checks(st, now) + auth.checks(st.auth, now, WINDOW, st.stamp)
-            + kernel.checks(st.kernel, now, WINDOW, st.stamp)}
+            + kernel.checks(st.kernel, now, WINDOW, st.stamp)
+            + logs.checks(st.logs, now, WINDOW, st.stamp)}

@@ -93,9 +93,9 @@ true. Built in phase 4, after the privilege split.
     | logs (full width)                                     |
     +-------------------------------------------------------+
 
-Built so far (2026-10-26): commands, auth, kernel and posture, each full width, one under
-the other (the cmd / what columns need the room). Grid: looked at again with the logs
-box.
+Built 2026-10-26: commands, auth, kernel, logs and posture, each full width, one under
+the other (the cmd / what columns need the room; when the screen is short the tallest box
+gives up lines first, core/render.py).
 
 Source: the one journal reader. Audit records via journald
 (`systemd-journald-audit.socket` enabled + active, 2026-10-20). Not `/var/log/audit` or
@@ -317,6 +317,11 @@ plan of 2026-10-20, kept for history.
 
 ## Logs
 
+Built 2026-10-26 (docs/modules/security.md, logs box). Changed from the plan below:
+grouped by identifier (not unit: every sudo has its own session scope), file watches
+rated by their owner program, SELINUX_ERR added, noise marks rows (dim) instead of
+hiding them.
+
 - Journal priority <= warning, plus security sources: sshd, sudo, polkit, audit (AVC),
   USB, kernel.
 - Grouped by unit + normalized message (numbers, ids, addresses -> placeholder):
@@ -462,7 +467,8 @@ Best practice decides (Red Hat for the host). Fixtures from my host first
   5. kernel box: done 2026-10-26 (modules/security/kernel.py).
   6. posture module + posture.toml: done 2026-10-26 (modules/posture,
      docs/modules/posture.md).
-  7. logs box: groups, noise on groups, audit keys
+  7. logs box: groups, noise on groups, audit keys: done 2026-10-26
+     (modules/security/logs.py).
   8. program card
 - Then screen 3 (processes): its design is decided after step 8 (2026-10-25).
 
