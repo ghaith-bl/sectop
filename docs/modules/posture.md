@@ -98,12 +98,13 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
 
     crit  SELinux enforcing now; audit=1 + backlog in kernel args; audit not switched
           off; auditd, firewalld running; firewalld zone drop; only root UID 0; wheel =
-          me; /var on LUKS; system image not unlocked; ostree remotes verify; listeners
+          me; /var on LUKS; system image not unlocked; ostree remotes verify; listeners;
+          Secure Boot on
     warn  SELinux config enforcing + targeted; audit rules >= 70; journald audit
           socket; su closed (sugroup empty, pam_wheel); faillock 5 / 900 s; pwquality 14
           / 4 classes; shadow, gshadow, passwd, group perms; sysctls of
-          90-hardening.conf (kernel, IPv4, IPv6); taint only O E; CIS module blocks;
-          Secure Boot, lockdown (ref: step 9); crypto policy not LEGACY; masked units;
+          90-hardening.conf (kernel, IPv4, IPv6); no taint; CIS module blocks;
+          lockdown integrity; crypto policy not LEGACY; masked units;
           no failed units; core dumps off; journal persistent; GNOME locks; wifi IPv6
           off; booted system <= 14 days
     info  update staged, waiting for a reboot
@@ -123,5 +124,9 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
   NetworkManager.conf(5) `[connection]` defaults cannot change that (ipv6.method is not
   in its list). Host 2026-10-26: 4 of 6 profiles were auto (fixed with nmcli); the
   check catches the next new network.
-- Secure Boot off, lockdown none: accepted (ref) until step 9 (akmod-nvidia removed,
-  Secure Boot on). Then the refs go and taint want becomes "".
+- Secure Boot, lockdown, taint: step 9 done 2026-10-26 (silverblue-cis-hardening:
+  akmod-nvidia removed, akmods MOK key deleted, Secure Boot on, lockdown integrity,
+  taint 0). The refs are gone: Secure Boot off is crit now (it can only be switched off
+  in the firmware, behind the admin password). Lockdown stays warn: it follows Secure
+  Boot, one alert is enough. Taint want "" (any bit = warn; new bits since sectop start
+  are the kernel box's crit).

@@ -443,16 +443,20 @@ class TestModule(unittest.TestCase):
         crit = {c.id for c in checks if c.sev == "crit"}
         self.assertEqual(crit, {"selinux-enforcing", "audit-boot", "audit-enabled",
                                 "auditd-active", "firewalld-active", "firewalld-zone", "uid0",
-                                "wheel", "luks-var", "ostree-locked", "ostree-gpg", "listeners"})
+                                "wheel", "luks-var", "ostree-locked", "ostree-gpg", "listeners",
+                                "secure-boot"})
         refs = {c.id for c in checks if c.ref}
-        self.assertEqual(refs, {"secure-boot", "lockdown"})              # step 9
+        self.assertEqual(refs, set())                                    # step 9 done
         self.assertEqual(set(policy.KINDS) - {c.kind for c in checks}, set())   # all used
 
     def test_host_like_mine(self):
-        """Deploy policy on a host like mine (2026-10-26): only accepted + unknown left."""
+        """Deploy policy on a host like mine after step 9 (2026-10-26): all pass."""
         with open(DEPLOY, "rb") as f:
             checks = policy.parse(f.read(), DEPLOY)
         h = FakeHost()
+        h.blobs[kinds.SECUREBOOT] = bytes([6, 0, 0, 0, 1])               # mokutil: enabled
+        h.files["/sys/kernel/security/lockdown"] = "none [integrity] confidentiality\n"
+        h.files["/proc/sys/kernel/tainted"] = "0\n"
         want = {u: s for c in checks if c.kind == "units" for u, s in c.units}
         h.answers["systemctl show"] = lambda argv: Result(0, "\n\n".join(   # in argv order
             f"Id={u}\nLoadState=loaded\nActiveState={want[u] if want[u] == 'active' else 'inactive'}"
@@ -477,15 +481,24 @@ class TestModule(unittest.TestCase):
         st.audit.added = 70
         snap = validate(pos.collect(st, Context((), True, "")))
         got = {r["cells"][0]: r["cells"][1] for r in snap["panels"][0]["rows"]}
-        self.assertEqual({k: v for k, v in got.items() if v != "pass"},
-                         {"secure-boot": "accepted", "lockdown": "accepted"})
+        self.assertEqual({k: v for k, v in got.items() if v != "pass"}, {})
         self.assertEqual(snap["checks"], [])
-        self.assertEqual(snap["summary"], f"pass {len(checks) - 2} | fail 0 | unknown 0 | "
-                                          "accepted 2")
-        rows = snap["panels"][0]["rows"]
-        self.assertEqual([r["cells"][0] for r in rows[:2]], ["secure-boot", "lockdown"])
-        self.assertEqual(rows[0].get("tone"), "dim")
-        self.assertEqual(rows[0]["sev"], "ok")
+        self.assertEqual(snap["summary"], f"pass {len(checks)} | fail 0 | unknown 0 | "
+                                          "accepted 0")
+        self.assertEqual((got["secure-boot"], got["lockdown"], got["taint"]),
+                         ("pass", "pass", "pass"))
+
+    def test_host_secure_boot_off_again(self):
+        """After step 9 Secure Boot off is crit + alert; lockdown none is warn, no alert."""
+        with open(DEPLOY, "rb") as f:
+            checks = [c for c in policy.parse(f.read(), DEPLOY)
+                      if c.id in ("secure-boot", "lockdown")]
+        st = pos.State(checks=checks, host=FakeHost(), wall=lambda: NOW,
+                       stamp=lambda ts: "12:00:00")
+        snap = validate(pos.collect(st, Context((), True, "")))
+        rows = {r["cells"][0]: (r["cells"][1], r["sev"]) for r in snap["panels"][0]["rows"]}
+        self.assertEqual(rows, {"secure-boot": ("fail", "crit"), "lockdown": ("fail", "warn")})
+        self.assertEqual([c["key"] for c in snap["checks"]], ["secure-boot"])
 
     def test_rows_order_and_alerts(self):
         h = FakeHost()

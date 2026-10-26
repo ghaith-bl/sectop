@@ -224,7 +224,7 @@ id = "taint"
 kind = "taint"
 sev = "warn"
 why = "kernel taint only what is known"
-want = "O E"                        # akmod-nvidia probes; "" after step 9 removes it
+want = ""                           # none since step 9 (akmod-nvidia removed, 2026-10-26)
 
 [[check]]
 id = "modules-blocked"
@@ -234,12 +234,14 @@ why = "CIS modules blocked (90-cis-blacklist.conf)"
 path = "/etc/modprobe.d/90-cis-blacklist.conf"
 want = ["install cramfs /bin/false", "install freevxfs /bin/false", "install hfs /bin/false", "install hfsplus /bin/false", "install jffs2 /bin/false", "install squashfs /bin/false", "install udf /bin/false", "install atm /bin/false", "install can /bin/false", "install dccp /bin/false", "install rds /bin/false", "install sctp /bin/false", "install tipc /bin/false", "install firewire-core /bin/false"]
 
+# Secure Boot on since step 9 (2026-10-26). Off again = switched off in the firmware
+# setup (admin password): crit. Lockdown follows it: warn, one alert is enough.
+
 [[check]]
 id = "secure-boot"
 kind = "secureboot"
-sev = "warn"
+sev = "crit"
 why = "Secure Boot on"
-ref = "off until akmod-nvidia is removed (step 9)"
 
 [[check]]
 id = "lockdown"
@@ -247,7 +249,6 @@ kind = "lockdown"
 sev = "warn"
 why = "kernel lockdown (on with Secure Boot)"
 want = "integrity|confidentiality"
-ref = "none until Secure Boot is on (step 9)"
 
 # ---- disk, system image ----
 
