@@ -1,10 +1,11 @@
-"""firewall: hostfw + Proton WireGuard status for sectop.
+"""firewall: hostfw + VPN tunnel (Mullvad WireGuard) status for sectop.
 
 Sources (fixed argv). Every tick: nft table without set elements (counters +
 enforce chain), wg handshakes + transfer, ss. Kernel journal lines (HFW-) come
 from core's journal follower (JOURNAL, ctx.journal: every kernel entry since the
 last collect). Every SLOW s or when the tunnel goes up / down: wg endpoints +
-fwmark, nft wg_fwmark set, ip default routes. nft and wg need CAP_NET_ADMIN:
+fwmark, nft wg_fwmark set, the VPN kill switch table (nft inet mullvad: filter
+chain policies, without its rules). nft and wg need CAP_NET_ADMIN:
 their results come from the net unit's files (core/netd.py Reader), the rest via
 core.run.run as user sectop. Files:
 /etc/hostfw/mode, /run/hostfw/rollback, /proc/uptime. At start: one boot
@@ -33,7 +34,7 @@ JOURNAL = {"groups": [["_TRANSPORT=kernel"]], "fields": ["MESSAGE"]}   # core/jo
 
 TIMEOUT = netd.TIMEOUT   # per command, keeps a full tick below INTERVAL
 BOOT_TIMEOUT = 5.0       # boot journal scan, once in init()
-SLOW = netd.FW_SLOW      # endpoint, live fwmark, wg_fwmark set, default routes: rarely change
+SLOW = netd.FW_SLOW      # endpoint, live fwmark, wg_fwmark set, kill switch table: rarely change
 HS_STALE = 180           # WireGuard rejects keys after 180 s
 HOLD = 60.0              # seconds the alert (and the counter row color) stays after new packets
 SPARK = 120
@@ -55,8 +56,9 @@ MODE_FILE = "/etc/hostfw/mode"
 ROLLBACK_FILE = "/run/hostfw/rollback"
 UPTIME_FILE = "/proc/uptime"
 DEFAULT_TUNNEL = netd.DEFAULT_TUNNEL
-DEFAULT_KS = ("pvpnksintrf0", "pvpnksintrf1")
-OPTIONS = {"tunnel", "ks_ifaces", "hold"}
+KS_TABLE = netd.KS_TABLE
+KS_HOOKS = ("input", "output", "forward")      # kill switch: drop policy on all three
+OPTIONS = {"tunnel", "hold"}
 IFACE_RE = netd.IFACE_RE
 
 # hostfw counter / log kind -> severity. None = hidden (counter only, no event).
@@ -64,15 +66,13 @@ SEV = {
     "out_leak": "crit",
     "out_dns": "warn", "in_lan": "warn", "in_vpn": "warn",
     "fwd_vm_lan": "warn", "fwd_in": "warn",
-    "out_ks": "info", "out_disco": "info", "out_share": "info", "out_lan": "info",
-    "fwd_vm_ks": "info",
+    "out_disco": "info", "out_share": "info", "out_lan": "info",
     "in_noise": None,
 }
 # allowed traffic: counted, never raises status
-ALLOWED = {"out_dns_vpn", "out_wg", "out_probe", "out_router_admin", "out_lan_allow",
+ALLOWED = {"out_dns_vpn", "out_wg", "out_vpn_api", "out_router_admin", "out_lan_allow",
            "out_new", "fwd_vm_new"}
 AUDIT_ONLY = {"out_new", "fwd_vm_new"}          # every new flow: audit box, no event
-KS_KINDS = {"out_ks", "fwd_vm_ks"}              # always dropped by hostfw
 LOG_ONLY = {"in_noise", "in_lan", "in_vpn"}     # hostfw logs, firewalld zone decides
 AUDIT_COLUMNS = ["last", "n", "dir", "verdict", "proto", "uid", "prog", "src", "dst", "iface"]
 LEAK_COLUMNS = ["age", "uid", "proto", "dst", "iface", "context"]
@@ -97,7 +97,7 @@ CGNAT = ipaddress.ip_network("100.64.0.0/10")
 ULA = ipaddress.ip_network("fc00::/7")
 CONTEXT_NOTE = {
     "pre-connect": "before the first flow via the tunnel this boot "
-                   "(expected: DoH fallback before Proton connects)",
+                   "(expected: programs that start before the VPN connects)",
     "tunnel up": "the tunnel was up: a program sent around it",
     "tunnel down": "the tunnel was down after it had been up (reconnect window)",
     "after connect": "after the first flow via the tunnel this boot, before sectop "
@@ -108,30 +108,28 @@ CONTEXT_SEV = {"out_leak": "crit, info pre-connect",            # counter detail
                "in_vpn": "warn, info for late replies from known peers"}
 # what each hostfw counter matches (silverblue-cis-hardening firewall/docs/rules.md)
 MATCH = {
-    "out_dns_vpn": "tcp/udp 53, 853 to 10.2.0.1 via proton0",
-    "out_wg": "WireGuard transport (fwmark in wg_fwmark) on the uplink",
-    "out_probe": "uid 1000 tcp to Proton entry IPs on probe ports (before connect)",
+    "out_dns_vpn": "tcp/udp 53, 853 to the VPN resolver (set vpn_dns4) via the tunnel",
+    "out_wg": "VPN mark (set wg_fwmark) on the uplink, not split tunneling (ct mark 0xf41): "
+              "relay transport",
+    "out_vpn_api": "uid 0 tcp 443 to the VPN API (set vpn_api4) on the uplink",
     "out_router_admin": "router web UI while opened (hostfw router-open)",
     "out_lan_allow": "explicit LAN exceptions (set lan_allow4)",
-    "out_new": "first packets of every new host flow via proton0",
-    "fwd_vm_new": "first packets of every new VM flow via proton0",
+    "out_new": "first packets of every new host flow via the tunnel",
+    "fwd_vm_new": "first packets of every new VM flow via the tunnel",
     "out_dns": "any other tcp/udp 53, 853 (not the VPN resolver)",
     "out_disco": "udp 137 138 1900 3702 5351 5353 5355 27036, tcp 5355 5357 5358 27036 27037",
     "out_share": "tcp 21 111 139 445 548 2049, udp 69 111 2049 (not via virbr0)",
-    "out_ks": "host traffic routed to the kill switch dummy (pvpnksintrf0/1)",
     "out_lan": "to private / link-local / CGNAT / multicast / broadcast, not router / exception",
     "out_leak": "anything else leaving on the uplink (not tunnel transport, DHCP, router)",
-    "fwd_vm_ks": "VM traffic routed to the kill switch dummy",
     "fwd_vm_lan": "VM traffic to LAN / uplink (not via the tunnel)",
     "fwd_in": "new forwarded traffic not from a VM",
-    "in_noise": "LAN broadcast / multicast to the host (not via proton0)",
+    "in_noise": "LAN broadcast / multicast to the host (not via the tunnel)",
     "in_lan": "new inbound from the uplink",
     "in_vpn": "new inbound from the tunnel",
 }
-NOT_LOGGED = {"out_dns_vpn", "out_wg", "out_probe"}
+NOT_LOGGED = {"out_dns_vpn", "out_wg", "out_vpn_api"}
 VERDICT_NOTE = {
     "allow": "allowed by hostfw (logged new flow or exception)",
-    "drop": "kill switch: always dropped",
     "zone": "hostfw only logs, the firewalld zone decides (default zone: drop)",
     "block": "rejected by hostfw (enforce mode)",
     "pass": "deny rule in observe mode: logged, not blocked",
@@ -139,7 +137,7 @@ VERDICT_NOTE = {
 }
 
 
-TONE = {"allow": "blue", "drop": "red", "block": "yellow"}   # verdict -> color, else plain
+TONE = {"allow": "blue", "block": "yellow"}   # verdict -> color, else plain
 
 
 def _tone(verdict: str) -> str:
@@ -167,18 +165,18 @@ def _stamp(ts: float) -> str:
 
 
 class State:
-    def __init__(self, tunnel=DEFAULT_TUNNEL, ks=DEFAULT_KS, hold=HOLD, run=_run, net=None,
+    def __init__(self, tunnel=DEFAULT_TUNNEL, hold=HOLD, run=_run, net=None,
                  mono=time.monotonic, wall=time.time, owner=0,
                  mode_file=MODE_FILE, rollback_file=ROLLBACK_FILE, hms=_hms, stamp=_stamp,
                  uptime_file=UPTIME_FILE):
-        self.tunnel, self.ks, self.hold = tunnel, tuple(ks), hold
+        self.tunnel, self.hold = tunnel, hold
         self.run, self.mono, self.wall, self.owner = run, mono, wall, owner
         self.mode_file, self.rollback_file = mode_file, rollback_file
         self.uptime_file = uptime_file
         self.hms = hms                 # epoch -> "HH:MM:SS" for audit rows
         self.stamp = stamp             # epoch -> full local time for audit detail
         self.comments = {}             # counter name -> hostfw rule comment
-        self.bins = {n: netd.bin_path(n) for n in ("nft", "journalctl", "ss", "wg", "ip")}
+        self.bins = {n: netd.bin_path(n) for n in ("nft", "journalctl", "ss", "wg")}
         self.net = net if net is not None else netd.Reader(tunnel, wall=wall)
         self.prev = None               # counters of last tick
         self.prev_tx = None
@@ -327,7 +325,7 @@ def _hostfw(st: State, checks: list) -> tuple:
     """-> (kv items, counters or None, live mode).
 
     One nft call: the whole table without set elements (-t) has the counters
-    and the enforce chain. Set elements (Proton entry IPs: thousands) are not needed.
+    and the enforce chain. Set elements are not needed.
     """
     items = []
     res = st.cmd("nft", "-j", "-t", "list", "table", *TABLE)
@@ -545,8 +543,6 @@ def _events(st: State, checks: list, items: list, ctx) -> tuple:
 def _verdict(kind: str, live: str) -> str:
     if kind in ALLOWED:
         return "allow"
-    if kind in KS_KINDS:
-        return "drop"
     if kind in LOG_ONLY:
         return "zone"
     return {"enforce": "block", "observe": "pass"}.get(live, "deny")
@@ -644,9 +640,8 @@ def _flow_row(st: State, key: tuple, fl: Flow) -> dict:
     return row
 
 
-def _vpn(st: State, checks: list, wall: float, ks_new: int = 0) -> tuple:
-    """Every tick: handshake + transfer. -> (kv items, summary text, tunnel up).
-    ks_new: kill switch drops this tick (context of a stale handshake)."""
+def _vpn(st: State, checks: list, wall: float) -> tuple:
+    """Every tick: handshake + transfer. -> (kv items, summary text, tunnel up)."""
     t = st.tunnel
     res = st.cmd("wg", "show", t, "latest-handshakes")
     if res.rc != 0:
@@ -673,8 +668,6 @@ def _vpn(st: State, checks: list, wall: float, ks_new: int = 0) -> tuple:
         if age > HS_STALE and sending:
             items.append(_item("handshake", f"{_age(age)} ago, sending", "crit"))
             detail = f"last handshake {_age(age)} ago, tx growing (keys rejected after 180 s)"
-            if ks_new:
-                detail += f"; kill switch dropped +{ks_new} pkt this tick (fail closed)"
             _chk(checks, f"handshake_stale:{t}", "crit", "handshake stale", detail)
         elif age > HS_STALE:
             items.append(_item("handshake", f"{_age(age)} ago (idle)"))
@@ -700,7 +693,7 @@ def _live_mark(st: State):
 
 
 def _slow(st: State, up: bool) -> tuple:
-    """Rarely changing sources: endpoint, fwmark (live + set), default routes.
+    """Rarely changing sources: endpoint, fwmark (live + set), kill switch table.
 
     Run every SLOW s and when the tunnel goes up / down (collect). Their items
     and checks are kept and shown every tick until the next run.
@@ -718,8 +711,8 @@ def _slow(st: State, up: bool) -> tuple:
                    lambda e: _item("fwmark", e, "warn"))
         if fm:
             items.append(fm)
-    items += _safe(lambda: _routes(st, checks), "routes", checks,
-                   lambda e: [_item("routes", e, "warn")])
+    items.append(_safe(lambda: _killswitch(st, checks), "killswitch", checks,
+                       lambda e: _item("kill switch", e, "warn")))
     return ep, items, checks
 
 
@@ -741,29 +734,25 @@ def _fwmark(st: State, mark, tunnel_up: bool, checks: list) -> dict | None:
     return _item("fwmark", text, "crit")
 
 
-def _routes(st: State, checks: list) -> list:
-    items = []
-    for fam in ("-4", "-6"):
-        res = st.cmd("ip", "-j", fam, "route", "show", "default")
-        key = f"default v{fam[1]}"
-        if res.rc != 0:
-            items.append(_item(key, _fail(res), "warn"))
-            _chk(checks, f"route_unknown:v{fam[1]}", "warn", f"{key} unknown", _fail(res))
-            continue
-        rts = vpn.routes(res.out)
-        if not rts:
-            items.append(_item(key, "none"))
-            continue
-        dev, metric, gw = rts[0]
-        if dev in st.ks:
-            items.append(_item(key, f"{dev} (kill switch)", tone="green"))
-        elif dev == st.tunnel:
-            items.append(_item(key, dev, tone="green"))
-        else:
-            text = f"{dev} via {gw or '-'} metric {metric}"
-            items.append(_item(key, text, "warn"))
-            _chk(checks, f"route:v{fam[1]}", "warn", f"{key} not kill switch", text)
-    return items
+def _killswitch(st: State, checks: list) -> dict:
+    """VPN kill switch = its nftables table (Mullvad: inet mullvad, kept while
+    disconnected by lockdown mode). Drop policy on input, output, forward = on.
+    Missing or open: warn (hostfw still rejects leaks in enforce)."""
+    name = " ".join(KS_TABLE)
+    res = st.cmd("nft", "-j", "-t", "list", "table", *KS_TABLE)
+    if res.rc != 0:
+        why = "missing" if nft.missing(res.err) else _fail(res)
+        _chk(checks, "killswitch", "warn", f"kill switch {why}",
+             f"table {name}: {why} (VPN app not running, or lockdown mode off "
+             "while disconnected)")
+        return _item("kill switch", f"{name} {why}", "warn")
+    pol = nft.policies(res.out)
+    open_ = [h for h in KS_HOOKS if pol.get(h) != "drop"]
+    if open_:
+        text = f"{name}: no drop policy on {', '.join(open_)}"
+        _chk(checks, "killswitch", "warn", "kill switch open", text)
+        return _item("kill switch", text, "warn")
+    return _item("kill switch", f"{name} (drop)", tone="green")
 
 
 def _uptime(st: State) -> float | None:
@@ -1116,16 +1105,12 @@ def init(cfg: dict) -> State:
     if unknown:
         raise ValueError(f"unknown option(s): {', '.join(sorted(unknown))}")
     tunnel = cfg.get("tunnel", DEFAULT_TUNNEL)
-    ks = cfg.get("ks_ifaces", list(DEFAULT_KS))
     hold = cfg.get("hold", HOLD)
     if not isinstance(tunnel, str) or not IFACE_RE.fullmatch(tunnel):
         raise ValueError("tunnel: interface name required")
-    if not isinstance(ks, list) or not ks or \
-            not all(isinstance(i, str) and IFACE_RE.fullmatch(i) for i in ks):
-        raise ValueError("ks_ifaces: list of interface names required")
     if isinstance(hold, bool) or not isinstance(hold, (int, float)) or not 0 <= hold <= 3600:
         raise ValueError("hold: seconds 0..3600 required")
-    st = State(tunnel=tunnel, ks=ks, hold=float(hold))
+    st = State(tunnel=tunnel, hold=float(hold))
     _boot_scan(st)
     return st
 
@@ -1143,7 +1128,7 @@ def collect(st: State, ctx) -> dict:
                            lambda e: ({}, {}))
 
     vpn_items, vpn_text, up = _safe(
-        lambda: _vpn(st, checks, wall, deltas.get("out_ks", 0)), "wg", checks,
+        lambda: _vpn(st, checks, wall), "wg", checks,
         lambda e: ([_item("tunnel", e, "warn")], f"{st.tunnel} ?", False))
     if st.slow_at is None or now >= st.slow_at or up != st.slow_up:
         st.slow = _slow(st, up)

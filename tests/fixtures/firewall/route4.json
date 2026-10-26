@@ -1,1 +1,0 @@
-[{"dst":"default","gateway":"100.85.0.1","dev":"pvpnksintrf0","protocol":"static","metric":98,"flags":[]},{"dst":"default","gateway":"192.168.8.1","dev":"wlo1","protocol":"dhcp","prefsrc":"192.168.8.102","metric":600,"flags":[]}]

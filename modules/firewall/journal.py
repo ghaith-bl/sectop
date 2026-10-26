@@ -13,10 +13,6 @@ from dataclasses import dataclass
 # HFW-<DIR>-<NAME>: NAME may have dashes (HFW-FWD-VM-LAN, HFW-OUT-LAN-ALLOW)
 CODE_RE = re.compile(r"(HFW-[A-Z0-9]+(?:-[A-Z0-9_]+)+):\s?(.*)", re.S)
 
-# old log prefix -> counter name (hostfw before 2026-10-19: HFW-FWD-KS)
-KIND_ALIAS = {"fwd_ks": "fwd_vm_ks"}
-
-
 @dataclass(frozen=True)
 class Entry:
     ts: float          # epoch seconds
@@ -66,7 +62,7 @@ def _entry(e) -> tuple:
     code = m.group(1)
     fields, flags = parse_fields(m.group(2))
     kind = code[4:].lower().replace("-", "_")
-    return cur, Entry(ts, code, KIND_ALIAS.get(kind, kind), fields, flags, cur)
+    return cur, Entry(ts, code, kind, fields, flags, cur)
 
 
 def entries(objs) -> tuple:

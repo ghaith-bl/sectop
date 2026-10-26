@@ -112,11 +112,12 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
 - hostfw mode / boot mode: not here, the firewall screen checks them (alerts there).
 - Listeners (host 2026-10-26, `ss -Htuln`): loopback only for resolved (127.0.0.53 /
   .54:53) and chronyd (:323); libvirt default network dnsmasq on 192.168.122.1:53 (tcp,
-  udp) and DHCP 0.0.0.0:67 bound to virbr0; WireGuard proton0 on 0.0.0.0 / [::] with a
-  new random port on every connect (`wg show all listen-port`): allowed by the port the
-  net unit reads, not by a port glob (a glob would let any program on any UDP port
-  pass). Not by "kernel socket" either: checked 2026-10-26, WireGuard's sockets have an
-  inode in /proc/net/udp (51638, 51639) like any other.
+  udp) and DHCP 0.0.0.0:67 bound to virbr0; the VPN tunnel's WireGuard (wg0-mullvad)
+  on 0.0.0.0 / [::] with a port that can change on every connect (`wg show all
+  listen-port`): allowed by the port the net unit reads, not by a port glob (a glob
+  would let any program on any UDP port pass). Not by "kernel socket" either: checked
+  2026-10-26, WireGuard's sockets have an inode in /proc/net/udp (51638, 51639) like any
+  other.
   dnsmasq answers only its own network (libvirt uses --bind-dynamic since
   CVE-2012-3411); LAN reach to 192.168.122.1 is closed by the firewalld drop zone and
   hostfw.

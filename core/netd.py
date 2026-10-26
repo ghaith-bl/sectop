@@ -35,7 +35,8 @@ NET_BINS = ("nft", "wg")     # what the firewall module gets from here, not from
 
 # firewall module defaults (modules/firewall uses these)
 TABLE = ("inet", "hostfw")
-DEFAULT_TUNNEL = "proton0"
+DEFAULT_TUNNEL = "wg0-mullvad"
+KS_TABLE = ("inet", "mullvad")     # VPN kill switch table (Mullvad lockdown)
 IFACE_RE = re.compile(r"[A-Za-z0-9_.-]{1,15}")
 FW_INTERVAL = 2.0
 FW_SLOW = 30.0
@@ -61,7 +62,7 @@ def bin_path(name: str) -> str:
 
 def commands(tunnel: str, binary=bin_path) -> dict:
     """name -> (argv, FAST or SLOW). Exactly what modules/firewall asks for, plus
-    listen_port for modules/posture (listeners: Proton picks a new port each connect)."""
+    listen_port for modules/posture (listeners: the tunnel's port changes on reconnect)."""
     if not isinstance(tunnel, str) or not IFACE_RE.fullmatch(tunnel):
         raise ValueError("tunnel: interface name required")
     nft, wg = binary("nft"), binary("wg")
@@ -73,6 +74,7 @@ def commands(tunnel: str, binary=bin_path) -> dict:
         "endpoints": ((wg, "show", tunnel, "endpoints"), SLOW),
         "fwmark": ((wg, "show", tunnel, "fwmark"), SLOW),
         "fwmark_set": ((nft, "-j", "list", "set", *TABLE, "wg_fwmark"), SLOW),
+        "killswitch": ((nft, "-j", "-t", "list", "table", *KS_TABLE), SLOW),
     }
 
 

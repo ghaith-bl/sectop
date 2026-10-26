@@ -7,13 +7,13 @@ LEAK = ("HFW-OUT-LEAK: IN= OUT=wlo1 SRC=192.168.8.102 DST=149.112.112.11 LEN=60 
         "PROTO=TCP SPT=46866 DPT=443 SYN UID=1000")
 NOISE = ("HFW-IN-NOISE: IN=wlo1 OUT= MAC=ff:ff:ff:ff:ff:ff:02:00:00:00:00:09:08:00 "
          "SRC=192.168.8.227 DST=255.255.255.255 PROTO=UDP SPT=49152 DPT=25860")
-KS = ("HFW-OUT-KS: IN= OUT=pvpnksintrf0 SRC=fe80:0000:0000:0000:40ae:f0a0:e9b4:cc29 "
-      "DST=ff02:0000:0000:0000:0000:0001:ff00:0001 PROTO=ICMPv6 TYPE=135")
+LAN6 = ("HFW-OUT-LAN: IN= OUT=wlo1 SRC=fe80:0000:0000:0000:40ae:f0a0:e9b4:cc29 "
+        "DST=ff02:0000:0000:0000:0000:0001:ff00:0001 PROTO=ICMPv6 TYPE=131")
 
 
 class TestClean(unittest.TestCase):
     def test_plain_unchanged(self):
-        self.assertEqual(clean("proton0 up"), "proton0 up")
+        self.assertEqual(clean("wg0-mullvad up"), "wg0-mullvad up")
 
     def test_non_ascii_kept(self):
         self.assertEqual(clean("caf\u00e9"), "caf\u00e9")
@@ -89,7 +89,7 @@ class TestMask(unittest.TestCase):
     def test_real_lines(self):
         self.assertEqual(mask_ips(LEAK), LEAK.replace("149.112.112.11", "149.112.x.x"))
         self.assertEqual(mask_ips(NOISE), NOISE)
-        self.assertEqual(mask_ips(KS), KS)
+        self.assertEqual(mask_ips(LAN6), LAN6)
 
 
 class TestSecrets(unittest.TestCase):

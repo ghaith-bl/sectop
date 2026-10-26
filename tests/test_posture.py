@@ -21,7 +21,7 @@ BOOTED = 1792828294.0                    # host 2026-10-26: rpm-ostree booted ti
 
 # /proc/net of my host 2026-10-26 (ss -Htuln): libvirt dnsmasq 192.168.122.1:53 tcp + udp
 # and 0.0.0.0:67 (bound to virbr0), resolved 127.0.0.53 / .54:53, chronyd 127.0.0.1 / ::1
-# :323, WireGuard proton0 0.0.0.0 / [::]:51250 (a kernel socket, but with an inode: 51638,
+# :323, WireGuard (VPN tunnel) 0.0.0.0 / [::]:51250 (a kernel socket, but with an inode: 51638,
 # checked 2026-10-26); plus one connected UDP socket (not a listener) and an established
 # TCP connection.
 HEAD = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
@@ -89,7 +89,7 @@ class FakeHost(kinds.Host):
             "rpm-ostree status": Result(0, json.dumps({"deployments": [
                 {"booted": False, "timestamp": 1}, {"booted": True, "timestamp": BOOTED}]}), ""),
         }
-        self.wg = {"proton0": Result(0, "51250\n", "")}
+        self.wg = {"wg0-mullvad": Result(0, "51250\n", "")}
         self.calls = []
 
     def read(self, path):
@@ -344,24 +344,24 @@ class TestKinds(unittest.TestCase):
             "tcp 192.168.122.1:53", "udp 0.0.0.0:51250", "udp 0.0.0.0:67",
             "udp 192.168.122.1:53", "udp [::]:51250"])                  # loopback left out
         allow = ("udp 192.168.122.1:53", "tcp 192.168.122.1:53", "udp 0.0.0.0:67")
-        c = chk(kind="listeners", allow=allow, wireguard="proton0")
+        c = chk(kind="listeners", allow=allow, wireguard="wg0-mullvad")
         r = kinds.check(c, cx(), [])
         self.assertEqual((r.status, r.have), ("pass", "5 listening, all allowed"))
-        self.assertIn(("wireguard", "proton0 listen-port 51250"), r.lines)
-        self.assertIn(("allowed", "udp [::]:51250 (proton0)"), r.lines)
+        self.assertIn(("wireguard", "wg0-mullvad listen-port 51250"), r.lines)
+        self.assertIn(("allowed", "udp [::]:51250 (wg0-mullvad)"), r.lines)
         r = kinds.check(chk(kind="listeners", allow=allow), cx(), [])  # no wireguard key
         self.assertEqual((r.status, r.have), ("fail", "2 not allowed"))
         self.assertEqual(r.lines[:2], [("not allowed", "udp 0.0.0.0:51250"),
                                        ("not allowed", "udp [::]:51250")])
         h = FakeHost()                                                  # reconnected: new port
-        h.wg["proton0"] = Result(0, "40000\n", "")
+        h.wg["wg0-mullvad"] = Result(0, "40000\n", "")
         r = kinds.check(c, cx(h), [])
         self.assertEqual((r.status, r.have), ("fail", "2 not allowed"))
         h = FakeHost()                                                  # net unit down
-        del h.wg["proton0"]
+        del h.wg["wg0-mullvad"]
         r = kinds.check(c, cx(h), [])
         self.assertEqual(r.status, "fail")
-        self.assertIn(("wireguard", "proton0: /run/sectop-net/listen_port.json missing: is "
+        self.assertIn(("wireguard", "wg0-mullvad: /run/sectop-net/listen_port.json missing: is "
                                     "sectop-net.service running?"), r.lines)
         h = FakeHost()                                                  # a program on 0.0.0.0
         h.files["/proc/net/tcp"] += ROW.format(9, "00000000:0016", Z4, "0A", 0, 4998)
@@ -371,8 +371,8 @@ class TestKinds(unittest.TestCase):
     def test_wg_port_from_net_unit(self):
         """Host.wg_listen_port asks core/netd.py Reader for the net unit's command."""
         from core import netd
-        self.assertEqual(netd.commands("proton0")["listen_port"],
-                         ((netd.bin_path("wg"), "show", "proton0", "listen-port"), netd.FAST))
+        self.assertEqual(netd.commands("wg0-mullvad")["listen_port"],
+                         ((netd.bin_path("wg"), "show", "wg0-mullvad", "listen-port"), netd.FAST))
         self.assertEqual(kinds.Host().wg_listen_port("a b").rc, 1)      # bad name: no raise
 
     def test_audit(self):

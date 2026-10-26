@@ -8,7 +8,7 @@ from core.module import Context, InvalidSnapshot, check_module, validate, worst
 GOOD = {
     "v": 1,
     "status": "warn",
-    "summary": "enforce | proton0 up | leak 0",
+    "summary": "enforce | wg0-mullvad up | leak 0",
     "panels": [
         {"id": "mode", "title": "hostfw", "type": "kv",
          "items": [{"k": "mode", "v": "enforce", "sev": "ok"}, {"k": "rollback", "v": "-"}]},
@@ -261,12 +261,12 @@ class TestChecks(unittest.TestCase):
         self.assertEqual((out["v"], out["checks"]), (1, []))   # ignored in v1
 
     def test_good(self):
-        out = validate(snap2({"key": "handshake_stale:proton0", "sev": "crit", "title": "t",
+        out = validate(snap2({"key": "handshake_stale:wg0-mullvad", "sev": "crit", "title": "t",
                               "x": 1},
                              {"key": "out_leak:fe80::1%wlo1", "sev": "info", "title": "l",
                               "detail": "d", "n": 7, "hold": 0}))
         self.assertEqual(out["v"], 2)
-        self.assertEqual(out["checks"][0], {"key": "handshake_stale:proton0", "sev": "crit",
+        self.assertEqual(out["checks"][0], {"key": "handshake_stale:wg0-mullvad", "sev": "crit",
                                              "title": "t", "detail": "", "n": 0})
         self.assertEqual(out["checks"][1]["hold"], 0.0)
         self.assertIsInstance(out["checks"][1]["hold"], float)

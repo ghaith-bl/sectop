@@ -8,8 +8,8 @@ Same file checks as config.toml (core/config.py, read_file). Missing file ->
 no entries. Anything wrong -> ConfigError, sectop refuses to start.
 
     [[noise]]
-    match = "firewall/out_ks:*"     # glob on the alert key
-    reason = "kill switch NDP from the Proton client"
+    match = "firewall/new:out_disco"   # glob on the alert key
+    reason = "Steam LAN discovery, blocked by hostfw anyway"
     expires = 2026-12-31            # last day it applies (local date)
 
 - match: fnmatch glob, case-sensitive, on "<module>/<check key>". The module

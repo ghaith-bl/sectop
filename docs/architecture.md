@@ -263,7 +263,7 @@ Alert = state, not event.
 - Ack: dims the alert, does not delete it. Higher count or severity after ack shows it
   again. Key `a` acks every alert in the bar (2026-10-20). A per-alert list: later, if
   needed.
-- Bar: warn / crit only. Info alerts (e.g. out_ks drops) and noise alerts are counted on
+- Bar: warn / crit only. Info alerts (e.g. out_lan drops) and noise alerts are counted on
   the right, not listed.
 - Who decides what: modules report checks (key, sev, title, detail, n, hold) each
   collect (docs/module-interface.md, Checks). Alert engine `core/alerts.py` does open /
@@ -440,7 +440,7 @@ Stop / restart a service, kill a process. Only after the privilege split:
 - Collector = non-root service (see Privilege split). UI = my user, unprivileged.
 - Actions run as my user via `systemctl`; polkit asks for the password.
 - Confirm before every action. Deny list never touched: journald, NetworkManager,
-  firewalld, hostfw, Proton daemon, sshd if present.
+  firewalld, hostfw, mullvad-daemon, sshd if present.
 - Every action logged to the journal.
 
 ## Look (2026-10-20)

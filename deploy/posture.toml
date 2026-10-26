@@ -360,6 +360,6 @@ why = "nothing listens outside loopback but the allowlist"
 # libvirt default network (virbr0): dnsmasq DNS for the VMs on the bridge address, DHCP
 # bound to virbr0 (/proc/net shows 0.0.0.0:67). Loopback (resolved, chronyd): always ok.
 allow = ["udp 192.168.122.1:53", "tcp 192.168.122.1:53", "udp 0.0.0.0:67"]
-# WireGuard proton0: Proton picks a new random port on every connect: its udp 0.0.0.0 /
-# [::] port is taken from `wg show proton0 listen-port` (net unit), not a glob here.
-wireguard = "proton0"
+# WireGuard wg0-mullvad (Mullvad): the port can change on every connect: its udp 0.0.0.0 /
+# [::] port is taken from `wg show wg0-mullvad listen-port` (net unit), not a glob here.
+wireguard = "wg0-mullvad"

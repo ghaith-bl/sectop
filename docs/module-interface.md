@@ -52,7 +52,7 @@ def close(state: object) -> None: ...     # optional
 {
   "v": 1,
   "status": "ok",
-  "summary": "enforce | proton0 up | leak 0",
+  "summary": "enforce | wg0-mullvad up | leak 0",
   "panels": [],
   "events": []
 }
@@ -98,7 +98,7 @@ table (rows max 200):
 ```json
 {"id": "conns", "title": "Connections", "type": "table",
  "columns": ["proc", "uid", "dst", "port", "iface"],
- "rows": [{"cells": ["firefox", "1000", "10.2.0.1", "53", "proton0"], "sev": "ok",
+ "rows": [{"cells": ["firefox", "1000", "10.2.0.1", "53", "wg0-mullvad"], "sev": "ok",
            "detail": [{"k": "TTL", "v": "64"}]}]}
 ```
 
@@ -151,7 +151,7 @@ Conditions that are true now. Core turns them into alerts (see Alerts).
 A condition that is not true any more is left out.
 
 ```json
-{"key": "handshake_stale:proton0", "sev": "crit", "title": "proton0 handshake stale",
+{"key": "handshake_stale:wg0-mullvad", "sev": "crit", "title": "wg0-mullvad handshake stale",
  "detail": "last handshake 4m 10s ago, sending", "n": 0, "hold": 60}
 ```
 
@@ -260,7 +260,7 @@ A condition that is not true any more is left out.
 - Filter (`/`, table and events boxes): type words, applied while typing; `enter` keeps
   it, `Esc` goes back to the filter before. Every key is text while typing (q does not
   quit). A line is shown when all words are in it and no `!word` is; case-insensitive,
-  searched in the cells, the row `detail` values (e.g. rule name `out_ks`), raw and
+  searched in the cells, the row `detail` values (e.g. rule name `out_lan`), raw and
   masked text (`160.79.x.x` works too). Title: `/ <filter>  <shown> of <all>`. `Esc`
   outside typing clears the focused box's filter. Cursor back to line 0 on each change.
   Max 60 chars.
@@ -500,7 +500,7 @@ JSON files between sectop's parts (docs/architecture.md, Privilege split).
 
 ```toml
 [[noise]]
-match = "firewall/out_ks:*"
-reason = "kill switch NDP from the Proton client"
+match = "firewall/new:out_disco"
+reason = "Steam LAN discovery, blocked by hostfw anyway"
 expires = 2026-12-31
 ```

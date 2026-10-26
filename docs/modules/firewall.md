@@ -1,6 +1,6 @@
 # firewall module
 
-hostfw + Proton WireGuard status. `modules/firewall/`.
+hostfw + VPN tunnel (Mullvad WireGuard) status. `modules/firewall/`.
 Parsers (`nft.py`, `journal.py`, `conns.py`, `vpn.py`) are pure. `__init__.py` runs
 commands, applies rules, builds the Snapshot.
 
@@ -18,7 +18,7 @@ Every tick (4 commands):
 | what | argv |
 |---|---|
 | counters + live mode | `nft -j -t list table inet hostfw` |
-| tunnel | `wg show proton0 latest-handshakes`, `transfer` |
+| tunnel | `wg show wg0-mullvad latest-handshakes`, `transfer` |
 | open sockets (peers, prog) | `ss -tunaH --cgroup state established` |
 
 Log lines: core's journal follower (`core/journal.py`, docs/module-interface.md,
@@ -29,21 +29,26 @@ Slow (every 30 s, and at once when the tunnel goes up / down):
 
 | what | argv |
 |---|---|
-| endpoint, live fwmark | `wg show proton0 endpoints`, `fwmark` (tunnel up only) |
+| endpoint, live fwmark | `wg show wg0-mullvad endpoints`, `fwmark` (tunnel up only) |
 | fwmark set | `nft -j list set inet hostfw wg_fwmark` |
-| routes | `ip -j -4 route show default`, `ip -j -6 route show default` |
+| kill switch | `nft -j -t list table inet mullvad` (filter chain policies) |
 
 - Why few: sectop v1 ran as root from my login, so every command was an audit record
   (rule `root_cmds`, ~7 journal entries each). Was 11 commands per tick. See
   docs/architecture.md, Privilege split.
 - Net unit timing: fast (table, handshakes, transfer) every half module interval, slow
-  (endpoints, fwmark, fwmark set) every 15 s: each tick reads a fresh sample. Counters are
-  cumulative: a sample read twice gives delta 0 now and the full delta next tick.
+  (endpoints, fwmark, fwmark set, kill switch table) every 15 s: each tick reads a fresh
+  sample. Counters are cumulative: a sample read twice gives delta 0 now and the full
+  delta next tick.
 - `-t` (nft(8): "Omit contents of sets"): counters and the enforce chain without the
-  set elements (Proton entry IPs: thousands). wg_fwmark elements come from the slow set call.
+  set elements. wg_fwmark elements come from the slow set call.
 - Mode from the table: only rules of chain `enforce` count; no chain `enforce` = unknown.
 - Slow items and their checks are kept and shown every tick until the next slow run.
-  A changed endpoint, fwmark or default route shows within 30 s (a reconnect at once).
+  A changed endpoint, fwmark or kill switch table shows within 30 s (a reconnect at once).
+- Kill switch: the VPN app's own nftables table (Mullvad: `inet mullvad`, kept while
+  disconnected by lockdown mode). On = a filter chain with policy drop on input, output
+  and forward (route / nat chains ignored). Rules not read. Missing or open: warn, hostfw
+  still rejects leaks in enforce.
 
 Once in `init()` (boot scan, timeout 5 s each, see out_leak box):
 
@@ -72,15 +77,15 @@ Files (root-owned, not g/o writable, `O_NOFOLLOW`, max 4 KiB):
 ## Severity
 
 Log kind = counter name: `HFW-OUT-LEAK` -> `out_leak`, `HFW-FWD-VM-LAN` -> `fwd_vm_lan`
-(name part may have dashes). Old prefix `HFW-FWD-KS` (hostfw before 2026-10-19) -> `fwd_vm_ks`.
+(name part may have dashes).
 
 | sev | kinds |
 |---|---|
 | crit | out_leak |
 | warn | out_dns, in_lan, in_vpn, fwd_vm_lan, fwd_in |
-| info | out_ks, out_disco, out_share, out_lan, fwd_vm_ks, unknown kinds |
+| info | out_disco, out_share, out_lan, unknown kinds |
 | hidden | in_noise (counter only, no event, no audit row) |
-| ok | out_dns_vpn, out_wg, out_probe, out_router_admin, out_lan_allow, out_new, fwd_vm_new (allowed) |
+| ok | out_dns_vpn, out_wg, out_vpn_api, out_router_admin, out_lan_allow, out_new, fwd_vm_new (allowed) |
 
 - Alerts come from counter deltas, not totals: totals since boot include the
   pre-connect window. First tick never alarms.
@@ -109,17 +114,14 @@ Checks (Snapshot v2, key = rule + subject, `t` = tunnel name):
 | `new:<kind>` | new packets of a deny kind (Severity) | kind / context |
 | `mode` | mode observe / unknown | warn |
 | `tunnel_down:t` | tunnel down | warn |
-| `route:v4`, `route:v6` | lowest-metric default route not kill switch or tunnel | warn |
-| `route_unknown:v4`, `..v6` | ip error | warn |
+| `killswitch` | VPN kill switch table missing / nft error, or no drop policy on input / output / forward | warn |
 | `log_reader`, `ss`, `boot_mode`, `rollback_file` | source error, file unreadable | warn |
-| `parse:<source>` | parse error (nft, journal, counters, wg, fwmark, routes, ...) | warn |
+| `parse:<source>` | parse error (nft, journal, counters, wg, fwmark, killswitch, ...) | warn |
 | `rollback` | rollback armed (deadline in the future) | info |
 
 - Same key twice in a tick (one source failing in two places): one check, the worse
   severity wins, n adds up.
-- handshake stale detail: age, and `kill switch dropped +N pkt this tick (fail closed)`
-  when out_ks grew (WireGuard transport routed to the dummy after a network change,
-  firewall/docs/observe-log.md 2026-10-19).
+- handshake stale detail: age, tx growing.
 
 Handshake: WireGuard does not handshake on an idle tunnel, so age alone is not a
 failure. Keys are rejected after 180 s, so age > 180 s with traffic going out = broken.
@@ -132,10 +134,10 @@ kinds except hidden; severity = worst `new:<kind>` check of the tick), programs 
 see below), peers (table, see below), audit (table, see below; `width` full: a row of its
 own at the bottom, it has the most columns and gets the leftover lines).
 
-- Colors (`tone`): audit, out_leak and counter rows by verdict: allow blue, drop (kill
-  switch) red, block yellow, zone / pass / deny plain. Healthy kv values green (table
-  loaded, mode enforce, boot mode = live, log reader ok, tunnel up, handshake fresh,
-  fwmark in set, default route = kill switch / tunnel). Problems keep their severity color.
+- Colors (`tone`): audit, out_leak and counter rows by verdict: allow blue, block yellow,
+  zone / pass / deny plain. Healthy kv values green (table loaded, mode enforce, boot
+  mode = live, log reader ok, tunnel up, handshake fresh, fwmark in set, kill switch
+  drop). Problems keep their severity color.
 - hostfw `log reader` = state of core's journal follower for this module (ok / note /
   down), not a log view.
 - Column types (right-aligned, docs/module-interface.md): counters pkts / new / bytes;
@@ -165,7 +167,7 @@ Title: `programs <rows>  <n> with open sockets`.
 
 - Tone: blue = allowed flows or open sockets, red = only dropped / blocked lines.
 - Row detail: note (for `?` / inbound / vm rows), open sockets (max 10), logged counts,
-  kinds (`out_new 12, out_ks 3`), peers by lines (`(socket)` = open, no line yet), uids,
+  kinds (`out_new 12, out_lan 3`), peers by lines (`(socket)` = open, no line yet), uids,
   first / last seen.
 - Row `filter` (keys `f` / `x`, docs/module-interface.md, Screen): the name; `? <uid>` for
   unknown programs (`?` when no uid); `zone` for (inbound), `vm`, `fwd_in` for (forward).
@@ -221,7 +223,7 @@ Title: `peers <addresses>  <sockets> open`, `(ss: <error>)` if ss failed.
 `docs/rules.md`, kept in `MATCH`), verdict, what new packets do (alert key, severity,
 hold; `no alert` for allowed and hidden kinds), log rate,
 exact bytes, since (table load), then the last 10 log lines of that kind since sectop
-started (also in_noise, which is hidden elsewhere). out_dns_vpn / out_wg / out_probe are
+started (also in_noise, which is hidden elsewhere). out_dns_vpn / out_wg / out_vpn_api are
 counted only, never logged: no lines.
 
 ## out_leak box
@@ -239,7 +241,7 @@ Leak lines of this boot, newest first, last 8 shown (100 kept). Title: `out_leak
 
 | context | when | sev |
 |---|---|---|
-| pre-connect | before the first tunnel flow (scan), or tunnel down and no flow yet (live) | info (expected: DoH fallback before Proton connects) |
+| pre-connect | before the first tunnel flow (scan), or tunnel down and no flow yet (live) | info (expected: programs that start before the VPN connects) |
 | tunnel up | live, tunnel up at that tick | crit |
 | tunnel down | live, tunnel down after the first flow (reconnect window) | crit |
 | after connect | scan, after the first flow (tunnel state then unknown) | crit |
@@ -269,7 +271,7 @@ Title: `audit <flows> flows  (<lines> lines)`, lines = all since sectop started.
 | last | age of the newest line (type `age`: epoch seconds, full time in the detail) |
 | n | lines of this flow |
 | dir | out, in, fwd (from the prefix) |
-| verdict | allow (allowed kinds), drop (out_ks, fwd_vm_ks), zone (in_*: hostfw logs, firewalld zone decides), block / pass (deny kinds, live mode enforce / observe) |
+| verdict | allow (allowed kinds), zone (in_*: hostfw logs, firewalld zone decides), block / pass (deny kinds, live mode enforce / observe) |
 | proto | PROTO, lower case |
 | uid | UID (OUT rules with `skuid`), else `-` |
 | prog | out: every process seen with `ss` for a line of the flow (same proto + src + dst, open flows only), max 3 then `+`, else `?`; fwd_vm_*: `vm`; in: `-` |
@@ -287,14 +289,13 @@ Title: `audit <flows> flows  (<lines> lines)`, lines = all since sectop started.
   Planned: Linux audit `connect` records (docs/architecture.md).
 - Verdict uses the mode at collect time: lines logged just before a mode switch may show the new mode.
 
-Summary: `enforce | proton0 up | hs 20s | leak 4`, plus first 3 warn / crit checks.
+Summary: `enforce | wg0-mullvad up | hs 20s | leak 4`, plus first 3 warn / crit checks.
 
 ## Options
 
 ```toml
 [modules.firewall]
-tunnel = "proton0"
-ks_ifaces = ["pvpnksintrf0", "pvpnksintrf1"]
+tunnel = "wg0-mullvad"
 hold = 60
 ```
 
@@ -312,12 +313,19 @@ not armed, no check. `hostfw status` asks systemd for the timer, so it is always
 
 ## Fixtures
 
-`tests/fixtures/firewall/` from my host, 2026-10-19, enforce mode, tunnel up.
+`tests/fixtures/firewall/` from my host, 2026-10-19, enforce mode, tunnel up; moved to
+Mullvad 2026-10-26.
 
 - Public IPs replaced with RFC 5737 ranges, peer key with a dummy, TV MAC and
-  link-local with dummies. LAN 192.168.8.0/24 and CGNAT 100.85.0.1 kept.
-- journal.json: real OUT-KS / IN-NOISE lines, 3 fields kept, cursors rewritten.
-  OUT-LEAK, OUT-DNS, IN-VPN and the non-HFW line are synthetic (format from real logs).
+  link-local with dummies. LAN 192.168.8.0/24 kept.
+- nft-table-terse.json, nft-counters.json, nft-wg-fwmark.json: firewall/hostfw.nft
+  (Mullvad) loaded with nft 1.0.9 in a network namespace, counter values from the
+  2026-10-19 host capture.
+- nft-mullvad-terse.json: my host's `nft list table inet mullvad` (2026-10-26, relay
+  address masked) loaded the same way.
+- journal.json: real IN-NOISE lines, 3 fields kept, cursors rewritten. OUT-LAN (MLDv1
+  report), OUT-LEAK, OUT-DNS, IN-VPN and the non-HFW line are synthetic (format from
+  real logs).
 - nft-observe.json: nft-enforce.json without the reject rule.
 - nft-table-terse.json: `nft -j -t list table inet hostfw`, 2026-10-20, as is (no set
   elements, nothing to replace). Collect tests build the table answer from

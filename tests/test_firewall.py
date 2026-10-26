@@ -86,14 +86,15 @@ class TestNft(unittest.TestCase):
         self.assertEqual(nft.mode(json.dumps(doc)), "unknown")
 
     def test_table_terse(self):
-        # `nft -j -t list table inet hostfw` from my host, 2026-10-20: no set elements
+        # `nft -j -t list table inet hostfw` of firewall/hostfw.nft (Mullvad, 2026-10-26),
+        # nft 1.0.9, counter values from my host 2026-10-20: no set elements
         text = fix("nft-table-terse.json")
         c = nft.counters(text)
-        self.assertEqual(len(c), 19)
+        self.assertEqual(len(c), 17)
         self.assertEqual((list(c)[0], c["out_leak"], c["out_new"]),
                          ("out_dns_vpn", (4, 240), (335, 110636)))
         self.assertEqual(nft.comments(text)["out_leak"], "host to internet outside the tunnel")
-        self.assertEqual(nft.mode(text), "enforce")                 # deny / ks rules ignored
+        self.assertEqual(nft.mode(text), "enforce")                 # deny rules ignored
         doc = json.loads(text)
         self.assertFalse(any("elem" in it["set"] for it in doc["nftables"] if "set" in it))
         doc["nftables"] = [it for it in doc["nftables"]
@@ -110,10 +111,24 @@ class TestNft(unittest.TestCase):
         self.assertEqual(nft.comments('{"nftables": [{"counter": {"name": "x"}}]}'), {})
 
     def test_set(self):
-        self.assertEqual(nft.set_elems(fix("nft-wg-fwmark.json")), [0xea13b2c])
+        self.assertEqual(nft.set_elems(fix("nft-wg-fwmark.json")), [0x6d6f6c65])
         self.assertEqual(nft.set_elems('{"nftables": [{"set": {"name": "s"}}]}'), [])
         with self.assertRaises(ValueError):
             nft.set_elems('{"nftables": []}')
+
+    def test_policies(self):
+        # `nft -j -t list table inet mullvad`: my host's listing 2026-10-26 (relay address
+        # masked) loaded with nft 1.0.9. route (mangle) and nat chains do not filter.
+        self.assertEqual(nft.policies(fix("nft-mullvad-terse.json")),
+                         {"prerouting": "accept", "output": "drop", "input": "drop",
+                          "forward": "drop"})
+        chain = lambda name, pol: {"chain": {"name": name, "type": "filter", "hook": "output",
+                                             "policy": pol}}
+        two = {"nftables": [chain("a", "accept"), chain("b", "drop"), chain("c", "accept")]}
+        self.assertEqual(nft.policies(json.dumps(two)), {"output": "drop"})   # drop wins
+        self.assertEqual(nft.policies(fix("nft-enforce.json")), {})          # no base chain
+        with self.assertRaises(ValueError):
+            nft.policies('{"nftables": [{"chain": {"type": "filter", "hook": 1}}]}')
 
     def test_missing(self):
         self.assertTrue(nft.missing(NO_TABLE.err))
@@ -132,7 +147,7 @@ class TestJournal(unittest.TestCase):
     def test_parse_fixture(self):
         entries, cursor, bad = journal.parse(fix("journal.json"))
         self.assertEqual([e.code for e in entries],
-                         ["HFW-OUT-KS", "HFW-IN-NOISE", "HFW-IN-NOISE", "HFW-OUT-LEAK",
+                         ["HFW-OUT-LAN", "HFW-IN-NOISE", "HFW-IN-NOISE", "HFW-OUT-LEAK",
                           "HFW-OUT-DNS", "HFW-IN-VPN"])
         self.assertEqual(cursor, "s=0;i=7;b=0;m=0;t=0;x=0")   # last line is not HFW
         self.assertEqual(bad, 0)
@@ -145,9 +160,9 @@ class TestJournal(unittest.TestCase):
     def test_summary(self):
         entries, _, _ = journal.parse(fix("journal.json"))
         s = [journal.summary(e) for e in entries]
-        self.assertEqual(s[0], "icmpv6 fe80::1 -> ff02::1:ff00:1 pvpnksintrf0 type 135")
+        self.assertEqual(s[0], "icmpv6 fe80::1 -> ff02::1:ff00:1 wlo1 type 131")
         self.assertEqual(s[3], "uid 1000 tcp 192.168.8.102:46866 -> 203.0.113.11:443 wlo1")
-        self.assertEqual(s[5], "tcp 198.51.100.7:51000 -> 10.2.0.2:22 proton0")
+        self.assertEqual(s[5], "tcp 198.51.100.7:51000 -> 10.2.0.2:22 wg0-mullvad")
 
     def test_v6_port(self):
         e = journal.Entry(0, "HFW-OUT-LEAK", "out_leak",
@@ -185,18 +200,17 @@ class TestJournal(unittest.TestCase):
             ("HFW-OUT-NEW", "out_new", "out"), ("HFW-OUT-NEW", "out_new", "out"),
             ("HFW-FWD-VM-NEW", "fwd_vm_new", "fwd"), ("HFW-OUT-LEAK", "out_leak", "out"),
             ("HFW-IN-LAN", "in_lan", "in"), ("HFW-IN-NOISE", "in_noise", "in"),
-            ("HFW-FWD-VM-KS", "fwd_vm_ks", "fwd"), ("HFW-OUT-KS", "out_ks", "out"),
+            ("HFW-FWD-VM-LAN", "fwd_vm_lan", "fwd"), ("HFW-OUT-LAN", "out_lan", "out"),
             ("HFW-OUT-LAN-ALLOW", "out_lan_allow", "out")])
         self.assertEqual((cursor, bad), ("s=1;i=9;b=0;m=0;t=0;x=0", 0))
 
-    def test_old_and_other_prefixes(self):
+    def test_other_prefixes(self):
         text = "".join(json.dumps({"__CURSOR": str(i), "__REALTIME_TIMESTAMP": "1",
                                    "MESSAGE": f"{code}: OUT=x"}) + "\n"
-                       for i, code in enumerate(("HFW-FWD-KS", "HFW-OUT-ROUTER-ADMIN",
-                                                 "HFW-FWD-VM-LAN", "HFW-OUT", "HFW--X")))
+                       for i, code in enumerate(("HFW-OUT-ROUTER-ADMIN", "HFW-FWD-VM-LAN",
+                                                 "HFW-OUT", "HFW--X")))
         entries, _, _ = journal.parse(text)
-        self.assertEqual([e.kind for e in entries],
-                         ["fwd_vm_ks", "out_router_admin", "fwd_vm_lan"])   # old prefix alias
+        self.assertEqual([e.kind for e in entries], ["out_router_admin", "fwd_vm_lan"])
 
     def test_src_dst(self):
         entries, _, _ = journal.parse(fix("journal-audit.json"))
@@ -316,20 +330,15 @@ class TestVpn(unittest.TestCase):
     def test_fixtures(self):
         self.assertEqual(vpn.handshake(fix("wg-handshakes.txt")), 1792410725)
         self.assertEqual(vpn.transfer(fix("wg-transfer.txt")), (19542372, 3103868))
-        self.assertEqual(vpn.endpoint(fix("wg-endpoints.txt")), "203.0.113.83:443")
-        self.assertEqual(vpn.fwmark(fix("wg-fwmark.txt")), 0xea13b2c)
-        self.assertEqual(vpn.routes(fix("route4.json")),
-                         [("pvpnksintrf0", 98, "100.85.0.1"), ("wlo1", 600, "192.168.8.1")])
+        self.assertEqual(vpn.endpoint(fix("wg-endpoints.txt")), "203.0.113.129:56910")
+        self.assertEqual(vpn.fwmark(fix("wg-fwmark.txt")), 0x6d6f6c65)
 
     def test_edges(self):
         self.assertIsNone(vpn.fwmark("off\n"))
         self.assertEqual(vpn.fwmark("51820"), 51820)
         self.assertEqual(vpn.handshake("a\t0\nb\t5\n"), 5)
-        self.assertEqual(vpn.routes(""), [])
-        self.assertEqual(vpn.routes("[]"), [])
         for fn, text in ((vpn.handshake, ""), (vpn.transfer, "k\t1\n"), (vpn.endpoint, ""),
-                         (vpn.handshake, "k\t-1\n"), (vpn.routes, "{}"),
-                         (vpn.routes, '[{"dev": "x", "metric": "1"}]')):
+                         (vpn.handshake, "k\t-1\n")):
             with self.assertRaises(ValueError, msg=(fn.__name__, text)):
                 fn(text)
 
@@ -348,8 +357,7 @@ class Host:
         self.set("wg transfer", ok(fix("wg-transfer.txt")))
         self.set("wg endpoints", ok(fix("wg-endpoints.txt")))
         self.set("wg fwmark", ok(fix("wg-fwmark.txt")))
-        self.set("ip -4", ok(fix("route4.json")))
-        self.set("ip -6", ok(""))
+        self.set("nft list table mullvad", ok(fix("nft-mullvad-terse.json")))
 
     def set(self, key, res):
         self.answers[key] = res
@@ -427,25 +435,24 @@ class TestCollect(Base):
     def test_healthy(self):
         s = self.collect()
         self.assertEqual(s["status"], "ok")
-        self.assertEqual(s["summary"], "enforce | proton0 up | hs 20s | leak 4")
+        self.assertEqual(s["summary"], "enforce | wg0-mullvad up | hs 20s | leak 4")
         self.assertEqual(self.items(s, "hostfw"),
                          {"table": ("loaded", "ok"), "mode": ("enforce", "ok"),
                           "boot mode": ("enforce", "ok"), "rollback": ("-", "ok"),
                           "log reader": ("ok", "ok")})
         v = self.items(s, "vpn")
-        self.assertEqual(v["tunnel"], ("proton0 up", "ok"))
-        self.assertEqual(v["endpoint"], ("203.0.113.83:443", "ok"))
+        self.assertEqual(v["tunnel"], ("wg0-mullvad up", "ok"))
+        self.assertEqual(v["endpoint"], ("203.0.113.129:56910", "ok"))
         self.assertEqual(v["handshake"], ("20s ago", "ok"))
-        self.assertEqual(v["fwmark"], ("0xea13b2c (in set)", "ok"))
-        self.assertEqual(v["default v4"], ("pvpnksintrf0 (kill switch)", "ok"))
-        self.assertEqual(v["default v6"], ("none", "ok"))
+        self.assertEqual(v["fwmark"], ("0x6d6f6c65 (in set)", "ok"))
+        self.assertEqual(v["kill switch"], ("inet mullvad (drop)", "ok"))
         self.assertEqual(v["recv / sent"], ("19.5MB / 3.1MB", "ok"))
         self.assertEqual([p["id"] for p in s["panels"]],
                          ["hostfw", "vpn", "counters", "leak", "blocked", "programs", "peers",
                           "audit"])
         self.assertEqual([p["id"] for p in s["panels"] if p["width"] == "full"], ["audit"])
         counters = next(p for p in s["panels"] if p["id"] == "counters")
-        self.assertEqual(counters["title"], "hostfw counters  (9 zero hidden)")
+        self.assertEqual(counters["title"], "hostfw counters  (11 zero hidden)")
 
     def test_counters_first_tick_no_alarm(self):
         s = self.collect()
@@ -541,8 +548,8 @@ class TestCollect(Base):
         self.assertEqual(fw._merge([b, a])[0]["title"], "c")
 
     def test_severity_kinds(self):
-        for name, sev in (("out_dns", "warn"), ("in_vpn", "warn"), ("out_ks", "info"),
-                          ("in_noise", "ok"), ("out_wg", "ok"), ("out_probe", "ok"),
+        for name, sev in (("out_dns", "warn"), ("in_vpn", "warn"), ("out_lan", "info"),
+                          ("in_noise", "ok"), ("out_wg", "ok"), ("out_vpn_api", "ok"),
                           ("out_new", "ok"), ("fwd_vm_new", "ok")):
             with self.subTest(name=name):
                 self.setUp()
@@ -556,15 +563,15 @@ class TestCollect(Base):
         self.add_counters("out_new")
         self.collect()
         self.tick()
-        for name in ("out_ks", "in_noise", "out_wg", "out_dns", "out_new"):
+        for name in ("out_lan", "in_noise", "out_wg", "out_dns", "out_new"):
             self.bump(name, 3)
         s = self.collect()
         spark = next(p for p in s["panels"] if p["id"] == "blocked")
         self.assertEqual((spark["values"], spark["sev"]), ([0, 6], "warn"))   # out_dns: warn
         self.tick()
-        self.bump("out_ks", 1)
+        self.bump("out_lan", 1)
         spark = next(p for p in self.collect()["panels"] if p["id"] == "blocked")
-        self.assertEqual((spark["values"][-1], spark["sev"]), (1, "info"))    # out_ks only
+        self.assertEqual((spark["values"][-1], spark["sev"]), (1, "info"))    # out_lan only
         self.tick()
         self.assertEqual(next(p for p in self.collect()["panels"]
                               if p["id"] == "blocked")["sev"], "ok")
@@ -584,7 +591,7 @@ class TestCollect(Base):
         self.host.set("journalctl", ok(fix("journal.json")))
         s = self.collect()
         self.assertEqual([(e["code"], e["sev"]) for e in s["events"]],
-                         [("HFW-OUT-KS", "info"), ("HFW-OUT-LEAK", "crit"),
+                         [("HFW-OUT-LAN", "info"), ("HFW-OUT-LEAK", "crit"),
                           ("HFW-OUT-DNS", "warn"), ("HFW-IN-VPN", "warn")])   # IN-NOISE hidden
         self.assertEqual(s["events"][1]["msg"],
                          "uid 1000 tcp 192.168.8.102:46866 -> 203.0.113.11:443 wlo1")
@@ -622,7 +629,7 @@ class TestCollect(Base):
         self.assertEqual([(c["key"], c["sev"], c["title"]) for c in s["checks"]],
                          [("table", "crit", "table missing")])
         self.assertEqual(self.items(s, "hostfw")["table"], ("missing", "crit"))
-        self.assertTrue(s["summary"].startswith("- | proton0 up"))
+        self.assertTrue(s["summary"].startswith("- | wg0-mullvad up"))
         self.assertIn("leak ?", s["summary"])
         self.assertNotIn("counters", [p["id"] for p in s["panels"]])
         self.assertIn("vpn", [p["id"] for p in s["panels"]])     # other sources still shown
@@ -660,12 +667,12 @@ class TestCollect(Base):
     def test_zero_counters_hidden(self):
         s = self.collect()
         names = [r["cells"][0] for r in self.panel(s, "counters")["rows"]]
-        self.assertEqual(names, ["out_dns_vpn", "out_wg", "out_probe", "out_dns", "out_ks",
-                                 "out_leak", "in_noise", "in_vpn"])
+        self.assertEqual(names, ["out_dns_vpn", "out_wg", "out_dns", "out_leak", "in_noise",
+                                 "in_vpn"])
         self.tick()
         self.bump("out_lan", 1)
         s = self.collect()
-        self.assertEqual(self.panel(s, "counters")["title"], "hostfw counters  (8 zero hidden)")
+        self.assertEqual(self.panel(s, "counters")["title"], "hostfw counters  (10 zero hidden)")
         row = next(r for r in self.panel(s, "counters")["rows"] if r["cells"][0] == "out_lan")
         self.assertEqual((row["cells"][1:3], row["sev"]), (["1", "+1"], "info"))
 
@@ -699,7 +706,7 @@ class TestCollect(Base):
         self.assertEqual(rows["? uid 1000"]["cells"][:6], ["?", "1000", "0", "2", "1", "0"])
         self.assertEqual(rows["? uid 1000"]["filter"], "? 1000")
         self.assertEqual((rows["? uid -"]["tone"], rows["? uid -"]["filter"]), ("red", "?"))
-        self.assertEqual(rows["vm"]["cells"][3:5], ["1", "1"])         # FWD-VM-NEW, FWD-VM-KS
+        self.assertEqual(rows["vm"]["cells"][3:5], ["1", "1"])         # FWD-VM-NEW, FWD-VM-LAN
         self.assertEqual((rows["(inbound)"]["cells"][5], rows["(inbound)"]["filter"]),
                          ("1", "zone"))                                # IN-NOISE hidden
         d = {it["k"]: it["v"] for it in rows["brave"]["detail"]}
@@ -745,22 +752,22 @@ class TestCollect(Base):
         self.assertEqual(rows, [                                    # newest first
             ["t59", "1", "out", "allow", "tcp", "1000", "?", "192.168.8.102", "192.168.8.50:22",
              "wlo1"],                                               # ephemeral port left out
-            ["t58", "1", "out", "drop", "icmpv6", "-", "?", "fe80::1", "ff02::1:ff00:1",
-             "pvpnksintrf0"],
-            ["t57", "1", "fwd", "drop", "udp", "-", "vm", "192.168.122.10:123",
-             "203.0.113.5:123", "virbr0>pvpnksintrf0"],             # equal ports: both kept
+            ["t58", "1", "out", "block", "icmpv6", "-", "?", "fe80::1", "ff02::1:ff00:1",
+             "wlo1"],
+            ["t57", "1", "fwd", "block", "udp", "-", "vm", "192.168.122.10:123",
+             "203.0.113.5:123", "virbr0>wlo1"],                     # equal ports: both kept
             ["t55", "1", "in", "zone", "tcp", "-", "-", "192.168.8.50", "192.168.8.102:22",
              "wlo1"],                                               # inbound: service port kept
             ["t54", "1", "out", "block", "tcp", "1000", "?", "192.168.8.102", "203.0.113.11:443",
              "wlo1"],
             ["t53", "1", "fwd", "allow", "tcp", "-", "vm", "192.168.122.10", "198.51.100.22:443",
-             "virbr0>proton0"],
+             "virbr0>wg0-mullvad"],
             ["t52", "1", "out", "allow", "udp", "1000", "?", "10.2.0.2", "203.0.113.50:443",
-             "proton0"],
+             "wg0-mullvad"],
             ["t51", "1", "out", "allow", "tcp", "1000", "brave", "10.2.0.2", "198.51.100.20:443",
-             "proton0"],                                            # program from ss
+             "wg0-mullvad"],                                        # program from ss
         ])
-        self.assertEqual(sevs, ["ok", "info", "info", "warn", "crit", "ok", "ok", "ok"])
+        self.assertEqual(sevs, ["ok", "info", "warn", "warn", "crit", "ok", "ok", "ok"])
         detail = {d["k"]: d["v"] for d in p["rows"][4]["detail"]}     # the OUT-LEAK row
         self.assertEqual(detail["count"], "1 line, first T1792410754.000")
         self.assertEqual(detail["src ports"], "46900")
@@ -780,22 +787,21 @@ class TestCollect(Base):
         self.assertTrue(inbound["verdict"].startswith("zone  hostfw only logs"))
         self.assertEqual(inbound["MAC"], "02:00:00:00:00:02:02:00:00:00:00:03:08:00")
         events = [e["code"] for e in fw.collect(self.st, self.ctx())["events"]]
-        self.assertEqual(events, ["HFW-OUT-LEAK", "HFW-IN-LAN", "HFW-FWD-VM-KS", "HFW-OUT-KS",
+        self.assertEqual(events, ["HFW-OUT-LEAK", "HFW-IN-LAN", "HFW-FWD-VM-LAN", "HFW-OUT-LAN",
                                   "HFW-OUT-LAN-ALLOW"])     # no *-NEW, no IN-NOISE events
 
     def test_tones(self):
         p, rows, _ = self.audit()
         self.assertEqual([(r[3], t) for r, t in zip(rows, [r["tone"] for r in p["rows"]])], [
-            ("allow", "blue"), ("drop", "red"), ("drop", "red"), ("zone", "plain"),
+            ("allow", "blue"), ("block", "yellow"), ("block", "yellow"), ("zone", "plain"),
             ("block", "yellow"), ("allow", "blue"), ("allow", "blue"), ("allow", "blue")])
         s = self.collect()
         tones = {r["cells"][0]: r["tone"] for r in self.panel(s, "counters")["rows"]}
-        self.assertEqual(tones, {"out_dns_vpn": "blue", "out_wg": "blue", "out_probe": "blue",
-                                 "out_dns": "yellow", "out_ks": "red", "out_leak": "yellow",
-                                 "in_noise": "plain", "in_vpn": "plain"})
+        self.assertEqual(tones, {"out_dns_vpn": "blue", "out_wg": "blue", "out_dns": "yellow",
+                                 "out_leak": "yellow", "in_noise": "plain", "in_vpn": "plain"})
         green = lambda pid: [i["k"] for i in self.panel(s, pid)["items"] if i.get("tone")]
         self.assertEqual(green("hostfw"), ["table", "mode", "boot mode", "log reader"])
-        self.assertEqual(green("vpn"), ["tunnel", "handshake", "fwmark", "default v4"])
+        self.assertEqual(green("vpn"), ["tunnel", "handshake", "fwmark", "kill switch"])
         self.assertTrue(all(i["tone"] == "green" for i in self.panel(s, "vpn")["items"]
                             if "tone" in i))
 
@@ -819,17 +825,18 @@ class TestCollect(Base):
         self.host.set("journalctl", ok(fix("journal.json")))
         self.st.hms = lambda ts: f"t{int(ts) % 100}"
         s = self.collect()
-        d = self.counter_detail(s, "out_ks")
+        d = self.counter_detail(s, "out_dns")
         self.assertEqual(d[:7], [
-            ("meaning", "host traffic hitting the kill switch"),
-            ("match", "host traffic routed to the kill switch dummy (pvpnksintrf0/1)"),
-            ("verdict", "drop  kill switch: always dropped"),
-            ("new packets", "alert new:out_ks (info), kept 60 s after the last tick with new "
+            ("meaning", "DNS / DoT outside the VPN resolver"),
+            ("match", "any other tcp/udp 53, 853 (not the VPN resolver)"),
+            ("verdict", "block  rejected by hostfw (enforce mode)"),
+            ("new packets", "alert new:out_dns (warn), kept 60 s after the last tick with new "
                             "packets"),
             ("log", "10/min burst 20: lines are samples, the counter is exact"),
-            ("bytes", "7640"), ("since", "hostfw table load (a reload resets it)")])
+            ("bytes", "32640"), ("since", "hostfw table load (a reload resets it)")])
         self.assertEqual(d[7:], [("", ""), ("last lines", "1 since sectop started"),
-                                 ("t17", "icmpv6 fe80::1 -> ff02::1:ff00:1 pvpnksintrf0 type 135")])
+                                 ("t46", "uid 0 udp 192.168.8.102:40000 -> 198.51.100.53:53 "
+                                         "wlo1")])
         noise = dict(self.counter_detail(s, "in_noise"))
         self.assertEqual(noise["last lines"], "2 since sectop started")     # hidden kind kept here
         self.assertEqual(noise["new packets"], "no alert (noise)")
@@ -845,10 +852,10 @@ class TestCollect(Base):
 
     def test_counter_detail_keeps_last_lines(self):
         self.st.hms = lambda ts: f"t{int(ts) % 100}"
-        text = "".join(jline(f"c{i}", 1000 + i, "HFW-OUT-KS: OUT=pvpnksintrf0 PROTO=UDP")
+        text = "".join(jline(f"c{i}", 1000 + i, "HFW-OUT-DNS: OUT=wlo1 PROTO=UDP")
                        for i in range(15))
         self.host.set("journalctl", ok(text))
-        d = self.counter_detail(self.collect(), "out_ks")
+        d = self.counter_detail(self.collect(), "out_dns")
         lines = d[d.index(("last lines", "10 since sectop started")) + 1:]
         self.assertEqual([k for k, _ in lines], [f"t{i}" for i in range(14, 4, -1)])
         self.host.set("journalctl", ok(""))
@@ -860,28 +867,26 @@ class TestCollect(Base):
         _, rows, _ = self.audit("nft-observe.json")
         self.assertEqual(rows[4][3], "pass")                        # logged, not blocked
 
-    def ks_lines(self, start, n, dst="2607:6bc0::10", spt=51800, uid="1000"):
+    def lan_lines(self, start, n, dst="fd00::10", spt=51800, uid="1000"):
         return "".join(jline(f"k{start + i}", 1792410000 + start + i,
-                             f"HFW-OUT-KS: IN= OUT=pvpnksintrf0 SRC=fdeb:446c:912d:8da::2 "
+                             f"HFW-OUT-LAN: IN= OUT=wlo1 SRC=fdeb:446c:912d:8da::2 "
                              f"DST={dst} PROTO=TCP SPT={spt + i} DPT=443 SYN UID={uid} ")
                        for i in range(n))
 
     def test_audit_groups_repeats(self):
         self.st.hms = lambda ts: f"t{int(ts) % 100}"
-        self.host.set("journalctl", ok(self.ks_lines(0, 3) + self.ks_lines(10, 1, uid="994")))
+        self.host.set("journalctl", ok(self.lan_lines(0, 3) + self.lan_lines(10, 1, uid="994")))
         p = self.panel(self.collect(), "audit")
         self.assertEqual(p["title"], "audit 2 flows  (4 lines)")
         self.assertEqual([lab(r["cells"])[:2] + r["cells"][5:] for r in p["rows"]], [
-            ["t10", "1", "994", "?", "fdeb:446c:912d:8da::2", "[2607:6bc0::10]:443",
-             "pvpnksintrf0"],
-            ["t2", "3", "1000", "?", "fdeb:446c:912d:8da::2", "[2607:6bc0::10]:443",
-             "pvpnksintrf0"]])
+            ["t10", "1", "994", "?", "fdeb:446c:912d:8da::2", "[fd00::10]:443", "wlo1"],
+            ["t2", "3", "1000", "?", "fdeb:446c:912d:8da::2", "[fd00::10]:443", "wlo1"]])
         d = {it["k"]: it["v"] for it in p["rows"][1]["detail"]}
         self.assertEqual(d["src ports"], "51802 51801 51800  (newest first)")
         self.assertEqual(d["SPT"], "51802")                          # fields of the last line
         old_id = p["rows"][1]["id"]
         self.tick()
-        self.host.set("journalctl", ok(self.ks_lines(20, 1)))
+        self.host.set("journalctl", ok(self.lan_lines(20, 1)))
         p = self.panel(self.collect(), "audit")
         self.assertEqual([lab(r["cells"])[:2] for r in p["rows"]], [["t20", "4"], ["t10", "1"]])
         self.assertEqual(p["rows"][0]["id"], old_id)                 # same flow moved to top
@@ -891,7 +896,7 @@ class TestCollect(Base):
         ss = ("tcp 0 0 10.2.0.2:33146 198.51.100.20:443 users:((\"brave\",pid=1,fd=1))\n"
               "tcp 0 0 10.2.0.2:33147 198.51.100.20:443 users:((\"curl\",pid=2,fd=1))\n")
         self.host.set("ss", ok(ss))
-        line = ("HFW-OUT-NEW: IN= OUT=proton0 SRC=10.2.0.2 DST=198.51.100.20 PROTO=TCP "
+        line = ("HFW-OUT-NEW: IN= OUT=wg0-mullvad SRC=10.2.0.2 DST=198.51.100.20 PROTO=TCP "
                 "SPT={} DPT=443 SYN UID=1000 ")
         self.host.set("journalctl", ok("".join(jline(f"c{i}", 1792410000 + i, line.format(p))
                                                for i, p in enumerate((33146, 40000, 33147)))))
@@ -905,13 +910,13 @@ class TestCollect(Base):
     @mock.patch.object(fw, "MAX_AUDIT", 20)
     def test_audit_keeps_newest(self):
         for i in range(fw.MAX_AUDIT + 5):                           # one new flow per tick
-            self.host.set("journalctl", ok(self.ks_lines(i, 1, dst=f"2001:db8::{i:x}")))
+            self.host.set("journalctl", ok(self.lan_lines(i, 1, dst=f"fd00::{i:x}")))
             self.collect()
             self.tick()
         p = self.panel(self.collect(), "audit")
         self.assertEqual(len(p["rows"]), fw.MAX_AUDIT)
-        self.assertTrue(p["rows"][0]["cells"][8].startswith(f"[2001:db8::{fw.MAX_AUDIT + 4:x}]"))
-        self.assertTrue(p["rows"][-1]["cells"][8].startswith("[2001:db8::5]"))   # oldest out
+        self.assertTrue(p["rows"][0]["cells"][8].startswith(f"[fd00::{fw.MAX_AUDIT + 4:x}]"))
+        self.assertTrue(p["rows"][-1]["cells"][8].startswith("[fd00::5]"))   # oldest out
 
     def test_audit_without_ss(self):
         self.host.set("ss", fail("ss: boom"))
@@ -932,12 +937,13 @@ class TestCollect(Base):
             self.host.set(key, NO_DEV)
         s = self.collect()
         self.assertEqual(s["status"], "warn")
-        self.assertEqual([c["key"] for c in s["checks"]], ["tunnel_down:proton0"])
-        self.assertIn("proton0 down", s["summary"])
+        self.assertEqual([c["key"] for c in s["checks"]], ["tunnel_down:wg0-mullvad"])
+        self.assertIn("wg0-mullvad down", s["summary"])
         v = self.items(s, "vpn")
-        self.assertEqual(v["tunnel"], ("proton0 down (Unable to access interface: No such device)",
-                                       "warn"))
-        self.assertEqual(v["fwmark"], ("set 0xea13b2c", "ok"))   # kept while down: fine
+        self.assertEqual(v["tunnel"], ("wg0-mullvad down (Unable to access interface: No such "
+                                       "device)", "warn"))
+        self.assertEqual(v["fwmark"], ("set 0x6d6f6c65", "ok"))   # kept while down: fine
+        self.assertEqual(v["kill switch"], ("inet mullvad (drop)", "ok"))   # lockdown: kept
 
     def test_fwmark_mismatch(self):
         for out in ("0x1\n", "off\n"):
@@ -959,14 +965,10 @@ class TestCollect(Base):
         s = self.collect()
         self.assertEqual(self.items(s, "vpn")["handshake"], ("5m ago, sending", "crit"))
         self.assertEqual(s["status"], "crit")
-        c = self.check(s, "handshake_stale:proton0")
+        c = self.check(s, "handshake_stale:wg0-mullvad")
         self.assertEqual((c["sev"], c["title"]), ("crit", "handshake stale"))
-        self.assertNotIn("kill switch", c["detail"])
-        self.tick()
-        self.host.set("wg transfer", ok("k\t19542372\t3300000\n"))
-        self.bump("out_ks", 4)                                 # transport to the dummy
-        c = self.check(self.collect(), "handshake_stale:proton0")
-        self.assertTrue(c["detail"].endswith("kill switch dropped +4 pkt this tick (fail closed)"))
+        self.assertEqual(c["detail"], "last handshake 5m ago, tx growing (keys rejected after "
+                                      "180 s)")
 
     def test_handshake_never(self):
         self.host.set("wg latest-handshakes", ok("k\t0\n"))
@@ -974,24 +976,38 @@ class TestCollect(Base):
         self.assertEqual(self.items(s, "vpn")["handshake"], ("never", "info"))
         self.assertIn("hs never", s["summary"])
 
-    def test_default_route_not_ks(self):
-        self.host.set("ip -4", ok('[{"dst":"default","gateway":"192.168.8.1","dev":"wlo1",'
-                                  '"metric":600}]'))
+    def test_killswitch_missing(self):
+        # lockdown mode off and disconnected, or the VPN app stopped
+        self.host.set("nft list table mullvad",
+                      fail("Error: No such file or directory\nlist table inet mullvad\n"))
         s = self.collect()
-        self.assertEqual(self.items(s, "vpn")["default v4"],
-                         ("wlo1 via 192.168.8.1 metric 600", "warn"))
+        self.assertEqual(self.items(s, "vpn")["kill switch"], ("inet mullvad missing", "warn"))
+        c = self.check(s, "killswitch")
+        self.assertEqual((c["sev"], c["title"]), ("warn", "kill switch missing"))
+        self.assertIn("lockdown mode off", c["detail"])
         self.assertEqual(s["status"], "warn")
+
+    def test_killswitch_open(self):
+        doc = json.loads(fix("nft-mullvad-terse.json"))
+        for it in doc["nftables"]:
+            if it.get("chain", {}).get("name") in ("output", "forward"):
+                it["chain"]["policy"] = "accept"
+        self.host.set("nft list table mullvad", ok(json.dumps(doc)))
+        s = self.collect()
+        self.assertEqual(self.items(s, "vpn")["kill switch"],
+                         ("inet mullvad: no drop policy on output, forward", "warn"))
+        self.assertEqual(self.check(s, "killswitch")["title"], "kill switch open")
 
     def test_parse_error_isolated(self):
         self.host.set("wg latest-handshakes", ok("garbage"))
-        self.host.set("ip -4", ok("{not json"))
+        self.host.set("nft list table mullvad", ok("{not json"))
         s = self.collect()
         self.assertEqual(s["status"], "warn")
         self.assertIn("wg parse error", s["summary"])
-        self.assertEqual(sorted(c["key"] for c in s["checks"]), ["parse:routes", "parse:wg"])
+        self.assertEqual(sorted(c["key"] for c in s["checks"]), ["parse:killswitch", "parse:wg"])
         v = self.items(s, "vpn")
         self.assertEqual(v["tunnel"], ("ValueError: wg: no peer in latest-handshakes", "warn"))
-        self.assertTrue(v["routes"][0].startswith("JSONDecodeError"))
+        self.assertTrue(v["kill switch"][0].startswith("JSONDecodeError"))
         self.assertEqual(self.items(s, "hostfw")["mode"], ("enforce", "ok"))
         self.assertEqual(self.panel(s, "peers")["title"], "peers 3  5 open")
 
@@ -1041,7 +1057,7 @@ class TestCollect(Base):
         self.host.set("ss", ok(""))
         for i in range(fw.MAX_PEERS + 3):
             self.host.set("journalctl", ok(jline(f"c{i}", 1792410000 + i,
-                                                 f"HFW-OUT-NEW: OUT=proton0 SRC=10.2.0.2 "
+                                                 f"HFW-OUT-NEW: OUT=wg0-mullvad SRC=10.2.0.2 "
                                                  f"DST=198.51.{i // 256}.{i % 256} PROTO=TCP "
                                                  f"SPT=40000 DPT=443 UID=1000 ")))
             self.collect()
@@ -1059,7 +1075,7 @@ class TestCollect(Base):
         self.host.set("journalctl", ok(fix("journal-audit.json")))
         s = self.collect()
         vpn_items = {i["k"]: i for i in self.panel(s, "vpn")["items"]}
-        self.assertEqual(vpn_items["endpoint"]["ip"], "203.0.113.83")
+        self.assertEqual(vpn_items["endpoint"]["ip"], "203.0.113.129")
         self.assertNotIn("ip", vpn_items["tunnel"])
         audit = {r["cells"][8]: r.get("ip") for r in self.panel(s, "audit")["rows"]}
         self.assertEqual(audit["198.51.100.20:443"], "198.51.100.20")       # out: dst
@@ -1102,13 +1118,12 @@ class TestCollect(Base):
         argvs = self.argvs()
         self.assertEqual(argvs, [
             "nft -j -t list table inet hostfw",
-            "wg show proton0 latest-handshakes",
-            "wg show proton0 transfer",
-            "wg show proton0 endpoints",
-            "wg show proton0 fwmark",
+            "wg show wg0-mullvad latest-handshakes",
+            "wg show wg0-mullvad transfer",
+            "wg show wg0-mullvad endpoints",
+            "wg show wg0-mullvad fwmark",
             "nft -j list set inet hostfw wg_fwmark",
-            "ip -j -4 route show default",
-            "ip -j -6 route show default",
+            "nft -j -t list table inet mullvad",
             "ss -tunaH --cgroup state established",
         ])
         self.assertFalse(any("dump" in a for a in argvs))           # never prints private key
@@ -1118,14 +1133,14 @@ class TestCollect(Base):
         words = lambda: [a.split()[0] if a.split()[0] != "wg" else "wg " + a.split()[3]
                          for a in self.argvs()]
         self.collect()
-        self.assertEqual(len(words()), 9)                           # first tick: all sources
+        self.assertEqual(len(words()), 8)                           # first tick: all sources
         for _ in range(int(fw.SLOW // 2) - 1):
             self.tick()
             self.collect()
             self.assertEqual(words(), fast)                         # 4 commands per tick
         self.tick()
         self.collect()
-        self.assertEqual(len(words()), 9)                           # SLOW s later: all again
+        self.assertEqual(len(words()), 8)                           # SLOW s later: all again
 
     def test_slow_refresh_on_tunnel_change(self):
         self.collect()
@@ -1135,30 +1150,28 @@ class TestCollect(Base):
         self.argvs()
         s = self.collect()                                          # up -> down: refresh now
         self.assertEqual([a for a in self.argvs() if not a.startswith(("journalctl", "ss"))], [
-            "nft -j -t list table inet hostfw", "wg show proton0 latest-handshakes",
-            "nft -j list set inet hostfw wg_fwmark",
-            "ip -j -4 route show default", "ip -j -6 route show default"])
+            "nft -j -t list table inet hostfw", "wg show wg0-mullvad latest-handshakes",
+            "nft -j list set inet hostfw wg_fwmark", "nft -j -t list table inet mullvad"])
         v = self.items(s, "vpn")
         self.assertNotIn("endpoint", v)
-        self.assertEqual(v["fwmark"], ("set 0xea13b2c", "ok"))
+        self.assertEqual(v["fwmark"], ("set 0x6d6f6c65", "ok"))
         self.tick()
         self.host.set("wg latest-handshakes", ok(fix("wg-handshakes.txt")))
         self.host.set("wg transfer", ok(fix("wg-transfer.txt")))
         s = self.collect()                                          # down -> up: refresh now
-        self.assertEqual(self.items(s, "vpn")["fwmark"], ("0xea13b2c (in set)", "ok"))
-        self.assertIn("wg show proton0 endpoints", self.argvs())
+        self.assertEqual(self.items(s, "vpn")["fwmark"], ("0x6d6f6c65 (in set)", "ok"))
+        self.assertIn("wg show wg0-mullvad endpoints", self.argvs())
 
     def test_slow_checks_kept(self):
-        self.host.set("ip -4", ok('[{"dst":"default","gateway":"192.168.8.1","dev":"wlo1",'
-                                  '"metric":600}]'))
+        self.host.set("nft list table mullvad",
+                      fail("Error: No such file or directory\nlist table inet mullvad\n"))
         self.assertEqual(self.collect()["status"], "warn")
         self.tick()
         self.argvs()
-        s = self.collect()                                          # no ip call this tick
-        self.assertFalse(any(a.startswith("ip ") for a in self.argvs()))
+        s = self.collect()                                          # no kill switch call
+        self.assertNotIn("nft -j -t list table inet mullvad", self.argvs())
         self.assertEqual(s["status"], "warn")
-        self.assertEqual(self.items(s, "vpn")["default v4"],
-                         ("wlo1 via 192.168.8.1 metric 600", "warn"))
+        self.assertEqual(self.items(s, "vpn")["kill switch"], ("inet mullvad missing", "warn"))
 
     def test_fwmark_unreadable(self):
         self.host.set("wg fwmark", ok("garbage\n"))
@@ -1175,7 +1188,7 @@ def jline(cur, ts, msg):
 
 LEAK = ("HFW-OUT-LEAK: IN= OUT=wlo1 SRC=192.168.8.102 DST=203.0.113.11 LEN=60 PROTO=TCP "
         "SPT={spt} DPT=443 SYN UID=1000 GID=1000 ")
-NEW = ("HFW-OUT-NEW: IN= OUT=proton0 SRC=10.2.0.2 DST=198.51.100.20 LEN=60 PROTO=TCP "
+NEW = ("HFW-OUT-NEW: IN= OUT=wg0-mullvad SRC=10.2.0.2 DST=198.51.100.20 LEN=60 PROTO=TCP "
        "SPT=33146 DPT=443 SYN UID=1000 GID=1000 ")
 
 
@@ -1316,7 +1329,7 @@ class TestNetSource(Base):
         self.collect()
         self.assertTrue(self.net)
         self.assertFalse({"nft", "wg"} & set(self.ran))
-        self.assertTrue({"ss", "ip"} <= set(self.ran))
+        self.assertEqual(set(self.ran), {"ss"})
         self.assertNotIn("journalctl", self.ran)          # live lines: core's follower
 
     def test_net_unit_has_every_command(self):
@@ -1327,7 +1340,7 @@ class TestNetSource(Base):
         self.assertEqual(set(self.net) - known, set())
         self.assertEqual({os.path.basename(a[0]) + " " + a[-1] for a in self.net},
                          {"nft hostfw", "wg latest-handshakes", "wg transfer",
-                          "wg endpoints", "wg fwmark", "nft wg_fwmark"})
+                          "wg endpoints", "wg fwmark", "nft wg_fwmark", "nft mullvad"})
 
     def test_net_error_shown(self):
         self.host.set("nft list table", fail("/run/sectop-net/table.json missing: "
@@ -1339,7 +1352,7 @@ class TestNetSource(Base):
 class TestInit(unittest.TestCase):
     def test_options(self):
         bad = ({"x": 1}, {"tunnel": "a b"}, {"tunnel": "x" * 16}, {"tunnel": 1},
-               {"ks_ifaces": []}, {"ks_ifaces": "pvpn"}, {"ks_ifaces": ["ok", "no way"]},
+               {"ks_ifaces": ["wlo1"]},                     # removed option: unknown now
                {"hold": -1}, {"hold": True}, {"hold": 4000})
         for cfg in bad:
             with self.assertRaises(ValueError, msg=repr(cfg)):

@@ -565,8 +565,8 @@ def listening(cx: Cx) -> list:
 
 def wg_port(cx: Cx, tunnel: str) -> tuple:
     """-> (port or None, note). `wg show <tunnel> listen-port` from the net unit's file
-    (core/netd.py: wg needs CAP_NET_ADMIN even to read). Proton picks a new random port
-    on every connect (host 2026-10-26), so no port in the policy."""
+    (core/netd.py: wg needs CAP_NET_ADMIN even to read). The VPN tunnel's port can
+    change on every connect (host 2026-10-26), so no port in the policy."""
     res = cx.host.wg_listen_port(tunnel)
     text = res.out.strip()
     if res.rc != 0 or res.timed_out or not text.isdigit():

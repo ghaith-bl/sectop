@@ -58,7 +58,7 @@ same on every screen:
 | magenta | unknown (no data, module not loaded) |
 | plain | ok |
 | blue | allowed (firewall verdict) |
-| soft red | dropped by the kill switch |
+| soft red | only blocked lines (a program or peer the firewall stopped) |
 | soft yellow | blocked by hostfw (enforce) |
 | green | healthy state (table loaded, tunnel up, ...) |
 | dim | sudo / pkexec / su without a root command (sudo -k, sudo -l, denied sudo) |

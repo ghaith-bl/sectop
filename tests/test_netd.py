@@ -15,14 +15,16 @@ def fake_bin(name):
 
 class TestCommands(unittest.TestCase):
     def test_fixed_argv(self):
-        c = netd.commands("proton0", fake_bin)
+        c = netd.commands("wg0-mullvad", fake_bin)
         self.assertEqual(c["table"], (("/usr/bin/nft", "-j", "-t", "list", "table", "inet",
                                        "hostfw"), netd.FAST))
-        self.assertEqual(c["handshakes"][0], ("/usr/bin/wg", "show", "proton0",
+        self.assertEqual(c["handshakes"][0], ("/usr/bin/wg", "show", "wg0-mullvad",
                                                "latest-handshakes"))
         self.assertEqual({k for k, (_a, kind) in c.items() if kind == netd.SLOW},
-                         {"endpoints", "fwmark", "fwmark_set"})
-        self.assertEqual(c["listen_port"], (("/usr/bin/wg", "show", "proton0", "listen-port"),
+                         {"endpoints", "fwmark", "fwmark_set", "killswitch"})
+        self.assertEqual(c["killswitch"][0], ("/usr/bin/nft", "-j", "-t", "list", "table",
+                                              "inet", "mullvad"))     # VPN kill switch
+        self.assertEqual(c["listen_port"], (("/usr/bin/wg", "show", "wg0-mullvad", "listen-port"),
                                             netd.FAST))           # posture: listeners
         self.assertTrue(all(os.path.basename(a[0]) in netd.NET_BINS for a, _k in c.values()))
 
@@ -98,9 +100,9 @@ class TestReader(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.wall = 1000.0
-        self.reader = netd.Reader("proton0", base=self.tmp.name, owner=os.getuid,
+        self.reader = netd.Reader("wg0-mullvad", base=self.tmp.name, owner=os.getuid,
                                   wall=lambda: self.wall, binary=fake_bin)
-        self.cmds = netd.commands("proton0", fake_bin)
+        self.cmds = netd.commands("wg0-mullvad", fake_bin)
 
     def put(self, name, res=Result(0, "{}", "", False, False), ts=995.0, **over):
         doc = netd.result_doc(name, self.cmds[name][0], res, ts)
@@ -138,7 +140,7 @@ class TestReader(unittest.TestCase):
         self.assertIn("net file:", self.ask("table").err)
 
     def test_user_missing_and_bug(self):
-        r = netd.Reader("proton0", base=self.tmp.name, owner=lambda: None, binary=fake_bin)
+        r = netd.Reader("wg0-mullvad", base=self.tmp.name, owner=lambda: None, binary=fake_bin)
         self.assertIn("user sectop-net missing", r(list(self.cmds["table"][0])).err)
         with self.assertRaises(ValueError):
             self.reader(["/usr/bin/nft", "flush", "ruleset"])
@@ -176,7 +178,7 @@ class TestMain(unittest.TestCase):
     def test_runs(self):
         rc, loop, _ = self.main()
         self.assertEqual(rc, 0)
-        self.assertEqual(set(loop.call_args.args[0]), set(netd.commands("proton0")))
+        self.assertEqual(set(loop.call_args.args[0]), set(netd.commands("wg0-mullvad")))
 
     def test_owner_uid(self):
         with mock.patch.object(netd.pwd, "getpwnam", side_effect=KeyError("x")):

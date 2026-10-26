@@ -125,8 +125,8 @@ class TestTop(unittest.TestCase):
     def test_engine_alerts(self):
         al = [alert("fw/h", "crit", "handshake stale"),
               alert("fw/in", "warn", "new in_vpn", count=3),
-              alert("fw/ks", "info", "new out_ks"),
-              alert("fw/x", "crit", "silenced", noise="proton ndp"),
+              alert("fw/lan", "info", "new out_lan"),
+              alert("fw/x", "crit", "silenced", noise="steam disc"),
               alert("fw/old", "warn", "new out_dns", state="held")]
         view = [mod(engine=True, status="crit"), mod(name="sys", status="unknown")]
         f = frame(view, alerts=al)
@@ -213,7 +213,7 @@ class TestBoxes(unittest.TestCase):
 
     def filtered(self, filt, mask=True, typing=None):
         m = mod()
-        m["panels"][1]["rows"][0]["detail"] = [{"k": "rule", "v": "out_ks"}]
+        m["panels"][1]["rows"][0]["detail"] = [{"k": "rule", "v": "out_lan"}]
         ui = UI(2, filters={"firewall/conns": filt}, mask=mask, typing=typing)
         return frame([m], ui=ui)
 
@@ -223,7 +223,7 @@ class TestBoxes(unittest.TestCase):
         self.assertTrue(find(f.lines, "firefox  10.2.0.1"))
         self.assertFalse(find(f.lines, "149.112"))
         self.assertEqual({b.key: b for b in f.boxes}["firewall/conns"].lines, 1)
-        for filt, want in (("out_ks", 1), ("OUT_KS", 1), ("!fire", 1), ("x 149.112.x.x", 1),
+        for filt, want in (("out_lan", 1), ("OUT_LAN", 1), ("!fire", 1), ("x 149.112.x.x", 1),
                            ("149.112.112", 1), ("!fire !x", 0), ("nothing", 0), ("!", 2)):
             f = self.filtered(filt)
             self.assertEqual({b.key: b for b in f.boxes}["firewall/conns"].lines,

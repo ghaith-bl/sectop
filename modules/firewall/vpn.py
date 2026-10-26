@@ -1,10 +1,8 @@
-"""Parse `wg show <iface> <field>` and `ip -j route show default`. Pure functions.
+"""Parse `wg show <iface> <field>`. Pure functions.
 
 `wg show <iface> dump` is not used: its first line has the private key.
 The per-field subcommands used here never print it.
 """
-
-import json
 
 
 def _rows(text: str) -> list:
@@ -48,27 +46,9 @@ def endpoint(text: str) -> str:
 
 
 def fwmark(text: str) -> int | None:
-    """'0xea13b2c' -> int; 'off' -> None."""
+    """'0x6d6f6c65' -> int; 'off' -> None."""
     s = text.strip()
     if s == "off":
         return None
     return int(s, 16) if s.lower().startswith("0x") else _int(s)
 
-
-def routes(text: str) -> list:
-    """`ip -j route show default` -> [(dev, metric, gateway)], lowest metric first."""
-    if not text.strip():
-        return []
-    doc = json.loads(text)
-    if not isinstance(doc, list):
-        raise ValueError("ip: list required")
-    out = []
-    for r in doc:
-        if not isinstance(r, dict) or not isinstance(r.get("dev"), str):
-            continue
-        metric = r.get("metric", 0)
-        if not isinstance(metric, int) or isinstance(metric, bool):
-            raise ValueError("ip: bad metric")
-        gw = r.get("gateway") if isinstance(r.get("gateway"), str) else ""
-        out.append((r["dev"], metric, gw))
-    return sorted(out, key=lambda x: x[1])

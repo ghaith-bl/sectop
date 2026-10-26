@@ -12,8 +12,8 @@ D = datetime.date
 
 GOOD = b"""
 [[noise]]
-match = "firewall/out_ks:*"
-reason = "kill switch NDP from the Proton client"
+match = "firewall/out_disco:*"
+reason = "Steam LAN discovery"
 expires = 2026-12-31
 
 [[noise]]
@@ -35,7 +35,7 @@ class TestParse(unittest.TestCase):
 
     def test_good(self):
         a, b = nz.parse(GOOD)
-        self.assertEqual(a, nz.Entry("firewall/out_ks:*", "kill switch NDP from the Proton client",
+        self.assertEqual(a, nz.Entry("firewall/out_disco:*", "Steam LAN discovery",
                                      D(2026, 12, 31)))
         self.assertEqual(b.expires, D(2026, 11, 1))
 
@@ -89,19 +89,19 @@ class TestReason(unittest.TestCase):
         self.entries = nz.parse(GOOD)
 
     def test_match_and_expiry(self):
-        r = nz.reason(self.entries, "firewall/out_ks:pvpnksintrf0", noon(D(2026, 12, 31)))
-        self.assertEqual(r, "kill switch NDP from the Proton client")    # last day applies
-        self.assertIsNone(nz.reason(self.entries, "firewall/out_ks:pvpnksintrf0",
+        r = nz.reason(self.entries, "firewall/out_disco:wlo1", noon(D(2026, 12, 31)))
+        self.assertEqual(r, "Steam LAN discovery")    # last day applies
+        self.assertIsNone(nz.reason(self.entries, "firewall/out_disco:wlo1",
                                     noon(D(2027, 1, 1))))                  # expired
         self.assertEqual(nz.reason(self.entries, "firewall/in_lan:192.168.8.1",
                                    noon(D(2026, 10, 20))), "router probes")
 
     def test_no_match(self):
         now = noon(D(2026, 10, 20))
-        for key in ("firewall/out_leak:x", "other/out_ks:x", "firewall/OUT_KS:x",
-                    "firewall/in_lan:10.0.0.1", "firewall/out_ks"):
+        for key in ("firewall/out_leak:x", "other/out_disco:x", "firewall/OUT_DISCO:x",
+                    "firewall/in_lan:10.0.0.1", "firewall/out_disco"):
             self.assertIsNone(nz.reason(self.entries, key, now), key)
-        self.assertIsNone(nz.reason((), "firewall/out_ks:x", now))
+        self.assertIsNone(nz.reason((), "firewall/out_disco:x", now))
 
     def test_first_entry_wins(self):
         e = nz.parse(self.entry_pair())

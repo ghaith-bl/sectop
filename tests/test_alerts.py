@@ -39,13 +39,13 @@ class Engine:
 
 class TestStep(unittest.TestCase):
     def test_new_check_opens(self):
-        e = Engine().step("firewall", chk("tunnel_down:proton0", "crit"))
-        r = e.rec("firewall/tunnel_down:proton0")
-        self.assertEqual(e.st("firewall/tunnel_down:proton0"), "open")
+        e = Engine().step("firewall", chk("tunnel_down:wg0-mullvad", "crit"))
+        r = e.rec("firewall/tunnel_down:wg0-mullvad")
+        self.assertEqual(e.st("firewall/tunnel_down:wg0-mullvad"), "open")
         self.assertEqual((r["first"], r["since"], r["last"]), (e.now,) * 3)
         self.assertEqual((r["count"], r["sev"], r["module"], r["hold"]),
                          (1, "crit", "firewall", al.DEFAULT_HOLD))
-        self.assertEqual(r["title"], "title tunnel_down:proton0")
+        self.assertEqual(r["title"], "title tunnel_down:wg0-mullvad")
 
     def test_no_repeat_while_true(self):
         e = Engine().step("fw", chk("a"))
@@ -164,11 +164,11 @@ class TestActive(unittest.TestCase):
         e = Engine().step("fw", chk("ks:a", "warn"), chk("leak", "info"), chk("ks:b", "crit"))
         far = datetime.date.fromtimestamp(e.now) + datetime.timedelta(days=30)
         past = datetime.date.fromtimestamp(e.now) - datetime.timedelta(days=30)
-        noise = (Entry("fw/ks:*", "proton ndp", far), Entry("fw/leak", "old", past))
+        noise = (Entry("fw/ks:*", "steam disc", far), Entry("fw/leak", "old", past))
         got = [(a["key"], a["noise"]) for a in al.active(e.state, e.now, noise)]
         # noise last; an expired entry does not match
-        self.assertEqual(got, [("fw/leak", None), ("fw/ks:b", "proton ndp"),
-                               ("fw/ks:a", "proton ndp")])
+        self.assertEqual(got, [("fw/leak", None), ("fw/ks:b", "steam disc"),
+                               ("fw/ks:a", "steam disc")])
         self.assertEqual([a["noise"] for a in al.active(e.state, e.now)], [None] * 3)
         e.step("fw", chk("ks:a", "warn", n=2))                # still tracked while noise
         self.assertEqual(e.rec("fw/ks:a")["count"], 3)

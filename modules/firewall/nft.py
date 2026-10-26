@@ -1,4 +1,4 @@
-"""Parse `nft -j` output for the hostfw table. Pure functions, no I/O."""
+"""Parse `nft -j` output (hostfw table, VPN kill switch table). Pure functions, no I/O."""
 
 import json
 
@@ -73,6 +73,22 @@ def set_elems(text: str) -> list:
             raise ValueError("nft: set elements must be integers")
         return elems
     raise ValueError("nft: no set in output")
+
+
+def policies(text: str) -> dict:
+    """`-t list table <family> <name>` -> {hook: policy} of its filter base chains,
+    e.g. {"input": "drop", "output": "drop"}. A hook with a drop policy in any filter
+    chain = drop (unmatched packets end there). route / nat chains do not filter."""
+    out = {}
+    for it in _items(text):
+        c = it.get("chain")
+        if not isinstance(c, dict) or "hook" not in c or c.get("type", "filter") != "filter":
+            continue
+        hook, pol = c.get("hook"), c.get("policy", "accept")
+        if not isinstance(hook, str) or not isinstance(pol, str):
+            raise ValueError("nft: bad base chain")
+        out[hook] = "drop" if "drop" in (pol, out.get(hook)) else pol
+    return out
 
 
 def missing(err: str) -> bool:
