@@ -21,9 +21,12 @@ watch list `/etc/sectop/watch.toml`, read once in init (see Watch list), and
 Every audit entry since the last collect, assembled into events by `core/audit.py`
 (same `_AUDIT_ID`, complete at PROCTITLE; an AVC without a syscall: 2 s timeout, next
 collect), plus sudo's syslog alerts, kernel log lines PRIORITY 0..4 and USB lines. Not
-the whole `_TRANSPORT=kernel` (the firewall's group): hostfw logs at level info
-(PRIORITY 6), a burst of HFW lines would push audit entries out of this module's buffer
-(5000 per collect). Used:
+the whole `_TRANSPORT=kernel` (the firewall's group): the box shows PRIORITY 0..4 and
+USB only (docs/architecture.md, Kernel, 2026-10-20), so the filter is the journalctl
+match (journalctl(1): terms of one field are alternatives) and the HFW lines (hostfw
+logs at level info, PRIORITY 6) are never parsed here. Not a buffer question (corrected
+2026-10-26): hostfw log rules are rate limited (10/minute, burst 20 each). Not from CIS /
+Red Hat: own design. Used:
 
 | event | what |
 |---|---|
