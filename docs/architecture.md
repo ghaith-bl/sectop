@@ -655,6 +655,9 @@ Tones: blue (allowed) and green (healthy) are both safe now: cyan. Soft red, sof
 dim unchanged. A warn / crit row: whole row in its color; its detail shows the row's
 cells and the module's problem lines (`sev` on a detail pair) in that color, so the eye
 lands there first. Preview scripts were run in my terminal before (not in the repo).
+Selected line (after the first run with colors, 2026-10-27): one reverse bar the whole
+width, plain, or the row's own color when it has one (severity / tone): a color per
+column made a patchy bar.
 
 ## Phase 4 plan (2026-10-20)
 

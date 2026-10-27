@@ -1158,7 +1158,7 @@ def _grid(boxes: list, ui, width: int, room: int, mask: bool, tsfmt, pref) -> tu
             for cw, content, hi in cells:
                 line = content[i] if i < len(content) else []
                 fill = cw - min(cw, 1) - _len(line)
-                style = SEL + "plain" if i in hi else "plain"
+                style = (line[-1][1] if line else SEL + "plain") if i in hi else "plain"
                 parts += ([(" ", style)] if cw else []) + line
                 parts += [(" " * fill, style), (BV, "frame")]
             lines.append([(t, s) for t, s in parts if t])
@@ -1168,9 +1168,19 @@ def _grid(boxes: list, ui, width: int, room: int, mask: bool, tsfmt, pref) -> tu
     return lines, tuple(infos), focus
 
 
+SEL_SEVS = ("crit", "warn", "unknown", "info")      # worst first
+
+
 def _hi(line: list) -> list:
-    """Selected line: same colors, reverse video."""
-    return [(t, SEL + s) for t, s in line] or [(" ", SEL + "plain")]
+    """Selected line: one color in reverse video, the whole width (2026-10-27: a color
+    per column made a patchy bar). A problem line keeps its severity color, else plain."""
+    rest = {s for _, s in line[1:]} - {"plain"}         # after the severity glyph
+    if len(rest) == 1:
+        style = SEL + rest.pop()                        # a one-color row keeps it
+    else:
+        base = {s[len(BOLD):] if s.startswith(BOLD) else s for _, s in line}
+        style = SEL + next((sev for sev in SEL_SEVS if sev in base), "plain")
+    return [(t, style) for t, _ in line] or [(" ", SEL + "plain")]
 
 
 # --- layout ---------------------------------------------------------------

@@ -503,8 +503,8 @@ class TestBoxes(unittest.TestCase):
         [row] = [line for line in lines if "149.112" in text(line)]
         i = row.index(("x        149.112.x.x", render.SEL + "crit"))
         self.assertEqual(row[i - 1], ("!! ", render.SEL + "crit"))        # glyph, selected too
-        self.assertEqual(row[i - 2][1], render.SEL + "plain")             # pad before
-        self.assertEqual(row[i + 1][1], render.SEL + "plain")             # fill after
+        self.assertEqual(row[i - 2][1], render.SEL + "crit")              # pad before
+        self.assertEqual(row[i + 1][1], render.SEL + "crit")              # fill after: one bar
         self.assertEqual(row[i + 2], (BV, "frame"))                         # white frame
         [kv] = [line for line in lines if "enforce" in text(line) and "mode" in text(line)]
         self.assertFalse(any(s.startswith(render.SEL) for _, s in kv))   # not focused
@@ -1174,19 +1174,23 @@ class TestColors(unittest.TestCase):
 
     def test_roles_default(self):
         lines = lay(self.view([{"cells": ["cpu", "4%", "-", "fine"], "sev": "ok"}]))
-        self.assertEqual(part(lines, "cpu")[1], render.SEL + "name")       # selected: reverse
-        self.assertEqual(part(lines, "4%")[1], render.SEL + "value")
-        self.assertEqual(part(lines, "fine")[1], render.SEL + "text")
+        self.assertEqual(part(lines, "cpu")[1], render.SEL + "plain")      # selected: one bar
+        lines = lay(self.view([{"cells": ["cpu", "4%", "-", "fine"], "sev": "ok"},
+                               {"cells": ["mem", "5%", "-", "good"], "sev": "ok"}]))
+        self.assertEqual(part(lines, "mem")[1], "name")
+        self.assertEqual(part(lines, "5%")[1], "value")
+        self.assertEqual(part(lines, "good")[1], "text")
 
     def test_roles_given_and_level(self):
-        rows = [{"cells": ["temp", "79 C", "-", "warn 75"], "sev": "ok", "level": "high"}]
+        rows = [{"cells": ["x", "1", "-", "y"], "sev": "ok"},
+                {"cells": ["temp", "79 C", "-", "warn 75"], "sev": "ok", "level": "high"}]
         lines = lay(self.view(rows, roles=["name", "value", "note", "note"]))
-        self.assertEqual(part(lines, "79 C")[1], render.SEL + "high")     # near its limit
-        self.assertEqual(part(lines, "warn 75")[1], render.SEL + "note")
+        self.assertEqual(part(lines, "79 C")[1], "high")                  # near its limit
+        self.assertEqual(part(lines, "warn 75")[1], "note")
 
     def test_problem_row_one_color(self):
         lines = lay(self.view([{"cells": ["temp", "90 C", "-", "crit"], "sev": "crit"}]))
-        self.assertEqual(part(lines, "temp")[1], render.SEL + "crit")       # selected: reverse
+        self.assertEqual(part(lines, "temp")[1], render.SEL + "crit")       # selected: its color
 
     def test_detail_problem_lines(self):
         rows = [{"cells": ["temp", "90 C", "-", "x"], "sev": "crit",
