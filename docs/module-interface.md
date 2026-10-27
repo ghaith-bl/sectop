@@ -105,7 +105,11 @@ table (rows max 200):
 `types` optional (column hint, one per column): `text` (default, left), `num` (right),
 `age` (right; the cell is epoch seconds as text, e.g. `"1792410745.120"`, or `-` / empty
 for none; shown as `12s` `4m` `2h` `3d`, the detail and the filter use the full local
-time). Wrong length / type, or an age cell that is not epoch seconds -> invalid.
+time), `spark` (right; the cell is numbers as text, space separated, max 60, optional
+`/top`, e.g. `"35 36 37/100"`, or empty; core draws bars of the newest values that fit the
+column, scale 0 (or the lowest value below 0) to top, else to the highest value; the
+detail, the filter and the card show `last  min  max  points`). Wrong length / type, an
+age cell that is not epoch seconds or a spark cell that does not parse -> invalid.
 
 Row `detail` optional: extra k / v pairs shown on `enter` under the cells (max 40).
 Row `id` optional (str): stable key of the row (e.g. a grouped flow). The cursor follows

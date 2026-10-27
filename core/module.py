@@ -25,7 +25,8 @@ SEV_RANK = {"ok": 0, "info": 1, "warn": 2, "crit": 3}
 PANEL_TYPES = ("kv", "table", "spark")
 WIDTHS = ("auto", "full")                # panel layout hint: full = a grid row of its own
 TONES = ("plain", "red", "blue", "yellow", "green", "dim")   # optional hint, not severity
-COL_TYPES = ("text", "num", "age")       # table column hint: num / age right; age = epoch s
+COL_TYPES = ("text", "num", "age", "spark")   # table column hint: num / age / spark right;
+                                              # age = epoch s, spark = numbers as text
 
 MAX_STR = 512
 MAX_PANELS = 8
@@ -34,6 +35,7 @@ MAX_COLUMNS = 12
 MAX_ROWS = 200
 MAX_DETAIL = 40          # k / v pairs per table row, shown on enter
 MAX_SPARK = 120
+MAX_SPARK_CELL = 60      # values in a spark cell (a cell is at most MAX_STR chars)
 MAX_EVENTS = 100
 MAX_CHECKS = 50
 MAX_N = 10 ** 9
@@ -201,6 +203,9 @@ def _table(p: dict, w: str) -> dict:
                 if t == "age" and not _epoch(row["cells"][j]):
                     raise InvalidSnapshot(f"{w}.rows[{i}].cells[{j}]: epoch seconds or - "
                                           "required (age column)")
+                if t == "spark" and spark_cell(row["cells"][j]) is None:
+                    raise InvalidSnapshot(f"{w}.rows[{i}].cells[{j}]: numbers, optional "
+                                          f"/top, max {MAX_SPARK_CELL} required (spark column)")
         out["types"] = list(types)
     return out
 
@@ -214,6 +219,24 @@ def _epoch(cell: str) -> bool:
     except ValueError:
         return False
     return math.isfinite(v) and v >= 0
+
+
+def spark_cell(cell: str):
+    """Spark cell: values as text, space separated, optional `/top` (scale), e.g.
+    "35 36 37/100". -> (values, top or None); "" -> ([], None); bad -> None.
+    The scale starts at 0 (or the lowest value if below 0) and ends at top, else at
+    the highest value."""
+    body, sep, top = cell.partition("/")
+    try:
+        vals = [float(x) for x in body.split()]
+        hi = float(top) if sep else None
+    except ValueError:
+        return None
+    if len(vals) > MAX_SPARK_CELL or not all(math.isfinite(v) for v in vals):
+        return None
+    if hi is not None and not (math.isfinite(hi) and hi > 0):
+        return None
+    return vals, hi
 
 
 def _detail(r: dict, w: str) -> list:

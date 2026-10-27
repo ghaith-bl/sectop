@@ -36,7 +36,7 @@ from dataclasses import dataclass
 
 from core.lookup import TIMEOUT as LOOKUP_TIMEOUT
 from core.lookup import public
-from core.module import SEV_RANK
+from core.module import SEV_RANK, spark_cell
 from core.sanitize import TRUNC, display, mask_ips
 
 TAGS = {"ok": "OK", "info": "INFO", "warn": "WARN", "crit": "CRIT",
@@ -289,6 +289,34 @@ def age(ts: float, ref: float) -> str:
     return f"{sec // 86400}d"
 
 
+def bars(cell: str, width: int) -> str:
+    """Spark cell -> bars of its last `width` values (newest right). Scale: 0 (or the
+    lowest value below 0) to the cell's top, else to the highest value."""
+    got = spark_cell(cell)
+    if not got or not got[0] or width <= 0:
+        return ""
+    vals, top = got
+    vals = vals[-width:]
+    lo = min(0.0, min(vals))
+    hi = top if top is not None else max(vals)
+    span = hi - lo
+    last = len(SPARK) - 1
+    if span <= 0:
+        return SPARK[0] * len(vals)
+    return "".join(SPARK[max(0, min(last, round((v - lo) / span * last)))] for v in vals)
+
+
+def spark_text(cell: str) -> str:
+    """Spark cell in a detail / filter / card: last, min, max, points (and scale)."""
+    got = spark_cell(cell)
+    if not got or not got[0]:
+        return "-"
+    vals, top = got
+    out = (f"last {_num(vals[-1])}  min {_num(min(vals))}  max {_num(max(vals))}  "
+           f"{len(vals)} points")
+    return out + (f"  (scale 0-{_num(top)})" if top is not None else "")
+
+
 def _when(cell: str):
     """Age cell -> epoch seconds, None for - / empty / not a number."""
     try:
@@ -446,7 +474,10 @@ class _Box:
         return self.data.get("types") or ["text"] * len(cols_)
 
     def cell(self, c: str, t: str, full: bool = False) -> str:
-        """Cell as shown: an age column gives the age (full time in a detail)."""
+        """Cell as shown: an age column gives the age (full time in a detail), a spark
+        column its bars (last, min, max in a detail)."""
+        if t == "spark":
+            return spark_text(c) if full else bars(c, COL_MAX)
         if t != "age":
             return c
         ts = _when(c)
@@ -513,9 +544,16 @@ class _Box:
             return [], body or dash
         if self.kind == "table":
             head, rows, widths, floors, full = self.prep
-            right = [t != "text" for t in self.types()]
+            types = self.types()
+            right = [t != "text" for t in types]
             room = w - GLYPH_W - 2 * (len(widths) - 1)
             widths = grow(shrink(widths, floors, room), full, room)
+            sparks = [j for j, t in enumerate(types) if t == "spark"]
+            if sparks:                       # bars for the width the column got, not cut
+                rows = [list(cells) for cells in rows]
+                for cells, r in zip(rows, self.view):
+                    for j in sparks:
+                        cells[j] = bars(r["cells"][j], widths[j])
 
             def cell(c, cw, r):
                 c = fit(c, cw)
@@ -709,11 +747,13 @@ def _card(view: list, prog: str, stampfmt=_stamp) -> tuple:
             where = f"{m['name']}/{p['id']}"
             for r in hits:
                 ages = [c for c, t in zip(r["cells"], types) if t == "age"]
-                rest = [c for c, t in zip(r["cells"], types) if t != "age"]
+                rest = [spark_text(c) if t == "spark" else c
+                        for c, t in zip(r["cells"], types) if t != "age"]
                 detail = [{"k": "box title", "v": p["title"]}]
                 for col, c, t in zip(p["columns"], r["cells"], types):
                     when = _when(c) if t == "age" else None
-                    detail.append({"k": col, "v": stampfmt(when) if when is not None else c})
+                    v = stampfmt(when) if when is not None else c
+                    detail.append({"k": col, "v": spark_text(c) if t == "spark" else v})
                 detail += list(r.get("detail", ()))
                 row = {"cells": [ages[0] if ages else "-", where, "  ".join(rest)],
                        "sev": r.get("sev", "ok"), "id": f"{where}|{r.get('id') or r['cells']}",

@@ -1,7 +1,7 @@
 import curses
 import unittest
 
-from core import render
+from core import module, render
 import re
 
 from core.render import BH, BV, CROSS, RT, SPARK, TD, TR, TU, cols, fit, layout, pad
@@ -1117,3 +1117,43 @@ class TestCard(unittest.TestCase):
         self.ui.key(ord("c"))
         self.assertEqual(self.ui.card, "firefox")
         self.assertNotIn("card", self.ui.filters)                # a new card: no filter
+
+
+class TestSparkColumn(unittest.TestCase):
+    def table(self, cell):
+        return {"v": 1, "status": "ok", "summary": "", "events": [], "panels": [
+            {"id": "t", "title": "t", "type": "table", "columns": ["m", "trend"],
+             "types": ["text", "spark"], "rows": [{"cells": ["x", cell]}]}]}
+
+    def test_cell(self):
+        self.assertEqual(module.spark_cell("1 2 3/10"), ([1, 2, 3], 10))
+        self.assertEqual(module.spark_cell(""), ([], None))
+        for bad in ("a b", "1 2/0", "1/x", "nan", " ".join(["1"] * 61)):
+            self.assertIsNone(module.spark_cell(bad), bad)
+        module.validate(self.table("0 50 100/100"))
+        with self.assertRaises(module.InvalidSnapshot):
+            module.validate(self.table("1,2"))
+
+    def test_bars(self):
+        self.assertEqual(render.bars("0 50 100/100", 10), SPARK[0] + SPARK[4] + SPARK[7])
+        self.assertEqual(render.bars("1 2 3 4", 2), SPARK[5] + SPARK[7])       # last values, 0..max
+        self.assertEqual(render.bars("5 5", 4), SPARK[7] * 2)
+        self.assertEqual(render.bars("0 0", 4), SPARK[0] * 2)
+        self.assertEqual(render.bars("", 4), "")
+        self.assertEqual(render.spark_text("35 36 37/100"),
+                         "last 37  min 35  max 37  3 points  (scale 0-100)")
+
+    def test_layout(self):
+        view = [{"name": "system", "status": "ok", "summary": "", "flags": [], "stale": False,
+                 "waiting": False, "panels": [
+                     {"id": "system", "title": "system", "type": "table", "sev": "ok",
+                      "width": "full", "columns": ["metric", "trend"],
+                      "types": ["text", "spark"],
+                      "rows": [{"cells": ["cpu", " ".join(["50"] * 60) + "/100"],
+                                "sev": "ok"}]}]}]
+        scr = (Screen("processes", ("system",)),)
+        f = layout(scr, view, [], UI(1), 60, 20, tsfmt=lambda ts: "", stampfmt=lambda ts: "")
+        line = next("".join(t for t, _ in ln) for ln in f.lines
+                    if "cpu" in "".join(t for t, _ in ln) and SPARK[4] in "".join(t for t, _ in ln))
+        self.assertEqual(line.count(SPARK[4]), 40)                # COL_MAX, never cut with ~
+        self.assertNotIn("~", line)
