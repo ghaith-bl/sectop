@@ -145,6 +145,8 @@ class TestModule(Base):
                          ["temp ram 14-0050", "38 C", "38 C", "85 C",
                           "warn 70 C, yellow after 60 s"])
         self.assertEqual(r["temp:coretemp:coretemp.0:temp1"]["cells"][0], "temp cpu")
+        self.assertEqual(snap["panels"][0]["roles"], ["name", "value", "peak", "note", "note"])
+        self.assertNotIn("level", r["memory"])
         self.assertEqual(r["temp:coretemp:coretemp.0:temp1"]["cells"][4],
                          "warn 75 C, yellow after 60 s")
         self.assertEqual(r["temp:nvme:nvme0:temp1"]["cells"][3:],
@@ -171,6 +173,9 @@ class TestModule(Base):
         snap = self.collect()
         r = rows(snap)["temp:coretemp:coretemp.0:temp1"]
         self.assertEqual(r["sev"], "crit")
+        d = {it["k"]: it for it in r["detail"]}
+        self.assertEqual(d["at crit"], {"k": "at crit", "v": "100.0 C >= 100 C", "sev": "crit"})
+        self.assertNotIn("sev", d["sensor"])
         c = keys(snap)["temp_crit:coretemp:coretemp.0:temp1"]
         self.assertEqual((c["sev"], c["title"]), ("crit", "cpu 100 C: at crit 100 C"))
         self.assertEqual(snap["status"], "crit")
@@ -189,6 +194,17 @@ class TestModule(Base):
         self.assertEqual((rows(snap)[rid]["sev"], snap["checks"]), ("ok", []))
         self.temp(7, 1, 71000)                                    # starts over
         self.assertEqual(self.collect(1070.0)["checks"], [])
+
+    def test_level_high(self):
+        self.temp(9, 1, 64000)                                    # ram 14-0052: 64 / 85
+        r = rows(self.collect())["temp:spd5118:14-0052:temp1"]
+        self.assertEqual((r["sev"], r.get("level")), ("ok", "high"))      # orange, not warn
+        self.temp(9, 1, 71000)
+        r = rows(self.collect(1005.0))["temp:spd5118:14-0052:temp1"]
+        self.assertEqual((r["sev"], r.get("level")), ("warn", None))     # warn wins
+        self.write("/proc/meminfo", "MemTotal: 1000 kB\nMemAvailable: 200 kB\n"
+                   "SwapTotal: 0 kB\nSwapFree: 0 kB\n")
+        self.assertEqual(rows(self.collect(1010.0))["memory"].get("level"), "high")
 
     def test_nvme_warn_from_sensor_max(self):
         self.temp(5, 1, 81000)

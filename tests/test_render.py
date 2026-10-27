@@ -101,7 +101,8 @@ class TestTop(unittest.TestCase):
         lines = lay(now=1.0)
         self.assertTrue(text(lines[0]).startswith(" [1 one]  2 two"))
         self.assertTrue(text(lines[0]).endswith("mask on  12:00:00 "))
-        self.assertEqual(lines[0][1], ("[1 one]", "focus"))
+        self.assertEqual(lines[0][1], ("[1 one]", "tabon"))
+        self.assertEqual(lines[0][3], ("2 two", "note"))
         ui = UI(2, screen=1, mask=False)
         line = lay(ui=ui)[0]
         self.assertTrue(text(line).startswith(" 1 one  [2 two]"))
@@ -203,9 +204,9 @@ class TestBoxes(unittest.TestCase):
 
     def test_styles(self):
         lines = [line for line in lay() if text(line).startswith(BV)]
-        self.assertEqual(part(lines, "enforce"), ("enforce", "plain"))     # ok -> plain
+        self.assertEqual(part(lines, "enforce"), ("enforce", "text"))      # ok -> text color
         lines = lay()
-        self.assertEqual(part(lines, "rollback")[1], "dim")                # kv key
+        self.assertEqual(part(lines, "rollback")[1], "name")               # kv key
         [rb] = [line for line in lines if "rollback" in text(line)]
         self.assertIn(("-", "warn"), rb)
         self.assertEqual(part(lines, "x        149")[1], "crit")
@@ -504,7 +505,7 @@ class TestBoxes(unittest.TestCase):
         self.assertEqual(row[i - 1], ("!! ", render.SEL + "crit"))        # glyph, selected too
         self.assertEqual(row[i - 2][1], render.SEL + "plain")             # pad before
         self.assertEqual(row[i + 1][1], render.SEL + "plain")             # fill after
-        self.assertEqual(row[i + 2], (BV, "dim"))
+        self.assertEqual(row[i + 2], (BV, "frame"))                         # white frame
         [kv] = [line for line in lines if "enforce" in text(line) and "mode" in text(line)]
         self.assertFalse(any(s.startswith(render.SEL) for _, s in kv))   # not focused
 
@@ -662,7 +663,7 @@ class TestFeedAndScreens(unittest.TestCase):
                                   {"cells": ["id", "-"], "sev": "ok"}]
         lines = lay([m], ui=UI(2, focus={0: "firewall/mode"}))
         self.assertEqual([part(lines, c)[1] for c in ("sudo -k", "sudo -l", "id  ")],
-                         ["dim", "bold dim", "plain"])
+                         ["dim", "bold dim", "name"])                   # ok: column color
 
     def test_detail_other_kinds(self):
         def body(key, sel=0, feed=()):
@@ -815,7 +816,7 @@ class TestDetailLoop(unittest.TestCase):
         self.open()
         f = self.type("1.2.3.1")                              # sock1 and sock10 .. sock19
         lit = [text(line) for line in f.lines
-               if any(st.endswith("bold plain") or st.endswith("bold dim") for _, st in line)]
+               if any(st.endswith("bold text") or st.endswith("bold name") for _, st in line)]
         self.assertEqual(len(lit), 5)                         # 11 matches, 5 in view
         self.assertEqual(len([line for line in f.lines if not any(
             "bold" in st for _, st in line) and "sock1" in text(line)]), 0)
@@ -1157,3 +1158,55 @@ class TestSparkColumn(unittest.TestCase):
                     if "cpu" in "".join(t for t, _ in ln) and SPARK[4] in "".join(t for t, _ in ln))
         self.assertEqual(line.count(SPARK[4]), 40)                # COL_MAX, never cut with ~
         self.assertNotIn("~", line)
+
+
+class TestColors(unittest.TestCase):
+    """Palette 2026-10-27 (docs/architecture.md, Look): column roles on ok rows, a problem
+    row in its severity color, problem lines of a detail in their color."""
+
+    def view(self, rows, **panel):
+        p = {"id": "t", "title": "t", "type": "table", "sev": "ok", "width": "full",
+             "columns": ["what", "now", "when", "note"], "types": ["text", "num", "age", "text"],
+             "rows": rows}
+        p.update(panel)
+        return [{"name": "firewall", "status": "ok", "summary": "", "flags": [],
+                 "stale": False, "waiting": False, "panels": [p]}]
+
+    def test_roles_default(self):
+        lines = lay(self.view([{"cells": ["cpu", "4%", "-", "fine"], "sev": "ok"}]))
+        self.assertEqual(part(lines, "cpu")[1], render.SEL + "name")       # selected: reverse
+        self.assertEqual(part(lines, "4%")[1], render.SEL + "value")
+        self.assertEqual(part(lines, "fine")[1], render.SEL + "text")
+
+    def test_roles_given_and_level(self):
+        rows = [{"cells": ["temp", "79 C", "-", "warn 75"], "sev": "ok", "level": "high"}]
+        lines = lay(self.view(rows, roles=["name", "value", "note", "note"]))
+        self.assertEqual(part(lines, "79 C")[1], render.SEL + "high")     # near its limit
+        self.assertEqual(part(lines, "warn 75")[1], render.SEL + "note")
+
+    def test_problem_row_one_color(self):
+        lines = lay(self.view([{"cells": ["temp", "90 C", "-", "crit"], "sev": "crit"}]))
+        self.assertEqual(part(lines, "temp")[1], render.SEL + "crit")       # selected: reverse
+
+    def test_detail_problem_lines(self):
+        rows = [{"cells": ["temp", "90 C", "-", "x"], "sev": "crit",
+                 "detail": [{"k": "why", "v": "at crit", "sev": "crit"},
+                            {"k": "sensor", "v": "coretemp"}]}]
+        f = frame(self.view(rows), ui=UI(2, detail="firewall/t"))
+        self.assertEqual(part(f.lines, "90 C")[1], "crit")                # row cells
+        self.assertEqual(part(f.lines, "at crit")[1], "crit")             # marked line
+        self.assertEqual(part(f.lines, "coretemp")[1], "text")
+        ok = [{"cells": ["cpu", "4%", "-", "x"], "sev": "ok"}]
+        f = frame(self.view(ok), ui=UI(2, detail="firewall/t"))
+        self.assertEqual(part(f.lines, "4%")[1], "text")
+
+    def test_detail_keeps_row_programs(self):
+        rows = [{"cells": ["a", "1", "-", "x"], "sev": "ok", "progs": ["org.mozilla.firefox"]}]
+        f = frame(self.view(rows), ui=UI(2, detail="firewall/t"))
+        self.assertEqual(f.boxes[0].progs, ("org.mozilla.firefox",))
+
+    def test_hint_in_footer(self):
+        ui = UI(2)
+        ui.hint = "c: no program on this line"
+        self.assertEqual(text(lay(ui=ui)[-1]), " c: no program on this line")
+

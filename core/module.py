@@ -28,6 +28,8 @@ TONES = ("plain", "red", "blue", "yellow", "green", "dim")   # optional hint, no
 COL_TYPES = ("text", "num", "age", "spark")   # table column hint: num / age / spark right;
                                               # age = epoch s, spark = numbers as text
 
+ROLES = ("name", "text", "value", "peak", "note")   # table column colors (ok rows)
+LEVELS = ("high",)                       # row level: its value cells near their limit
 MAX_STR = 512
 MAX_PANELS = 8
 MAX_ITEMS = 50
@@ -176,6 +178,8 @@ def _table(p: dict, w: str) -> dict:
                "sev": _choice(r, "sev", SEVS, wr, "ok")}
         _tone(r, row, wr)
         _ip(r, row, wr)
+        if "level" in r:                 # value cells near their limit (orange)
+            row["level"] = _choice(r, "level", LEVELS, wr)
         if "id" in r:                    # stable row key: the cursor follows it
             row["id"] = _str(r, "id", wr)
         if "filter" in r:                # f follow / x hide (core/ui.py)
@@ -207,6 +211,11 @@ def _table(p: dict, w: str) -> dict:
                     raise InvalidSnapshot(f"{w}.rows[{i}].cells[{j}]: numbers, optional "
                                           f"/top, max {MAX_SPARK_CELL} required (spark column)")
         out["types"] = list(types)
+    if "roles" in p:
+        roles = _list(p, "roles", w)
+        if len(roles) != len(cols) or not all(x in ROLES for x in roles):
+            raise InvalidSnapshot(f"{w}.roles: {len(cols)} of {', '.join(ROLES)} required")
+        out["roles"] = list(roles)
     return out
 
 
@@ -244,7 +253,10 @@ def _detail(r: dict, w: str) -> list:
     for i, it in enumerate(_list(r, "detail", w)[:MAX_DETAIL]):
         wi = f"{w}.detail[{i}]"
         it = _dict(it, wi)
-        out.append({"k": _str(it, "k", wi), "v": _str(it, "v", wi)})
+        item = {"k": _str(it, "k", wi), "v": _str(it, "v", wi)}
+        if "sev" in it:                  # a problem line: shown in its color
+            item["sev"] = _choice(it, "sev", SEVS, wi)
+        out.append(item)
     return out
 
 

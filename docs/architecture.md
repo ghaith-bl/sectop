@@ -633,6 +633,29 @@ while paused; table column hint `types` (text / num / age) instead of `align`.
 - Time: age in rows (`12s`, `4m`, `2h`), full local time in the detail.
 - Colors: one accent for focus + selection, severity colors only for severity.
 
+Colors 2026-10-27 (my call after the first screen 3 run: "not only white, the eye must
+land on what matters"). 256-color terminal (xterm numbers), else the 8 basic colors:
+
+| role | color | where |
+|---|---|---|
+| frame | white 255 | box frames |
+| title | purple 141, bold | box titles, table headers (+ underline), active tab (reverse) |
+| name | lavender 147 | first column, kv keys, detail keys, event source |
+| text | pale lavender 189 | other text columns, kv values, detail values, summaries |
+| value | cyan 117, bold | numbers of an ok row: safe; `severity ok` in a detail |
+| high | orange 215, bold | value at 75 %+ of its limit, before any warn (row `level`) |
+| peak | pink 212 | peak columns |
+| note | grey 246 | limits, ages, hints, inactive tabs, key help |
+| info | blue 111 | info (was cyan: cyan is safe now) |
+| warn | yellow 222 | warn only |
+| crit | red 196, bold | crit only |
+| unknown | magenta 201 | no data |
+
+Tones: blue (allowed) and green (healthy) are both safe now: cyan. Soft red, soft yellow,
+dim unchanged. A warn / crit row: whole row in its color; its detail shows the row's
+cells and the module's problem lines (`sev` on a detail pair) in that color, so the eye
+lands there first. Preview scripts were run in my terminal before (not in the repo).
+
 ## Phase 4 plan (2026-10-20)
 
 Best practice decides (Red Hat for the host). Fixtures from my host first

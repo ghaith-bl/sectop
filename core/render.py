@@ -58,9 +58,25 @@ GLYPH = {"crit": "!!", "warn": "!", "info": "i", "noise": "~", "ok": ""}
 GLYPH_W = 3                                  # glyph (2) + space
 HEAD = "head"                                # table header: bold + underline
 BOLD = "bold "                               # style prefix: bold (warn line with a tone)
-# tone colors: soft on 256-color terminals (xterm palette), basic colors otherwise
-TONE_256 = {"red": 210, "blue": 111, "yellow": 222, "green": 114}
-CRIT_256 = 196
+# Colors (docs/architecture.md, Look; my palette 2026-10-27): white frame, purple titles,
+# lavender names, cyan = safe / ok values, red / yellow = crit / warn only, blue = info.
+# style -> xterm 256 color; basic 8 colors otherwise (COLORS_8).
+COLORS_256 = {
+    "title": 141, "name": 147, "text": 189, "value": 117, "high": 215, "peak": 212,
+    "note": 246, "frame": 255,
+    "ok": 117, "info": 111, "warn": 222, "crit": 196, "unknown": 201,
+    # row / item tones (meaning, not severity): blue = allowed, green = healthy: both safe
+    "red": 210, "blue": 117, "yellow": 222, "green": 117,
+}
+COLORS_8 = {
+    "title": curses.COLOR_MAGENTA, "name": curses.COLOR_BLUE, "text": curses.COLOR_WHITE,
+    "value": curses.COLOR_CYAN, "high": curses.COLOR_YELLOW, "peak": curses.COLOR_MAGENTA,
+    "note": curses.COLOR_WHITE, "frame": curses.COLOR_WHITE,
+    "ok": curses.COLOR_CYAN, "info": curses.COLOR_BLUE, "warn": curses.COLOR_YELLOW,
+    "crit": curses.COLOR_RED, "unknown": curses.COLOR_MAGENTA,
+    "red": curses.COLOR_RED, "blue": curses.COLOR_CYAN, "yellow": curses.COLOR_YELLOW,
+    "green": curses.COLOR_CYAN,
+}
 
 # box drawing, U+2500 block
 BH, BV = "\u2500", "\u2502"
@@ -87,7 +103,8 @@ HELP = (
     ("f", "on a row with a filter (programs): filter the other tables of the screen to "
           "it; again: clear"),
     ("c", "program card: every row of every screen with the selected row's program "
-          "(rows that know their program); select a row, enter = its detail"),
+          "(rows that know their program; on the row or in its detail); select a row, "
+          "enter = its detail"),
     ("x", "on such a row (one word): hide it in every table of the screen (adds !name, "
           "Esc clears)"),
     ("p", "pause / resume the screen (data is still collected)"),
@@ -259,6 +276,22 @@ def _style(it: dict) -> str:
     return (BOLD if it["sev"] == "warn" else "") + tone
 
 
+def _text_style(it: dict) -> str:
+    """kv value: its severity / tone color, else text color."""
+    style = _style(it)
+    return "text" if style == "plain" else style
+
+
+def _pair_style(sev: str) -> str:
+    """A detail line / event message: problem severities in their color, else text."""
+    return sev if sev in ("info", "warn", "crit") else "text"
+
+
+def _sev_word(sev: str) -> str:
+    """The `severity` line of a detail: its own color, ok = safe (cyan)."""
+    return "value" if sev == "ok" else sev
+
+
 def _num(v) -> str:
     return f"{v:g}" if isinstance(v, float) else str(v)
 
@@ -332,12 +365,12 @@ def _tabs(screens, ui, width: int, now, tsfmt) -> list:
     for i, s in enumerate(screens):
         label = f"{i + 1} {s.name}"
         parts.append(("  " if i else " ", "plain"))
-        parts.append((f"[{label}]", "focus") if i == ui.screen else (label, "dim"))
+        parts.append((f"[{label}]", "tabon") if i == ui.screen else (label, "note"))
     right = [("PAUSED", "warn"), ("  ", "plain")] if ui.paused else []
     tail = f"mask {'on' if ui.mask else 'off'}"
     if now is not None:
         tail += f"  {tsfmt(now)}"
-    return _right(width, ui.mask, parts, right + [(tail + " ", "dim")])
+    return _right(width, ui.mask, parts, right + [(tail + " ", "note")])
 
 
 def acked(a: dict, acks: dict) -> bool:
@@ -402,7 +435,7 @@ def _alerts(view: list, alerts: list, acks: dict, mask: bool, width: int) -> tup
 
 def _header(m: dict, width: int, mask: bool) -> list:
     tag = f"[{TAGS.get(m['status'], '??')}]".ljust(TAG_W)
-    parts = [(tag, m["status"]), (f" {m['name']}", "title"), (f"  {m['summary']}", "plain")]
+    parts = [(tag, m["status"]), (f" {m['name']}", "title"), (f"  {m['summary']}", "text")]
     for flag in m["flags"]:
         style = "warn" if flag.startswith(("error", "failed", "backoff", "slow")) else "dim"
         parts.append((f"  | {flag}", style))
@@ -413,15 +446,18 @@ def _footer(n_screens: int, width: int, ui=None) -> list:
     typing = getattr(ui, "typing", None)
     detail = getattr(ui, "detail", None) is not None
     if typing is not None:
-        return _line(width, False, (" / ", "focus"), (typing + "_", "plain"),
-                     (TYPING_FIND if detail else TYPING, "dim"))
+        return _line(width, False, (" / ", "focus"), (typing + "_", "text"),
+                     (TYPING_FIND if detail else TYPING, "note"))
+    hint = getattr(ui, "hint", "")
+    if hint:                                 # why the last key did nothing (c: no program)
+        return _line(width, False, (" " + hint, "info"))
     if detail:
-        return _line(width, False, (FOOTER_DETAIL, "dim"))
+        return _line(width, False, (FOOTER_DETAIL, "note"))
     if getattr(ui, "card", None) is not None:
-        return _line(width, False, (FOOTER_CARD, "dim"))
+        return _line(width, False, (FOOTER_CARD, "note"))
     if getattr(ui, "help", False):
-        return _line(width, False, (FOOTER_HELP, "dim"))
-    return _line(width, False, (" " + FOOTER.format(n=n_screens), "dim"))
+        return _line(width, False, (FOOTER_HELP, "note"))
+    return _line(width, False, (" " + FOOTER.format(n=n_screens), "note"))
 
 
 def _search(parts: list) -> str:
@@ -539,8 +575,8 @@ class _Box:
         dash = [_line(w, mask, ("-", "dim"))]
         if self.kind == "kv":
             keys, kw = self.prep
-            body = [_line(w, mask, _glyph(it["sev"]), (pad(k, kw) + "  ", "dim"),
-                          (it["v"], _style(it))) for k, it in zip(keys, d["items"])]
+            body = [_line(w, mask, _glyph(it["sev"]), (pad(k, kw) + "  ", "name"),
+                          (it["v"], _text_style(it))) for k, it in zip(keys, d["items"])]
             return [], body or dash
         if self.kind == "table":
             head, rows, widths, floors, full = self.prep
@@ -574,7 +610,25 @@ class _Box:
                         parts.append(("  ", "plain"))
                 return _line(w, mask, *parts)
 
-            body = [_line(w, mask, _glyph(r["sev"]), (row(cells), _style(r)))
+            roles = self.roles()
+
+            def parts(cells, r):
+                """ok row without a tone: each cell in its column's color; else the whole
+                row in its severity / tone color."""
+                style = _style(r)
+                if style != "plain":
+                    return [(row(cells), style)]
+                out, last = [], len(cells) - 1
+                for j, (c, cw, rt, role) in enumerate(zip(cells, widths, right, roles)):
+                    c = cell(c, cw, rt)
+                    if role == "value" and r.get("level") == "high":
+                        role = "high"
+                    out.append((c.rstrip() if j == last else c, role))
+                    if j < last:
+                        out.append(("  ", "plain"))
+                return out
+
+            body = [_line(w, mask, _glyph(r["sev"]), *parts(cells, r))
                     for cells, r in zip(rows, self.view)]
             return [header()], body or dash
         if self.kind == "spark":
@@ -585,21 +639,25 @@ class _Box:
             lines, owner = _detail_rows(d, w, False, self.secrets)
             self.found = _found(d, owner, self.find) if self.find.strip() else ()
             return [], lines or dash
-        return [], [_line(w, mask, (t, "dim")) for t in d] or dash
+        return [], [_line(w, mask, (t, "note")) for t in d] or dash
 
     def pairs(self, i: int, tsfmt) -> list:
         """(key, value) pairs for the detail of body line i. [] = nothing."""
         d = self.data
         if self.kind == "kv" and i < len(d["items"]):
             it = d["items"][i]
-            return [(it["k"], it["v"]), ("severity", it["sev"])]
+            return [(it["k"], it["v"], _pair_style(it["sev"])),
+                    ("severity", it["sev"], _sev_word(it["sev"]))]
         if self.kind == "table" and i < len(self.view):
             r = self.view[i]
-            out = [(c, self.cell(v, t, True)) for c, v, t in zip(d["columns"], r["cells"],
-                                                                  self.types())]
-            out.append(("severity", r["sev"]))
+            # a problem row: its own cells in its severity color, so the eye lands there
+            hot = _pair_style(r["sev"])
+            out = [(c, self.cell(v, t, True), hot) for c, v, t in zip(
+                d["columns"], r["cells"], self.types())]
+            out.append(("severity", r["sev"], _sev_word(r["sev"])))
             if r.get("detail"):
-                out += [("", "")] + [(it["k"], it["v"]) for it in r["detail"]]
+                out += [("", "")] + [(it["k"], it["v"], _pair_style(it.get("sev", "ok")))
+                                     for it in r["detail"]]
             return out
         if self.kind == "spark" and d["values"]:
             v = d["values"]
@@ -614,6 +672,15 @@ class _Box:
                     ("source", e["src"]), ("code", e["code"]), ("message", e["msg"])]
         return []
 
+    def roles(self) -> list:
+        """Column roles (colors of an ok row): given, else name for the first column,
+        value for num / spark, note for age, text for the rest."""
+        given = self.data.get("roles")
+        if given:
+            return list(given)
+        return ["name" if j == 0 else {"num": "value", "spark": "value", "age": "note"}
+                .get(t, "text") for j, t in enumerate(self.types())]
+
     def ip_at(self, i: int) -> str | None:
         if self.kind == "table" and 0 <= i < len(self.view):
             return self.view[i].get("ip")
@@ -624,6 +691,8 @@ class _Box:
     def progs_at(self, i: int) -> tuple:
         if self.kind == "table" and 0 <= i < len(self.view):
             return tuple(self.view[i].get("progs", ()))
+        if self.kind == "detail":                # c in a detail: the card of its row
+            return tuple(getattr(self, "src_progs", ()))
         return ()
 
     def pick_at(self, i: int) -> str | None:
@@ -649,10 +718,12 @@ class _Box:
 def _detail_rows(pairs: list, w: int, mask: bool, secrets: bool | None = None) -> tuple:
     """key  value lines, long values wrapped under the value column.
     -> (lines, owner): owner[i] = index of the pair that line i belongs to."""
-    keys = [display(k, mask) for k, _ in pairs]
+    keys = [display(p[0], mask) for p in pairs]
     kw = min(KEY_MAX, max((cols(k) for k in keys), default=0))
     out, owner = [], []
-    for n, (k, (_, v)) in enumerate(zip(keys, pairs)):
+    for n, (k, pair) in enumerate(zip(keys, pairs)):
+        v = pair[1]
+        style = pair[2] if len(pair) > 2 else "text"      # a problem line: its color
         if not k and not v:
             out.append([])
             owner.append(n)
@@ -660,7 +731,8 @@ def _detail_rows(pairs: list, w: int, mask: bool, secrets: bool | None = None) -
         pieces = wrap(display(v, mask, secrets=secrets), max(1, w - kw - 2))
         for j, piece in enumerate(pieces):
             key = pad(k, kw) + "  " if j == 0 else " " * (kw + 2)
-            out.append(_line(w, mask, (key, "dim"), (piece, "plain")))
+            kstyle = style if style in ("warn", "crit") else "name"
+            out.append(_line(w, mask, (key, kstyle), (piece, style)))
             owner.append(n)
     return out, owner
 
@@ -672,8 +744,8 @@ def _found(pairs: list, owner: list, query: str) -> tuple:
     -> (pair index, first line, end line) each; a pair that wraps keeps all its lines."""
     q = query.lower()
     hit = set()
-    for n, (k, v) in enumerate(pairs):
-        s = f"{display(k, False)} {display(v, False)}"
+    for n, p in enumerate(pairs):
+        s = f"{display(p[0], False)} {display(p[1], False)}"
         if q in s.lower() or q in mask_ips(s).lower():
             hit.add(n)
     out = []
@@ -703,8 +775,8 @@ def _spark(p: dict, w: int, mask: bool) -> list:
 def _event(e: dict, width: int, mask: bool, tsfmt, ref=None) -> list:
     """glyph, age (clock time without a reference), source + code, message."""
     when = age(e["ts"], ref) if ref is not None else tsfmt(e["ts"])
-    return _line(width, mask, _glyph(e["sev"]), (when.rjust(4) + "  ", "dim"),
-                 (f"{e['src']} {e['code']} ", "dim"), (e["msg"], "plain"))
+    return _line(width, mask, _glyph(e["sev"]), (when.rjust(4) + "  ", "note"),
+                 (f"{e['src']} {e['code']} ", "name"), (e["msg"], _pair_style(e["sev"])))
 
 
 def _boxes(screen, mods: list, feed: list) -> list:
@@ -750,10 +822,12 @@ def _card(view: list, prog: str, stampfmt=_stamp) -> tuple:
                 rest = [spark_text(c) if t == "spark" else c
                         for c, t in zip(r["cells"], types) if t != "age"]
                 detail = [{"k": "box title", "v": p["title"]}]
+                hot = r.get("sev", "ok")
                 for col, c, t in zip(p["columns"], r["cells"], types):
                     when = _when(c) if t == "age" else None
                     v = stampfmt(when) if when is not None else c
-                    detail.append({"k": col, "v": spark_text(c) if t == "spark" else v})
+                    detail.append({"k": col, "v": spark_text(c) if t == "spark" else v,
+                                   "sev": hot})
                 detail += list(r.get("detail", ()))
                 row = {"cells": [ages[0] if ages else "-", where, "  ".join(rest)],
                        "sev": r.get("sev", "ok"), "id": f"{where}|{r.get('id') or r['cells']}",
@@ -797,6 +871,7 @@ def _overlay(boxes: list, ui, mask: bool, tsfmt, view=(), ref=None, stampfmt=_st
         title += "   real IPs shown"
     box = _Box("detail", title + "   Esc close", "ok", "detail", pairs or [("", "line gone")])
     box.src_ip = ip
+    box.src_progs = b.progs_at(i) if b is not None and pairs else ()
     box.find, box.seek, box.mark = (getattr(ui, "find", ""), getattr(ui, "seek", None),
                                     getattr(ui, "mark", None))
     return box
@@ -937,7 +1012,7 @@ def _border(width: int, above, below, titles: list, rights: list = ()) -> list:
             c = TU
         else:
             c = BH
-        cells.append([c, "dim"])
+        cells.append([c, "frame"])
     for x, parts, room in titles:
         pos, left = x + 2, room
         for text, style in parts:
@@ -1079,13 +1154,13 @@ def _grid(boxes: list, ui, width: int, room: int, mask: bool, tsfmt, pref) -> tu
             cells.append((cw, (head + shown_body)[:hr], hi))
         lines.append(_border(width, above, xs, titles, rights))
         for i in range(hr):
-            parts = [(BV, "dim")]
+            parts = [(BV, "frame")]
             for cw, content, hi in cells:
                 line = content[i] if i < len(content) else []
                 fill = cw - min(cw, 1) - _len(line)
                 style = SEL + "plain" if i in hi else "plain"
                 parts += ([(" ", style)] if cw else []) + line
-                parts += [(" " * fill, style), (BV, "dim")]
+                parts += [(" " * fill, style), (BV, "frame")]
             lines.append([(t, s) for t, s in parts if t])
         above = xs
     if rows:
@@ -1151,21 +1226,16 @@ def setup(stdscr) -> None:
         pass
     plain = curses.A_NORMAL
     _ATTR.update(plain=plain, title=curses.A_BOLD, dim=curses.A_DIM, off=curses.A_DIM,
-                 focus=curses.A_REVERSE | curses.A_BOLD,
-                 head=curses.A_BOLD | curses.A_UNDERLINE)
-    colors = {"ok": curses.COLOR_GREEN, "info": curses.COLOR_CYAN,
-              "warn": curses.COLOR_YELLOW, "crit": curses.COLOR_RED,
-              "unknown": curses.COLOR_MAGENTA,
-              "red": curses.COLOR_RED, "blue": curses.COLOR_BLUE,
-              "yellow": curses.COLOR_YELLOW, "green": curses.COLOR_GREEN}
+                 focus=curses.A_REVERSE | curses.A_BOLD, tabon=curses.A_REVERSE | curses.A_BOLD,
+                 head=curses.A_BOLD | curses.A_UNDERLINE, name=plain, text=plain,
+                 value=plain, high=curses.A_BOLD, peak=plain, note=plain, frame=plain)
     if not curses.has_colors():
         _ATTR.update(ok=plain, info=plain, warn=curses.A_BOLD,
                      crit=curses.A_BOLD | curses.A_REVERSE, unknown=curses.A_DIM,
                      red=plain, blue=plain, yellow=plain, green=plain)
         return
     curses.start_color()
-    if getattr(curses, "COLORS", 8) >= 256:
-        colors.update(TONE_256, crit=CRIT_256)
+    colors = dict(COLORS_256 if getattr(curses, "COLORS", 8) >= 256 else COLORS_8)
     bg = curses.COLOR_BLACK
     try:
         curses.use_default_colors()
@@ -1175,7 +1245,14 @@ def setup(stdscr) -> None:
     for i, (style, fg) in enumerate(colors.items(), start=1):
         curses.init_pair(i, fg, bg)
         _ATTR[style] = curses.color_pair(i)
+    title = _ATTR["title"]
     _ATTR["crit"] |= curses.A_BOLD
+    _ATTR["title"] = title | curses.A_BOLD
+    _ATTR["head"] = title | curses.A_BOLD | curses.A_UNDERLINE
+    _ATTR["focus"] = title | curses.A_REVERSE | curses.A_BOLD
+    _ATTR["tabon"] = title | curses.A_REVERSE | curses.A_BOLD
+    _ATTR["value"] |= curses.A_BOLD
+    _ATTR["high"] |= curses.A_BOLD
 
 
 def attr(style: str) -> int:

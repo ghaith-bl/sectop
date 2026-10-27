@@ -111,15 +111,27 @@ column, scale 0 (or the lowest value below 0) to top, else to the highest value;
 detail, the filter and the card show `last  min  max  points`). Wrong length / type, an
 age cell that is not epoch seconds or a spark cell that does not parse -> invalid.
 
-Row `detail` optional: extra k / v pairs shown on `enter` under the cells (max 40).
+`roles` optional (one per column): the color of that column on an ok row without a tone:
+`name`, `text`, `value`, `peak`, `note` (docs/architecture.md, Look). Default: `name` for
+the first column, `value` for num / spark, `note` for age, `text` for the rest. A warn /
+crit / info row or a row with a tone: the whole row in that color.
+Row `level` optional: `high` = its value is near its limit (75 %+), value cells orange,
+before any warn (2026-10-27).
+
+Row `detail` optional: extra k / v pairs shown on `enter` under the cells (max 40). A pair
+may carry `sev` (ok, info, warn, crit): the line is shown in that color (a problem line,
+2026-10-27). The cells of a warn / crit row are shown in its color in the detail and in
+the card's detail.
 Row `id` optional (str): stable key of the row (e.g. a grouped flow). The cursor follows
 it when the row moves or its text changes. Not shown.
 Row `filter` optional (str, 1..60 printable ASCII, not blank): filter text for keys `f` /
 `x` on that row (e.g. a program name). Not shown.
 Row `progs` optional (list of 1..5 str, each 1..64 printable ASCII without space): the
 programs the row belongs to (core/proc.py names: unit / app id of the cgroup). Key `c`
-opens the card of the first one. Not shown. Only names that are sure: a pid read later
-than its record counts only when the process started before it (2026-10-26).
+opens the card of the first one, on the row or in its detail (2026-10-27); on a line
+without one the footer says `c: no program on this line`. Not shown. Only names that are
+sure: a pid read later than its record counts only when the process started before it
+(2026-10-26).
 
 `ip` optional on kv items and table rows: the address of that line (a valid IPv4 / IPv6
 address, stored normalized). Core can look it up on key `w` (whois, see Screen).
@@ -248,8 +260,9 @@ A condition that is not true any more is left out.
   - Stale module: `(stale)` in each box title.
 - Look (2026-10-25, docs/architecture.md, Look): rounded outer corners; severity column
   first in tables, kv boxes and events: `!!` crit, `!` warn, `i` info, empty ok, in the
-  severity color (WCAG 2.2, 1.4.1: color is not the only means); the row keeps its color
-  as before (severity, `tone`). Table header bold + underlined (labels only), 2 spaces
+  severity color (WCAG 2.2, 1.4.1: color is not the only means); a problem row keeps
+  its color (severity, `tone`), an ok row has a color per column (`roles`). Palette
+  2026-10-27 in docs/architecture.md, Look. Table header bold + underlined (labels only), 2 spaces
   between columns. Ages count from now; paused: from the pause moment (frozen).
   Column width: natural, max 40 cells; free room in the box goes to a cut column, the
   last one first (2026-10-25: full-width commands box, command line cut at 40).

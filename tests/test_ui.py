@@ -452,5 +452,46 @@ class TestScreens(unittest.TestCase):
                 self.assertTrue(s.note, s.name)
 
 
+
+class TestCardKey(unittest.TestCase):
+    """c: the card of the selected row's program (2026-10-27 host: c seemed dead)."""
+
+    def ui(self, progs=()):
+        u = UI(3)
+        u.boxes = (BoxInfo("firewall/programs", 3, 3, progs=tuple(progs)),)
+        u.focus[0] = "firewall/programs"
+        return u
+
+    def test_row_with_program(self):
+        u = self.ui(["org.mozilla.firefox"])
+        u.key(ord("c"))
+        self.assertEqual((u.card, u.paused, u.hint), ("org.mozilla.firefox", True, ""))
+
+    def test_row_without_program_says_so(self):
+        u = self.ui()
+        u.key(ord("c"))
+        self.assertIsNone(u.card)
+        self.assertEqual(u.hint, "c: no program on this line")
+        u.key(ord("j"))                                  # next key: gone
+        self.assertEqual(u.hint, "")
+
+    def test_from_detail(self):
+        u = self.ui(["org.mozilla.firefox"])
+        u.key(10)                                        # enter: detail
+        self.assertEqual(u.detail, "firewall/programs")
+        u.boxes = (BoxInfo("detail", 9, 9, cursor=False, progs=("org.mozilla.firefox",)),)
+        u.key(ord("c"))
+        self.assertEqual((u.card, u.detail, u.paused), ("org.mozilla.firefox", None, True))
+        u.key(ESC)                                       # closes the card, resumes
+        self.assertEqual((u.card, u.paused), (None, False))
+
+    def test_from_detail_without_program(self):
+        u = self.ui()
+        u.key(10)
+        u.boxes = (BoxInfo("detail", 9, 9, cursor=False),)
+        u.key(ord("c"))
+        self.assertEqual((u.card, u.detail, u.hint),
+                         (None, "firewall/programs", "c: no program on this line"))
+
 if __name__ == "__main__":
     unittest.main()

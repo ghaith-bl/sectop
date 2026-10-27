@@ -32,6 +32,9 @@ Card: c on a row with `progs` (program names) opens the program card of its firs
 program: every row of every box of every screen that names the same program, box by box
 (docs/architecture.md, Program card). A table overlay (box key "card"): select, / filter,
 enter = the detail of that row (Esc: back to the card), Esc closes. Pauses while open.
+c in the detail of such a row opens its card too (2026-10-27: c from the detail did
+nothing). c on a line without a program: the footer says so (ui.hint, until the next
+key), instead of nothing.
 
 Ack: a acks every engine alert in the last alert bar (Frame.alerts): key ->
 (count, sev) at ack. render.acked() dims it until its count or severity
@@ -74,6 +77,7 @@ class UI:
     lookup: str | None = None                    # ip waiting for a lookup (core runs it)
     acks: dict = field(default_factory=dict)     # alert key -> (count, sev) at ack
     bar: tuple = ()                              # (key, count, sev) in the last alert bar
+    hint: str = ""                               # why the last key did nothing (footer)
     boxes: tuple = ()                            # BoxInfo of the last frame
     _auto_pause: bool = False                    # pause came from opening detail
     _typing_box: str | None = None
@@ -104,6 +108,7 @@ class UI:
 
     def key(self, k: int) -> bool:
         """Apply one key. Returns False to quit."""
+        self.hint = ""
         if self.typing is not None:
             self._type(k)
             return True
@@ -117,7 +122,9 @@ class UI:
         elif k in (ord("a"), ord("A")):
             self._ack()
         elif self.overlay:
-            if k in ENTER_KEYS and self.card is not None and self.detail is None:
+            if k in (ord("c"), ord("C")) and self.card is None and self.detail is not None:
+                self._card()                         # the card of the detail's row
+            elif k in ENTER_KEYS and self.card is not None and self.detail is None:
                 self._open()                         # the selected card row's detail
             elif k in BACK_KEYS + ENTER_KEYS + (ord("q"), ord("Q"), ord("?")):
                 self._close()
@@ -271,8 +278,10 @@ class UI:
     def _card(self) -> None:
         b = self._box()
         if b is None or not b.progs:
+            self.hint = "c: no program on this line"
             return
         self.card = b.progs[0]
+        self.detail = None                       # from a detail: the card replaces it
         self.sel["card"] = self.scroll["card"] = 0
         self.anchor.pop("card", None)
         self.filters.pop("card", None)

@@ -35,6 +35,8 @@ AUDIT_MOUNT = "/var"             # auditd log (space_left / admin_space_left)
 MIB = 1024 * 1024
 COLUMNS = ["metric", "now", "peak 5m", "limit", "info"]
 TYPES = ["text", "num", "num", "num", "text"]
+ROLES = ["name", "value", "peak", "note", "note"]     # colors (docs/architecture.md, Look)
+HIGH = 0.75                      # now at 75%+ of its limit: level high (orange), before warn
 
 SENSORS = ("coretemp:Package id 0", "nvme:Composite", "spd5118")
 SHORT = {"coretemp": "cpu", "nvme": "nvme", "spd5118": "ram"}
@@ -119,10 +121,13 @@ def init(cfg: dict) -> State:
 # --- rows ------------------------------------------------------------------
 
 def _row(rid: str, metric: str, now: str, top: str, lim: str, info: str, sev: str = "ok",
-         detail=()) -> dict:
+         detail=(), frac: float | None = None) -> dict:
+    """frac: now / limit. detail: (k, v) or (k, v, sev) for a problem line."""
     r = {"id": rid, "cells": [metric, now, top, lim, info], "sev": sev}
+    if frac is not None and frac >= HIGH and sev == "ok":
+        r["level"] = "high"
     if detail:
-        r["detail"] = [{"k": k, "v": v} for k, v in detail]
+        r["detail"] = [dict(zip(("k", "v", "sev"), d)) for d in detail]
     return r
 
 
@@ -154,7 +159,8 @@ def _cpu(st: State, rows, checks, out: dict) -> None:
                      peak(st.hist["cpu"], lambda v: f"{v:.0f}%"), "100%",
                      f"{cpus} cpus, all = 100%",
                      detail=[("busy", "-" if pct is None else f"{pct:.1f}% since the last read"),
-                             ("cpus", str(cpus))]))
+                             ("cpus", str(cpus))],
+                     frac=None if pct is None else pct / 100))
 
 
 def _load(st: State, rows, checks) -> None:
@@ -167,7 +173,8 @@ def _load(st: State, rows, checks) -> None:
     rows.append(_row("load", "load", f"{l1:.2f}", peak(st.hist["load"], lambda v: f"{v:.2f}"),
                      str(st.cpus or "-"), f"5m {l5:.2f}  15m {l15:.2f}  (limit = cpus)",
                      detail=[("1 min", f"{l1:.2f}"), ("5 min", f"{l5:.2f}"),
-                             ("15 min", f"{l15:.2f}"), ("cpus", str(st.cpus or "?"))]))
+                             ("15 min", f"{l15:.2f}"), ("cpus", str(st.cpus or "?"))],
+                     frac=l1 / st.cpus if st.cpus else None))
 
 
 def _memory(st: State, rows, checks, out: dict) -> None:
@@ -184,13 +191,15 @@ def _memory(st: State, rows, checks, out: dict) -> None:
     rows.append(_row("memory", "memory", size(used) + pct, peak(st.hist["memory"], size),
                      size(total), f"available {size(avail)}",
                      detail=[("used", f"{size(used)} (total - available)"),
-                             ("available", size(avail)), ("total", size(total))]))
+                             ("available", size(avail)), ("total", size(total))],
+                     frac=used / total if total else None))
     stot, sfree = m["SwapTotal"], m["SwapFree"]
     sused = max(0, stot - sfree)
     st.hist["swap"].append(sused)
     rows.append(_row("swap", "swap", size(sused), peak(st.hist["swap"], size),
                      size(stot) if stot else "-", "" if stot else "no swap",
-                     detail=[("used", size(sused)), ("total", size(stot))]))
+                     detail=[("used", size(sused)), ("total", size(stot))],
+                     frac=sused / stot if stot else None))
 
 
 def _pressure(st: State, rows, checks) -> None:
@@ -277,10 +286,14 @@ def _space(st: State, rows, checks, now: float) -> None:
                 checks.append({"key": f"space_audit:{m}", "sev": "warn",
                                "title": f"{m} free {size(free)}: audit space low",
                                "detail": f"below auditd space_left {st.space_left:g}M"})
+        if sev != "ok":
+            detail.append(("audit", "suspended: no new audit records" if sev == "crit"
+                           else "space low: auditd warns", sev))
         info = f"{used:.0f}% used"
         if m == AUDIT_MOUNT:
             info += f"  (audit: warn < {st.space_left:g}M, crit < {st.admin_space_left:g}M)"
-        rows.append(_row(rid, m, size(free) + " free", "-", size(total), info, sev, detail))
+        rows.append(_row(rid, m, size(free) + " free", "-", size(total), info, sev, detail,
+                         used / 100))
 
 
 def _name(s, dup: bool) -> str:
@@ -332,11 +345,14 @@ def _temps(st: State, rows, checks, now: float, out: dict) -> None:
                   ("warn", "-" if warn is None else f"{warn:g} C ({src}) for "
                                                     f"{st.warn_for:g} s")]
         if key in st.hot:
-            detail.append(("at / over warn", f"{now - st.hot[key]:.0f} s"))
+            detail.append(("at / over warn", f"{now - st.hot[key]:.0f} s", "warn"))
+        if sev == "crit":
+            detail.append(("at crit", f"{s.temp:.1f} C >= {s.crit:g} C", "crit"))
         out.setdefault("temp", (name, s.temp))
         rows.append(_row(rid, f"temp {name}", f"{s.temp:.0f} C",
                          peak(st.hist[rid], lambda v: f"{v:.0f} C"),
-                         "-" if s.crit is None else f"{s.crit:g} C", info, sev, detail))
+                         "-" if s.crit is None else f"{s.crit:g} C", info, sev, detail,
+                         s.temp / s.crit if s.crit else None))
     for key in set(st.hot) - seen:
         del st.hot[key]
 
@@ -364,7 +380,7 @@ def collect(st: State, ctx) -> dict:
     problems = [c["title"] for c in checks if c["sev"] in ("warn", "crit")]
     summary = " | ".join(parts + problems[:3]) or "-"
     panel = {"id": "system", "title": "system", "type": "table", "columns": list(COLUMNS),
-             "types": list(TYPES), "rows": rows, "width": "full",
+             "types": list(TYPES), "roles": list(ROLES), "rows": rows, "width": "full",
              "sev": worst(*(r["sev"] for r in rows))}
     return {"v": 2, "status": worst(*(c["sev"] for c in checks)), "summary": summary,
             "panels": [panel], "events": [], "checks": checks}

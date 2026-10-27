@@ -54,17 +54,19 @@ same on every screen:
 |---|---|
 | red, bold | crit |
 | yellow | warn |
-| cyan | info |
+| blue | info |
 | magenta | unknown (no data, module not loaded) |
-| plain | ok |
-| blue | allowed (firewall verdict) |
+| cyan | safe: ok values, allowed (firewall verdict), healthy state (table loaded, tunnel up, ...) |
+| orange | a value at 75 %+ of its limit, before any warn |
 | soft red | only blocked lines (a program or peer the firewall stopped) |
 | soft yellow | blocked by hostfw (enforce) |
-| green | healthy state (table loaded, tunnel up, ...) |
 | dim | sudo / pkexec / su without a root command (sudo -k, sudo -l, denied sudo) |
 
-Tones (blue, soft red, soft yellow, green, dim) carry a meaning, not a severity: crit
-stays red, warn adds bold. 256-color terminal: soft tones, else the 8 basic colors.
+Other colors only make a table easy to read: white frames, purple titles and headers,
+lavender names, pink peaks, grey limits and notes (docs/architecture.md, Look). A warn /
+crit row is one color; its detail (enter) shows the row and its problem lines in that
+color. Tones carry a meaning, not a severity: crit stays red, warn adds bold. 256-color
+terminal, else the 8 basic colors.
 
 - Time in a row: age (`12s` `4m` `2h` `3d`); the detail (enter) shows the full local
   time. Paused: ages stay as they were at the pause.
