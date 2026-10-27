@@ -111,7 +111,7 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
           lockdown integrity; crypto policy not LEGACY; masked units;
           no failed units; core dumps off; journal persistent; GNOME locks; wifi IPv6
           off; booted system <= 14 days; random MAC config; dhcp-send-hostname 0 on
-          every Wi-Fi / cable profile; LLMNR + mDNS off
+          every Wi-Fi / cable profile; LLMNR + mDNS off; fallback hostname kernel arg
     info  update staged, waiting for a reboot
 
 - hostfw mode / boot mode: not here, the firewall screen checks them (alerts there).

@@ -391,6 +391,13 @@ why = "generic hostname, no pretty name: nothing a network can tie to me"
 want = "localhost"
 
 [[check]]
+id = "hostname-boot"
+kind = "cmdline"
+sev = "warn"
+why = "fallback hostname localhost from the first second of boot (initramfs has none)"
+want = ["SYSTEMD_DEFAULT_HOSTNAME=localhost"]
+
+[[check]]
 id = "dhcp-no-hostname"
 kind = "nm-props"
 sev = "warn"
