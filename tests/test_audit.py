@@ -36,7 +36,8 @@ class TestFixtures(unittest.TestCase):
         """tests/fixtures/security = sectop-fixtures-2026-10-20.tar + the auth fixtures of
         2026-10-25 (sectop-fix-auth.tar faillock -> su-fail, sectop-fix-auth2.tar) + logs-2h
         of 2026-10-26, all made with journal_fixture.py; the 2026-10-25 ones re-masked for
-        my wifi name, logs-2h for my LUKS uuid (one systemd-escape line)."""
+        my wifi name, logs-2h for my LUKS uuid (one systemd-escape line); unlock-fail for
+        my wifi profile uuid (2026-10-27)."""
         with open(os.path.join(FIX, "SHA256SUMS"), encoding="ascii") as f:
             sums = [line.split() for line in f if line.strip()]
         self.assertEqual(len(sums), 15)

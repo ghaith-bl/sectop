@@ -154,15 +154,28 @@ class TestNamesFor(unittest.TestCase):
         self.assertEqual(m.text("proctitle=" + hexs("nmcli c up HomeNetwork")),
                          "proctitle=" + hexs("nmcli c up wifi"))              # audit hex
 
-    def test_host_wifi(self):
+    def test_nm_uuids(self):
+        u1, u2 = "11111111-2222-4333-8444-555555555555", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        out = (f"Home\\:Net:{u1}:802-11-wireless\nWired connection 1:{u2}:802-3-ethernet\n"
+               "bad:not-a-uuid:802-11-wireless\nnocolon\n")
+        self.assertEqual(jf.nm_uuids(out), (u1, u2))
+        self.assertEqual(jf.wifi_names(out, True), ("Home:Net",))
+        n = jf.names_for("alice", "", "box1", jf.nm_uuids(out))
+        m = jf.Masker(n)
+        self.assertEqual(m.text(f"activating connection 'x' ({u1})"),
+                         "activating connection 'x' (00000000-0000-0000-0000-000000000000)")
+        self.assertEqual(m.text("uuid=" + u2.replace("-", "")), "uuid=" + "0" * 32)
+
+    def test_host_nm(self):
+        u = "11111111-2222-4333-8444-555555555555"
         saved = jf.NMCLI
         try:
-            jf.NMCLI = ("printf", "Home Net:802-11-wireless\\nx:vpn\\n")
-            self.assertEqual(jf.host_wifi(), ("Home Net",))
+            jf.NMCLI = ("printf", f"Home Net:{u}:802-11-wireless\\nx:{u}:vpn\\n")
+            self.assertEqual(jf.host_nm(), (("Home Net",), (u, u)))
             jf.NMCLI = ("false",)
-            self.assertIsNone(jf.host_wifi())                           # nmcli failed
+            self.assertIsNone(jf.host_nm())                             # nmcli failed
             jf.NMCLI = ("/nonexistent/nmcli",)
-            self.assertIsNone(jf.host_wifi())                           # no nmcli
+            self.assertIsNone(jf.host_nm())                             # no nmcli
         finally:
             jf.NMCLI = saved
 

@@ -18,7 +18,8 @@ Stays in the repo (install.sh drops tests/). Run as my login user.
   disk; 2026-10-26 a systemd-escape line had one), wifi names (my NetworkManager wifi profiles from `nmcli`,
   usually the SSID, and any wpa_supplicant `SSID='...'`): an SSID next to a BSSID
   locates the place (2026-10-25: NetworkManager and wpa_supplicant lines of an unlock
-  fixture had my home wifi name). Names that are common log words (null, root ...)
+  fixture had my home wifi name), NetworkManager profile uuids (any type, from `nmcli`;
+  2026-10-27 the same unlock fixture had my wifi profile uuid). Names that are common log words (null, root ...)
   stay.
 - --drop-key KEY: audit events (same _AUDIT_ID) whose SYSCALL key is KEY are left
   out (volume). Still counted in the report.
@@ -70,7 +71,8 @@ KEY_RE = re.compile(r'\bkey=(?:"([^"]*)"|\(null\)|((?:[0-9A-F]{2})+))')
 KEEP_MACS = {"00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff"}
 SSID_RE = re.compile(r"(?<=SSID=')[^']+(?=')")     # wpa_supplicant: (SSID='name' freq=...)
 WIFI = "wifi"                                       # replacement of a wifi name
-NMCLI = ("nmcli", "-t", "-f", "NAME,TYPE", "connection", "show")
+NMCLI = ("nmcli", "-t", "-f", "NAME,UUID,TYPE", "connection", "show")
+UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
 
 class FixtureError(Exception):
@@ -338,17 +340,33 @@ def report(rep: dict, out) -> None:
           file=out)
 
 
-def wifi_names(nmcli_out: str) -> tuple:
-    """`nmcli -t -f NAME,TYPE connection show` -> names of the wifi profiles. -t puts a
-    backslash before ':' and '\\' inside a value; TYPE has no ':', so the last one splits."""
+def nm_profiles(nmcli_out: str, with_uuid: bool = False) -> list:
+    """`nmcli -t -f NAME,TYPE` (or NAME,UUID,TYPE: with_uuid) -> [(name, uuid, type)].
+    -t puts a backslash before ':' and '\\' inside a value; TYPE and UUID have no ':',
+    so they split from the right. A line without a valid uuid is skipped (with_uuid)."""
     out = []
     for line in nmcli_out.splitlines():
-        name, sep, typ = line.rpartition(":")
-        if sep and typ == "802-11-wireless":
-            name = re.sub(r"\\(.)", r"\1", name)
-            if name:
-                out.append(name)
-    return tuple(out)
+        rest, sep, typ = line.rpartition(":")
+        if not sep:
+            continue
+        uuid = ""
+        if with_uuid:
+            rest, sep, uuid = rest.rpartition(":")
+            if not sep or not UUID_RE.fullmatch(uuid):
+                continue
+        out.append((re.sub(r"\\(.)", r"\1", rest), uuid, typ))
+    return out
+
+
+def wifi_names(nmcli_out: str, with_uuid: bool = False) -> tuple:
+    """Names of the wifi profiles (see nm_profiles)."""
+    return tuple(n for n, _, t in nm_profiles(nmcli_out, with_uuid)
+                 if t == "802-11-wireless" and n)
+
+
+def nm_uuids(nmcli_out: str) -> tuple:
+    """`nmcli -t -f NAME,UUID,TYPE connection show` -> uuids of all profiles."""
+    return tuple(u for _, u, _ in nm_profiles(nmcli_out, True))
 
 
 def names_for(login: str, gecos: str, node: str, ids: tuple, wifi: tuple = ()) -> dict:
@@ -378,18 +396,21 @@ def names_for(login: str, gecos: str, node: str, ids: tuple, wifi: tuple = ()) -
     return names
 
 
-def host_wifi() -> tuple | None:
-    """My wifi profile names from nmcli. None: nmcli missing or failed."""
+def host_nm() -> tuple | None:
+    """(my wifi profile names, all profile uuids) from nmcli. None: nmcli missing or failed."""
     try:
         r = subprocess.run(NMCLI, capture_output=True, text=True, timeout=10,
                            env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"})
     except (OSError, subprocess.TimeoutExpired):
         return None
-    return wifi_names(r.stdout) if r.returncode == 0 else None
+    if r.returncode != 0:
+        return None
+    return wifi_names(r.stdout, True), nm_uuids(r.stdout)
 
 
-def host_names(wifi: tuple = ()) -> dict:
-    """names_for() my login, this host (machine id, boot id) and my wifi names."""
+def host_names(wifi: tuple = (), uuids: tuple = ()) -> dict:
+    """names_for() my login, this host (machine id, boot id, NetworkManager profile
+    uuids) and my wifi names."""
     pw = pwd.getpwuid(os.getuid())
     ids = []
     for path in ("/etc/machine-id", "/proc/sys/kernel/random/boot_id"):
@@ -398,7 +419,7 @@ def host_names(wifi: tuple = ()) -> dict:
                 ids.append(f.read().strip())
         except (OSError, ValueError):
             continue
-    return names_for(pw.pw_name, pw.pw_gecos, os.uname().nodename, tuple(ids), wifi)
+    return names_for(pw.pw_name, pw.pw_gecos, os.uname().nodename, tuple(ids) + uuids, wifi)
 
 
 def main(argv=None, stdin=None, stdout=None, stderr=None, names=None) -> int:
@@ -424,11 +445,11 @@ def main(argv=None, stdin=None, stdout=None, stderr=None, names=None) -> int:
             print("journal_fixture: run as my login user (names to mask come from it)",
                   file=stderr)
             return 2
-        wifi = host_wifi()
-        if wifi is None:
-            print("journal_fixture: nmcli not usable, wifi profile names not masked "
-                  "(SSID='...' still is)", file=stderr)
-        names = host_names(wifi or ())
+        nm = host_nm()
+        if nm is None:
+            print("journal_fixture: nmcli not usable, wifi profile names and profile uuids "
+                  "not masked (SSID='...' still is)", file=stderr)
+        names = host_names(*(nm or ((), ())))
     try:
         sections, rep = convert(stdin, Masker(names), a.name, tuple(a.drop_key))
         paths = write(sections, a.outdir)
