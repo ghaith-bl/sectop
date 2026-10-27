@@ -26,7 +26,7 @@ can decide from what is on screen. Read-only until the privilege split (phase 3)
 |---|---|---|
 | 1 | firewall | hostfw, vpn, counters (non-zero only), out_leak, spark, programs (one row per program), peers (remote IPs), audit (in + out, allowed + blocked, grouped) |
 | 2 | security | commands, auth, kernel, posture, logs (grouped). See Security screen |
-| 3 | processes | cpu, memory, disk, io, temperatures, top processes, services |
+| 3 | processes | system (cpu, memory, swap, load, pressure, disk, temperatures), services (system units), processes. See Processes screen |
 
 - Each screen uses the whole terminal. Static list in `core/screens.py`.
 - Start screen: `sectop [SCREEN]` (name or number). Switch: keys `1-3`.
@@ -38,7 +38,8 @@ can decide from what is on screen. Read-only until the privilege split (phase 3)
 Keys now: `1-3` screen, `tab` / arrows box, `j/k` / arrows select line, `PgDn/PgUp` page,
 `enter` detail, `/` filter (in a detail: search, `n` `N` next / previous match), `Esc` clear
 filter, `f` follow, `x` hide, `w` whois, `a` ack, `p` pause, `m` mask, `?` help, `q` quit.
-Planned: `t` capture (from detail); program card (`enter` on a program, phase 4).
+Planned: `t` capture (from detail); program card (`enter` on a program, phase 4); `s` sort
+(processes box: cpu / memory).
 
 ## Firewall screen: network only (2026-10-20)
 
@@ -157,8 +158,8 @@ Audit records in the journal (host sample 2026-10-20: 2 sudo calls, 195 entries)
   ok. Alert for crit only (red only in the bar), while its last run is under 1 h old.
   Changes nothing on the host. Details: docs/modules/security.md, Watch list.
 - Root or normal user: every row ran as root (euid 0); normal-user execs are not
-  audited (volume). Users, live process tree, zombies: screen 3, decided after the
-  security screen (2026-10-25).
+  audited (volume). Users, live process tree, zombies: screen 3 (see Processes screen,
+  2026-10-27).
 
 ### Auth
 
@@ -241,6 +242,131 @@ docs/module-interface.md, Card). `enter` on a box row stays the detail.
   gone before the collect reads it (short root commands from a terminal: the parent's
   program when it still runs, else none).
 
+## Processes screen (2026-10-27)
+
+What runs, what it costs, how hot. Screen 3. Design agreed 2026-10-27, built step by step
+(see Plan below). Read-only: actions stay the last phase.
+
+    +-------------------------------------------------------+
+    | system: cpu, memory, swap, load, pressure, disk, temp |
+    +-------------------------------------------------------+
+    | services (system units)                               |
+    +-------------------------------------------------------+
+    | processes                                             |
+    +-------------------------------------------------------+
+
+Full width, one under the other (as the security screen). Module `system`
+(modules/system) in the collector: no new unit, no capability, no root. Files only,
+except `systemctl show` (posture runs it already as user sectop).
+
+### Scope
+
+- Services: system units only (`/sys/fs/cgroup/system.slice/**`). User units
+  (`user@<uid>.service`, `user.slice`) = my private data: not listed.
+- Processes outside `user.slice`: one row per process.
+- Processes of a login user: one row per program (core/proc.py, app id / unit), cpu +
+  memory only. No argv, no pid list. Root processes in a session scope (sudo, root
+  shell): own rows (they run as root).
+- argv: system processes only, detail only, masked as the commands box (`m` = raw).
+  Never in rows. Read for the shown rows only.
+- Temperatures: CPU, NVMe, RAM (hwmon names in config `sensors`, defaults `coretemp`,
+  `nvme`, `spd5118`: to check on host). dGPU not used (Integrated mode): not read.
+
+### Sources
+
+| box | data | source | every |
+|---|---|---|---|
+| system | cpu | `/proc/stat` (cpu line, delta) | 5 s |
+| system | memory, swap | `/proc/meminfo` (MemAvailable, SwapTotal - SwapFree) | 5 s |
+| system | load | `/proc/loadavg` | 5 s |
+| system | pressure | `/proc/pressure/{cpu,memory,io}` (some / full avg60) | 5 s |
+| system | disk io | `/proc/diskstats` (whole disks only) | 5 s |
+| system | disk space | `os.statvfs` of `/var` and `/boot` (Silverblue: `/` is the image) | 60 s |
+| system | temperature | `/sys/class/hwmon/hwmon*/{name,temp*_input,_label,_max,_crit}` | 5 s |
+| services | cpu, memory, oom | cgroup `cpu.stat` (usage_usec), `memory.current`, `memory.events` | 5 s |
+| services | state, restarts | journal: systemd unit messages (`UNIT=`, result, restart counter) | live |
+| services | watched units | `systemctl show -p Id,ActiveState,SubState,NRestarts` | 30 s |
+| processes | cpu, rss, state, ppid | `/proc/<pid>/stat` | 5 s |
+| processes | uid | `os.stat("/proc/<pid>").st_uid` (no open) | 5 s |
+| processes | program | `/proc/<pid>/cgroup`, once per pid + start time | new pids |
+| processes | argv | `/proc/<pid>/cmdline`, shown system rows only | 5 s |
+
+- sectop.service sandbox: `ProtectKernelTunables=yes` and `ProtectControlGroups=yes`
+  make `/sys` and the cgroup tree read-only, not unreadable; `ProtectProc=default`
+  (2026-10-26) gives other users' `/proc/<pid>/{stat,cgroup,cmdline}`. To check on host
+  inside the unit (nsenter as user sectop), as for the kernel taint.
+- CPU % = delta of usage between two reads. Pid key = pid + start time (pid reuse).
+
+### Boxes
+
+- system: one row per metric: name, now, spark (as the firewall screen), pressure avg60
+  or crit limit. Rows: cpu, load, memory, swap, io per disk, `/var`, `/boot`, one row
+  per sensor (label from `temp*_label`).
+- services: sev, unit, state, cpu, mem, oom, restarts, last change. Watched units and
+  problems first, then by cpu. Detail: last state changes this boot, result, restarts,
+  memory peak.
+- processes: sev, pid, user, program, comm, state, cpu, mem, age. Top 30 by cpu (`s`:
+  by memory), plus every zombie and every `D` (uninterruptible) process. Detail: parent
+  chain up to pid 1 (from `/proc/<pid>/stat` ppid, max 32), uid, start, threads, argv
+  (system processes, masked). Zombie: row names its parent.
+- Program card (`c`): rows here carry `progs`, so the card shows a program's processes,
+  units and the other screens' rows together.
+
+### Severity (red rule, 2026-10-25)
+
+crit (red, alert):
+- temperature >= `temp*_crit` of that sensor (no crit file: never red)
+- watched unit not active (stopped, failed, gone). Config `watch_units`, default
+  `auditd`, `firewalld`, `hostfw`, `sectop-net`. hostfw is oneshot + RemainAfterExit:
+  `active (exited)` = ok. Journal = at once, `systemctl show` = state at start + missed
+  lines.
+- `/var` free below auditd `admin_space_left`: audit is suspended (hardening repo:
+  `admin_space_left_action` + `disk_full_action` = SUSPEND). auditd.conf is root 0640:
+  values copied into config, not read.
+- OOM kill inside a watched unit
+
+warn (yellow, row; alert only when it lasts):
+- OOM kill elsewhere (kernel or systemd-oomd)
+- temperature >= `temp*_max` for 60 s (when max < crit)
+- zombie or `D` process older than 60 s
+- unit restarted 3 times in 10 min
+- pressure avg60 over the limit for 2 min. Limits set from my host's numbers (step 1),
+  not invented.
+- `/var` free below auditd `space_left`
+- unit failed (not watched): row only, the alert stays with posture `failed-units`
+
+info (cyan): unit restart, start / stop of a unit that is not watched.
+
+One alert per cause: auditd / firewalld down = this module (seconds). Posture
+`auditd-active` / `firewalld-active` keep their rows, without a second alert. hostfw mode
+stays on the firewall screen.
+
+### Resources
+
+- Budget for the module: < 300 ms CPU per minute (half of the collector's 1%).
+- Per tick: one `/proc` scan, `stat` only per pid; `cgroup` for new pids only; `cmdline`
+  for shown rows only. No `status`, no `fd`, no `environ`.
+- state.json: top 30 processes + zombies / `D`, all system units (count on host).
+- Runs always (the collector cannot know the screen is hidden, see Resources). If the
+  budget does not hold: process scan every 10 s, system + services stay 5 s.
+
+### Actions
+
+Unchanged (2026-10-27: keep the order): last phase, stop / restart from the services
+box via polkit, confirm, deny list (see Actions).
+
+### Plan
+
+1. Host checks + fixtures: hwmon names, labels, max / crit; cgroup files and pressure
+   inside the sandbox; journal fields of systemd unit messages (state change, result,
+   restart counter); auditd `space_left` / `admin_space_left`; process count and scan
+   time. Fixtures in tests/fixtures/system/ (fake trees, privacy rule).
+2. system box + its checks.
+3. services box (cgroup, journal, watched units); posture: no second alert.
+4. processes box (scan, program, parent chain, zombies) + key `s`.
+5. Measure sectop.service CPU before / after, docs/modules/system.md, README legend.
+6. First public release: tools, requirements, dependencies.
+
 ## Alerts
 
 Alert = state, not event.
@@ -295,8 +421,9 @@ Target: < 1% CPU, < 30 MiB RSS.
   C on 259, so never together; `-f --since=@T` replays all since T (no tail of 10);
   `-f -n 0` replays nothing; bad cursor: exit 1 "Failed to seek to cursor: Invalid
   argument". Same check on systemd 255 (Ubuntu, not my host): the same, except -n 0.
-- Hidden screen: only alert-relevant data, longer interval. Heavy detail (process table)
-  only while visible.
+- Hidden screen: the collector cannot know which screen is shown (one-way: the UI never
+  writes to it, see Privilege split). Changed 2026-10-27: no `visible`, every module
+  stays cheap enough to run always (process scan: see Processes screen, Resources).
 - Slow checks on their own interval:
   - updates: once per day. Silverblue: `rpm-ostree` (no dnf), plus flatpak.
   - posture: minutes, not seconds.
@@ -485,14 +612,14 @@ Best practice decides (Red Hat for the host). Fixtures from my host first
   7. logs box: groups, noise on groups, audit keys: done 2026-10-26
      (modules/security/logs.py).
   8. program card: done 2026-10-26 (key c, core/proc.py, ProtectProc=default).
-- Then screen 3 (processes): its design is decided after step 8 (2026-10-25).
+- Then screen 3 (processes): design decided 2026-10-27, see Processes screen.
 
 ## Contract changes (Snapshot v2)
 
 - `checks`: conditions for the alert engine. Done (docs/module-interface.md, Checks).
 - Panel layout hint `width`: `full` done (audit box). Planned: half, min height.
-- `collect(state, ctx)`: done 2026-10-25 (journal entries). Planned in ctx: `visible`
-  (screen shown or not).
+- `collect(state, ctx)`: done 2026-10-25 (journal entries). ctx `visible` dropped
+  2026-10-27: the collector cannot know (see Resources).
 - v1 Snapshots keep working until all modules move to v2.
 
 ## Phases
@@ -505,4 +632,5 @@ Best practice decides (Red Hat for the host). Fixtures from my host first
    Then: own SELinux policy for the collector.
 4. Logs + posture, and system (read-only). Both required, order free. Security screen:
    commands, auth, kernel, posture, logs; program card. See Phase 4 plan.
+   System = screen 3, see Processes screen (plan). Then the first public release.
 5. Actions.
