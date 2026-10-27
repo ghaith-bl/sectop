@@ -3,7 +3,8 @@
 Each takes the check (policy.Check) and the collect context (Cx: host access, the
 audit counts, per-collect caches) and returns a Res: pass / fail / unknown, what was
 found (`have`, one short line) and detail lines. Reads files where a file exists;
-commands only where there is no file (systemctl, firewall-cmd, nmcli, rpm-ostree),
+commands only where there is no file (systemctl, firewall-cmd, nmcli, rpm-ostree,
+hostnamectl),
 fixed argv, run as user sectop. Nothing here changes the host.
 """
 
@@ -26,6 +27,7 @@ SYSTEMCTL = "/usr/bin/systemctl"
 FIREWALL_CMD = "/usr/bin/firewall-cmd"
 NMCLI = "/usr/bin/nmcli"
 RPM_OSTREE = "/usr/bin/rpm-ostree"
+HOSTNAMECTL = "/usr/bin/hostnamectl"
 TIMEOUT = 5.0                      # per command; a whole collect stays well under INTERVAL
 OSTREE_TIMEOUT = 15.0
 OSTREE_EVERY = 86400.0             # rpm-ostree status: once a day (architecture: updates)
@@ -41,7 +43,12 @@ PROC_NET = (("tcp", "/proc/net/tcp", 4), ("tcp", "/proc/net/tcp6", 6),
             ("udp", "/proc/net/udp", 4), ("udp", "/proc/net/udp6", 6))
 TCP_LISTEN, UDP_UNCONN = "0A", "07"
 WIFI = "802-11-wireless"
-MAX_WIFI = 32
+MAX_WIFI = 32                      # NetworkManager profiles read per check
+NET = "/sys/class/net"
+ARPHRD_ETHER = "1"                 # /sys/class/net/<if>/type of Ethernet and Wi-Fi
+IFNAME_RE = re.compile(r"[A-Za-z0-9_.:@-]{1,15}")
+UUID_RE = re.compile(r"[0-9a-f-]{36}")
+HOSTNAMES = ("Hostname", "StaticHostname", "DefaultHostname")   # hostnamectl --json
 MAX_LINES = 12                     # detail lines per check
 MAX_READ = 1024 * 1024
 KV_RE = r"^\s*{}\s*=\s*(.*?)\s*$"
@@ -475,6 +482,102 @@ def k_wifi_ipv6(c, cx: Cx) -> Res:
     return out
 
 
+def _profiles(cx: Cx, types) -> list | str:
+    """-> uuids of the NetworkManager profiles of these types (max MAX_WIFI); str = error."""
+    res = cx.host.run([NMCLI, "-g", "UUID,TYPE", "connection", "show"])
+    if res.rc != 0 or res.timed_out:
+        return _fail_run(res)
+    out = []
+    for ln in res.out.splitlines():
+        u, _, t = ln.partition(":")
+        if t in types and UUID_RE.fullmatch(u):
+            out.append(u)
+    return out[:MAX_WIFI]
+
+
+def k_nm_props(c, cx: Cx) -> Res:
+    names = [p for p, _ in c.props]
+    src = f"nmcli {','.join(names)} of every {' / '.join(c.types)} profile"
+    uuids = _profiles(cx, c.types)
+    if isinstance(uuids, str):
+        return Res("unknown", uuids, source=src)
+    bad, unread = [], []
+    for u in uuids:
+        r = cx.host.run([NMCLI, "-g", ",".join(names), "connection", "show", u])
+        vals = [v.strip() for v in r.out.splitlines()]
+        if r.rc != 0 or r.timed_out or len(vals) != len(names):
+            unread.append(u)
+            continue
+        bad += [(u, f"{p}={v}") for (p, want), v in zip(c.props, vals)
+                if not compare(v, "in", want)]
+    n_bad = len({u for u, _ in bad})
+    n = len(uuids)
+    status = "fail" if bad else ("unknown" if unread else "pass")
+    out = Res(status, f"{n - n_bad - len(unread)} of {n} profiles", source=src)
+    out.lines = ([("differs", f"{u} {pv}") for u, pv in bad] + [("unread", u) for u in unread])
+    out.lines = out.lines[:MAX_LINES]                    # uuids only, never names
+    return out
+
+
+# --- network identity (silverblue-cis-hardening netprivacy) --------------------
+
+def k_mac_local(c, cx: Cx) -> Res:
+    """Every physical Ethernet / Wi-Fi link that is up has a locally administered MAC
+    (bit 0x02 of the first byte): set by NetworkManager (cloned MAC, random). A
+    hardware MAC never has it. The address itself is never shown."""
+    src = f"{NET}/*/address (physical links that are up)"
+    try:
+        names = cx.host.listdir(NET)
+    except OSError as e:
+        return Res("unknown", _err(e), source=NET)
+    local, real, unread = [], [], []
+    for name in names:
+        base = f"{NET}/{name}"
+        if not IFNAME_RE.fullmatch(name) or not cx.host.exists(f"{base}/device"):
+            continue                                     # virtual: bridge, tunnel, veth
+        try:
+            if cx.host.read(f"{base}/type").strip() != ARPHRD_ETHER:
+                continue
+            if cx.host.read(f"{base}/operstate").strip() != "up":
+                continue                                 # NetworkManager sets it on connect
+            first = int(cx.host.read(f"{base}/address").strip()[:2], 16)
+        except (OSError, ValueError):
+            unread.append(name)
+            continue
+        (local if first & 0x02 else real).append(name)
+    if real:
+        have = "hardware MAC: " + " ".join(real)
+    elif local:
+        have = f"{len(local)} up, all local"
+    else:
+        have = "unread: " + " ".join(unread) if unread else "no link up"
+    out = Res("fail" if real else ("unknown" if unread else "pass"), have, source=src)
+    out.lines = ([("hardware MAC", n) for n in real] + [("local", n) for n in local] +
+                 [("unread", n) for n in unread])[:MAX_LINES]
+    return out
+
+
+def k_hostname(c, cx: Cx) -> Res:
+    """hostnamed, not /proc/sys/kernel/hostname: sectop.service has ProtectHostname=yes,
+    its own copy of the name from its start."""
+    src = "hostnamectl --json=short"
+    res = cx.host.run([HOSTNAMECTL, "--json=short"])
+    if res.rc != 0 or res.timed_out or res.truncated:
+        return Res("unknown", _fail_run(res), source=src)
+    try:
+        d = json.loads(res.out)
+    except ValueError:
+        d = None
+    if not isinstance(d, dict):
+        return Res("unknown", "hostnamectl: no JSON object", source=src)
+    bad = [(k, str(d.get(k))[:64]) for k in HOSTNAMES if d.get(k) != c.want]
+    if d.get("PrettyHostname"):
+        bad.append(("PrettyHostname", str(d["PrettyHostname"])[:64]))
+    out = Res("fail" if bad else "pass", str(d.get("Hostname"))[:64], source=src)
+    out.lines = [("differs", f"{k} = {v}") for k, v in bad]
+    return out
+
+
 # --- units ---------------------------------------------------------------------
 
 def _units(host: Host, names: list) -> dict | str:
@@ -630,7 +733,8 @@ KINDS = {
     "audit-rules": k_audit_rules, "audit-enabled": k_audit_enabled, "uid0": k_uid0,
     "group": k_group, "perms": k_perms, "ostree-unlocked": k_ostree_unlocked,
     "ostree-staged": k_ostree_staged, "ostree-age": k_ostree_age, "ostree-gpg": k_ostree_gpg,
-    "firewalld-zone": k_firewalld_zone, "wifi-ipv6": k_wifi_ipv6,
+    "firewalld-zone": k_firewalld_zone, "wifi-ipv6": k_wifi_ipv6, "nm-props": k_nm_props,
+    "mac-local": k_mac_local, "hostname": k_hostname,
 }
 
 
@@ -662,9 +766,13 @@ def want_text(c) -> str:
         return "0 failed"
     if k in ("lockdown", "firewalld-zone", "wifi-ipv6"):
         return c.want
+    if k == "hostname":
+        return f"{c.want}, no pretty name"
+    if k == "nm-props":
+        return " ".join(f"{p}={w}" for p, w in c.props)
     return {"luks": "CRYPT-LUKS", "secureboot": "on", "audit-enabled": "not 0",
             "ostree-unlocked": "locked", "ostree-staged": "none",
-            "ostree-gpg": "all verify"}.get(k, "-")
+            "ostree-gpg": "all verify", "mac-local": "local MAC"}.get(k, "-")
 
 
 def check(c, cx: Cx, unit_names: list) -> Res:

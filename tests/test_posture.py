@@ -68,10 +68,19 @@ class FakeHost(kinds.Host):
             "/proc/net/tcp": TCP, "/proc/net/tcp6": TCP6, "/proc/net/udp": UDP,
             "/proc/net/udp6": UDP6,
             "/run/ostree-booted": "",
+            # netprivacy (2026-10-27): Wi-Fi up with a random MAC, cable down with its
+            # hardware MAC. Fake names and addresses (02:00:00 local, 00:00:5e:00:53
+            # documentation, RFC 7042).
+            "/sys/class/net/wlan0/type": "1\n", "/sys/class/net/wlan0/operstate": "up\n",
+            "/sys/class/net/wlan0/address": "02:00:00:00:00:01\n",
+            "/sys/class/net/eth0/type": "1\n", "/sys/class/net/eth0/operstate": "down\n",
+            "/sys/class/net/eth0/address": "00:00:5e:00:53:01\n",
         }
         self.blobs = {kinds.SECUREBOOT: bytes([6, 0, 0, 0, 0])}
         self.dirs = {"/sys/block": ["dm-0", "nvme0n1"], "/sys/block/dm-0/slaves": ["nvme0n1p3"],
-                     "/etc/ostree/remotes.d": ["fedora.conf", "README"]}
+                     "/etc/ostree/remotes.d": ["fedora.conf", "README"],
+                     "/sys/class/net": ["eth0", "lo", "virbr0", "wg0-mullvad", "wlan0"],
+                     "/sys/class/net/eth0/device": [], "/sys/class/net/wlan0/device": []}
         self.stats = {"/etc/shadow": (0o100000, 0, 0), "/etc/passwd": (0o100644, 0, 0)}
         self.denied = {"/proc/sys/net/core/bpf_jit_harden"}
         self.sysctl = {"kernel.kptr_restrict": "2", "kernel.dmesg_restrict": "1",
@@ -86,6 +95,10 @@ class FakeHost(kinds.Host):
                                             "0b0b0b0b-0000-4000-8000-000000000002:802-11-wireless\n"
                                             "11111111-2222-3333-4444-555555555555:wireguard\n", ""),
             "nmcli -g ipv6.method": Result(0, "disabled\n", ""),
+            "nmcli -g ipv4.dhcp-send-hostname,ipv6.dhcp-send-hostname": Result(0, "0\n0\n", ""),
+            "hostnamectl --json=short": Result(0, json.dumps({   # host 2026-10-27, trimmed
+                "Hostname": "localhost", "StaticHostname": "localhost", "PrettyHostname": None,
+                "DefaultHostname": "localhost", "HostnameSource": "static"}), ""),
             "rpm-ostree status": Result(0, json.dumps({"deployments": [
                 {"booted": False, "timestamp": 1}, {"booted": True, "timestamp": BOOTED}]}), ""),
         }
@@ -324,6 +337,68 @@ class TestKinds(unittest.TestCase):
         self.assertEqual((r.status, r.have), ("fail", "1 of 2 disabled"))
         self.assertEqual(r.lines, [("not disabled", "0a0a0a0a-0000-4000-8000-000000000001 auto")])
 
+    def test_nm_props(self):
+        props = (("ipv4.dhcp-send-hostname", "0"), ("ipv6.dhcp-send-hostname", "0"))
+        c = chk(kind="nm-props", types=("802-11-wireless", "802-3-ethernet"), props=props)
+        h = FakeHost()
+        self.assertEqual(res(c, h), ("pass", "2 of 2 profiles"))         # wireguard: not listed
+        self.assertEqual(h.calls[1][1:4], ["-g", "ipv4.dhcp-send-hostname,ipv6.dhcp-send-hostname",
+                                           "connection"])
+        h.answers = {"nmcli -g ipv4.dhcp-send-hostname,ipv6.dhcp-send-hostname connection show "
+                     "c183": Result(0, "-1\n-1\n", ""), **h.answers}     # a new network
+        r = kinds.check(c, cx(h), [])
+        self.assertEqual((r.status, r.have), ("fail", "1 of 2 profiles"))
+        self.assertEqual(r.lines, [
+            ("differs", "0b0b0b0b-0000-4000-8000-000000000002 ipv4.dhcp-send-hostname=-1"),
+            ("differs", "0b0b0b0b-0000-4000-8000-000000000002 ipv6.dhcp-send-hostname=-1")])
+        h = FakeHost()
+        h.answers["nmcli -g ipv4.dhcp-send-hostname,ipv6.dhcp-send-hostname"] = Result(0, "0\n", "")
+        self.assertEqual(res(c, h), ("unknown", "0 of 2 profiles"))      # one value missing
+        h.answers["nmcli -g UUID,TYPE"] = Result(8, "", "Error: NetworkManager is not running.\n")
+        self.assertEqual(res(c, h), ("unknown", "Error: NetworkManager is not running."))
+
+    def test_mac_local(self):
+        c = chk(kind="mac-local")
+        r = kinds.check(c, cx(), [])
+        self.assertEqual((r.status, r.have, r.lines),
+                         ("pass", "1 up, all local", [("local", "wlan0")]))
+        self.assertNotIn("02:00", repr(r))                                # never the address
+        h = FakeHost()
+        h.files["/sys/class/net/eth0/operstate"] = "up\n"                # cable up, hardware MAC
+        r = kinds.check(c, cx(h), [])
+        self.assertEqual((r.status, r.have), ("fail", "hardware MAC: eth0"))
+        self.assertNotIn("00:53", repr(r))
+        h = FakeHost()
+        h.files["/sys/class/net/wlan0/operstate"] = "down\n"
+        self.assertEqual(res(c, h), ("pass", "no link up"))
+        h = FakeHost()
+        del h.files["/sys/class/net/wlan0/address"]
+        self.assertEqual(res(c, h), ("unknown", "unread: wlan0"))
+        h = FakeHost()
+        h.files["/sys/class/net/wlan0/type"] = "801\n"                   # not Ethernet: skipped
+        self.assertEqual(res(c, h), ("pass", "no link up"))
+        h = FakeHost()
+        del h.dirs["/sys/class/net"]
+        self.assertEqual(res(c, h), ("unknown", "No such file or directory"))
+
+    def test_hostname(self):
+        c = chk(kind="hostname", want="localhost")
+        self.assertEqual(res(c), ("pass", "localhost"))
+        h = FakeHost()
+        h.answers["hostnamectl --json=short"] = Result(0, json.dumps({
+            "Hostname": "box1", "StaticHostname": "box1", "PrettyHostname": "Box 1",
+            "DefaultHostname": "fedora"}), "")
+        r = kinds.check(c, cx(h), [])
+        self.assertEqual((r.status, r.have), ("fail", "box1"))
+        self.assertEqual(r.lines, [("differs", "Hostname = box1"),
+                                   ("differs", "StaticHostname = box1"),
+                                   ("differs", "DefaultHostname = fedora"),
+                                   ("differs", "PrettyHostname = Box 1")])
+        h.answers["hostnamectl --json=short"] = Result(0, "[]", "")
+        self.assertEqual(res(c, h), ("unknown", "hostnamectl: no JSON object"))
+        h.answers["hostnamectl --json=short"] = Result(1, "", "Failed to connect to bus\n")
+        self.assertEqual(res(c, h), ("unknown", "Failed to connect to bus"))
+
     def test_units_one_call(self):
         h = FakeHost()
         x = cx(h)
@@ -444,7 +519,7 @@ class TestModule(unittest.TestCase):
         self.assertEqual(crit, {"selinux-enforcing", "audit-boot", "audit-enabled",
                                 "auditd-active", "firewalld-active", "firewalld-zone", "uid0",
                                 "wheel", "luks-var", "ostree-locked", "ostree-gpg", "listeners",
-                                "secure-boot"})
+                                "secure-boot", "mac-random", "hostname"})
         refs = {c.id for c in checks if c.ref}
         self.assertEqual(refs, set())                                    # step 9 done
         self.assertEqual(set(policy.KINDS) - {c.kind for c in checks}, set())   # all used
@@ -554,6 +629,13 @@ class TestModule(unittest.TestCase):
                b'allow = []\nwireguard = "a b"\n',
                b'[[check]]\nid = "x"\nkind = "taint"\nsev = "warn"\nwhy = "w"\nwant = "O"\n'
                b'[[check]]\nid = "x"\nkind = "taint"\nsev = "warn"\nwhy = "w"\nwant = "O"\n',
+               b'[[check]]\nid = "x"\nkind = "hostname"\nsev = "warn"\nwhy = "w"\n'
+               b'want = "-bad"\n',
+               b'[[check]]\nid = "x"\nkind = "nm-props"\nsev = "warn"\nwhy = "w"\n'
+               b'types = []\nprops = { "ipv4.method" = "disabled" }\n',
+               b'[[check]]\nid = "x"\nkind = "nm-props"\nsev = "warn"\nwhy = "w"\n'
+               b'types = ["802-11-wireless"]\nprops = { "method" = "disabled" }\n',
+               b'[[check]]\nid = "x"\nkind = "mac-local"\nsev = "warn"\nwhy = "w"\nwant = "x"\n',
                b'[[nope]]\n']
         for data in bad:
             with self.subTest(data=data), self.assertRaises(ConfigError):

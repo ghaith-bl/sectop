@@ -53,6 +53,9 @@ KINDS = {
     "ostree-gpg": (set(), set()),
     "firewalld-zone": ({"want"}, set()),
     "wifi-ipv6": ({"want"}, set()),
+    "nm-props": ({"types", "props"}, set()),
+    "mac-local": (set(), set()),
+    "hostname": ({"want"}, set()),
 }
 MAX_CHECKS = 100
 MAX_ITEMS = 64                      # values / units / lines / allow / want lists
@@ -63,6 +66,8 @@ NAME_RE = re.compile(r"[A-Za-z0-9_.@:-]{1,128}")
 SYSCTL_RE = re.compile(r"[a-z0-9_]+(?:\.[A-Za-z0-9_-]+)+")
 MODE_RE = re.compile(r"0?[0-7]{1,4}")
 OWNER_RE = re.compile(r"[a-z_][a-z0-9_-]*:[a-z_][a-z0-9_-]*")
+PROP_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\.[a-z0-9]+(?:-[a-z0-9]+)*")   # ipv4.method
+HOST_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,62})")
 MAX_TEXT = 200
 
 
@@ -85,6 +90,8 @@ class Check:
     owner: str = ""
     max_days: int = 0
     wireguard: str = ""             # listeners: tunnel whose listen-port is allowed
+    types: tuple = ()               # nm-props: NetworkManager profile types
+    props: tuple = ()               # nm-props: ((property, want "a|b"), ...)
 
 
 def _text(v, w: str, most: int = MAX_TEXT, empty: bool = False) -> str:
@@ -143,8 +150,10 @@ def _check(t, i: int, path: str, seen: set) -> Check:
         if t["op"] not in OPS:
             raise ConfigError(f"{w}.op: one of {' '.join(OPS)} required")
         args["op"] = t["op"]
-    if kind in ("file", "taint", "lockdown", "firewalld-zone", "wifi-ipv6"):
+    if kind in ("file", "taint", "lockdown", "firewalld-zone", "wifi-ipv6", "hostname"):
         args["want"] = _text(t["want"], f"{w}.want", 120, empty=kind == "taint")
+        if kind == "hostname" and not HOST_RE.fullmatch(args["want"]):
+            raise ConfigError(f"{w}.want: hostname required")
         if args.get("op") in (">=", "<=") and not re.fullmatch(r"-?\d+", args["want"]):
             raise ConfigError(f"{w}.want: a whole number required with op {args['op']}")
     elif kind in ("lines", "cmdline", "uid0", "group"):
@@ -178,6 +187,16 @@ def _check(t, i: int, path: str, seen: set) -> Check:
         if not isinstance(wgi, str) or (wgi and not IFACE_RE.fullmatch(wgi)):
             raise ConfigError(f"{w}.wireguard: interface name required")
         args["wireguard"] = wgi
+    if kind == "nm-props":
+        types = _texts(t["types"], f"{w}.types", empty=False)
+        if any(not NAME_RE.fullmatch(x) for x in types):
+            raise ConfigError(f"{w}.types: NetworkManager type names required")
+        props = []
+        for k, v in _table(t["props"], f"{w}.props").items():
+            if not PROP_RE.fullmatch(k) or not isinstance(v, str) or not TEXT_RE.fullmatch(v):
+                raise ConfigError(f"{w}.props.{k}: setting.property = \"value\" required")
+            props.append((k, v))
+        args["types"], args["props"] = types, tuple(props)
     if kind == "group":
         g = t["group"]
         if not isinstance(g, str) or not NAME_RE.fullmatch(g):

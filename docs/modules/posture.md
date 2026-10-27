@@ -16,7 +16,8 @@ Security posture.
 - Files where a file exists. Commands only where there is none, fixed argv, run as user
   sectop (core/run.py): `systemctl show` (one call for all units), `systemctl
   list-units --state=failed`, `firewall-cmd --get-default-zone`, `nmcli` (1 + one per
-  wifi profile, max 32), `rpm-ostree status --json` (once a day, cached). WireGuard
+  profile, max 32, per check), `hostnamectl --json=short`, `rpm-ostree status --json`
+  (once a day, cached). WireGuard
   listen-port: the net unit's file (`wg show <tunnel> listen-port`, every 1 s).
 - Audit counts: journal CONFIG_CHANGE (1305) of this boot. One scan in init
   (`journalctl -b _TRANSPORT=audit _AUDIT_TYPE=1305`, 5 s), then core's follower:
@@ -86,6 +87,9 @@ Summary `pass <n> | fail <n> | unknown <n> | accepted <n>`.
 | ostree-gpg | - | no remote in `/etc/ostree/remotes.d/*.conf` with gpg-verify off (default on) |
 | firewalld-zone | want | `firewall-cmd --get-default-zone` = want |
 | wifi-ipv6 | want | every wifi profile ipv6.method = want. Never names: UUIDs in the detail |
+| nm-props | types (list), props (table property = want) | every NetworkManager profile of these types has each property in want (`a|b`). One `nmcli -g` per profile. UUIDs in the detail |
+| mac-local | - | every physical link that is up (`/sys/class/net/<if>/device`, type 1, operstate up) has a locally administered MAC (bit 0x02 of the first byte). The address is never shown |
+| hostname | want | `hostnamectl --json=short`: Hostname, StaticHostname, DefaultHostname = want, PrettyHostname empty. Not `/proc/sys/kernel/hostname`: sectop.service has `ProtectHostname=yes` (its own copy from its start) |
 
 Limits: 100 checks, 64 items per list / table, paths `A-Z a-z 0-9 _ . @ % + : / -`
 without `..`.
@@ -99,14 +103,15 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
     crit  SELinux enforcing now; audit=1 + backlog in kernel args; audit not switched
           off; auditd, firewalld running; firewalld zone drop; only root UID 0; wheel =
           me; /var on LUKS; system image not unlocked; ostree remotes verify; listeners;
-          Secure Boot on
+          Secure Boot on; no hardware MAC on a link that is up; hostname localhost
     warn  SELinux config enforcing + targeted; audit rules >= 70; journald audit
           socket; su closed (sugroup empty, pam_wheel); faillock 5 / 900 s; pwquality 14
           / 4 classes; shadow, gshadow, passwd, group perms; sysctls of
           90-hardening.conf (kernel, IPv4, IPv6); no taint; CIS module blocks;
           lockdown integrity; crypto policy not LEGACY; masked units;
           no failed units; core dumps off; journal persistent; GNOME locks; wifi IPv6
-          off; booted system <= 14 days
+          off; booted system <= 14 days; random MAC config; dhcp-send-hostname 0 on
+          every Wi-Fi / cable profile; LLMNR + mDNS off
     info  update staged, waiting for a reboot
 
 - hostfw mode / boot mode: not here, the firewall screen checks them (alerts there).
@@ -125,6 +130,14 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
   NetworkManager.conf(5) `[connection]` defaults cannot change that (ipv6.method is not
   in its list). Host 2026-10-26: 4 of 6 profiles were auto (fixed with nmcli); the
   check catches the next new network.
+- Network identity (2026-10-27, silverblue-cis-hardening `netprivacy`). Host checks
+  (sandbox, user sectop): config files readable; links `type=1`, the one that is up has
+  bit 0x02 set, the hardware one (down) not; `hostnamectl --json=short` gives the names,
+  PrettyHostname `null`; `nmcli -g ipv4.dhcp-send-hostname` prints `0` for no, `-1` for
+  the default. NetworkManager 1.56.1 ignores the global dhcp-send-hostname default (tested
+  with tcpdump), so a new network's profile (-1) fails `dhcp-no-hostname` (warn, no
+  alert: hostname `localhost` is not sent at all) until netprivacy runs again. crit only
+  where a network could see me: hardware MAC, a real hostname.
 - Secure Boot, lockdown, taint: step 9 done 2026-10-26 (silverblue-cis-hardening:
   akmod-nvidia removed, akmods MOK key deleted, Secure Boot on, lockdown integrity,
   taint 0). The refs are gone: Secure Boot off is crit now (it can only be switched off

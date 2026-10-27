@@ -363,3 +363,45 @@ allow = ["udp 192.168.122.1:53", "tcp 192.168.122.1:53", "udp 0.0.0.0:67"]
 # WireGuard wg0-mullvad (Mullvad): the port can change on every connect: its udp 0.0.0.0 /
 # [::] port is taken from `wg show wg0-mullvad listen-port` (net unit), not a glob here.
 wireguard = "wg0-mullvad"
+
+# ---- network identity (silverblue-cis-hardening netprivacy, 2026-10-27) ----
+# Random MAC on every connect, no hostname on any network, LLMNR + mDNS off.
+# A new network makes a new profile: dhcp-no-hostname fails (warn) until
+# `sudo ./harden-workstation.sh netprivacy` runs again; the generic hostname covers it.
+
+[[check]]
+id = "mac-random"
+kind = "mac-local"
+sev = "crit"
+why = "no hardware MAC on a link that is up"
+
+[[check]]
+id = "nm-mac-random"
+kind = "lines"
+sev = "warn"
+why = "NetworkManager: new random MAC on every connect, Wi-Fi + cable"
+path = "/etc/NetworkManager/conf.d/90-privacy.conf"
+want = ["wifi.cloned-mac-address=random", "ethernet.cloned-mac-address=random"]
+
+[[check]]
+id = "hostname"
+kind = "hostname"
+sev = "crit"
+why = "generic hostname, no pretty name: nothing a network can tie to me"
+want = "localhost"
+
+[[check]]
+id = "dhcp-no-hostname"
+kind = "nm-props"
+sev = "warn"
+why = "no hostname in DHCP on every Wi-Fi / cable profile"
+types = ["802-11-wireless", "802-3-ethernet"]
+props = { "ipv4.dhcp-send-hostname" = "0", "ipv6.dhcp-send-hostname" = "0" }
+
+[[check]]
+id = "llmnr-mdns-off"
+kind = "lines"
+sev = "warn"
+why = "resolved: LLMNR + mDNS off (they announce the hostname on the LAN)"
+path = "/etc/systemd/resolved.conf.d/90-privacy.conf"
+want = ["LLMNR=no", "MulticastDNS=no"]
