@@ -23,6 +23,7 @@ MODULES: tuple[str, ...] = (
     "modules.firewall",
     "modules.security",
     "modules.posture",
+    "modules.system",
 )
 
 IMPORT_RE = re.compile(r"modules\.([a-z0-9_]+)")

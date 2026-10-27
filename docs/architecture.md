@@ -324,9 +324,21 @@ Host checks 2026-10-27 (sandbox: nsenter into sectop.service as user sectop):
 
 ### Boxes
 
-- system: one row per metric: name, now, spark (as the firewall screen), pressure avg60
-  or crit limit. Rows: cpu, load, memory, swap, io per disk, `/var`, `/boot`, one row
-  per sensor (label from `temp*_label`).
+- system: one row per metric: metric, now, trend, info. Rows: cpu, load, memory, swap,
+  pressure cpu / memory / io, io per whole disk, `/var`, `/boot`, one row per sensor.
+  Built 2026-10-27:
+  - trend = table column type `spark` (docs/module-interface.md): the module sends
+    numbers, core draws the bars (modules never draw). Last 60 reads (5 min). Scale: cpu,
+    memory, swap 0-100 %, load 0-cpus, temp 0-crit, pressure and io: own highest value.
+  - pressure: some avg60 now, trend avg10, no limit yet (a week of my host's numbers).
+  - io: whole disks from `/sys/block` without loop, ram, zram (swap row), dm (same io as
+    the disk under it). Host: nvme0n1.
+  - `/boot`: row only, no check.
+  - sensor names: cpu, nvme, ram + i2c device when a name is there twice (`ram
+    14-0050`). Check key = hwmon name + device + temp number (hwmon number changes).
+  - warn limits (config `temp_warn`, per hwmon name): coretemp 90, spd5118 70 (my host:
+    37-43 C idle, 50-70 only in a game; sensor max 55 would be yellow in every game).
+    nvme: sensor max 80.85. crit always from the sensor.
 - services: sev, unit, state, cpu, mem, oom, restarts, last change. Watched units and
   problems first, then by cpu. Detail: last state changes this boot, result, restarts,
   memory peak.
@@ -358,7 +370,8 @@ crit (red, alert):
 
 warn (yellow, row; alert only when it lasts):
 - OOM kill elsewhere (kernel or systemd-oomd)
-- temperature >= `temp*_max` for 60 s (when max < crit; CPU: config limit, see Scope)
+- temperature >= warn limit for 60 s: config `temp_warn` (coretemp 90, spd5118 70), else
+  `temp*_max` when max < crit
 - zombie or `D` process older than 60 s
 - unit restarted 3 times in 10 min
 - pressure avg60 over the limit for 2 min. Limits set from my host's numbers (step 1),
@@ -390,7 +403,8 @@ box via polkit, confirm, deny list (see Actions).
 
 1. Host checks: done 2026-10-27 (see Sources). Left: unit stop message, scan time.
    Fixtures in tests/fixtures/system/ (fake trees, privacy rule) with each box.
-2. system box + its checks.
+2. system box + its checks: done 2026-10-27 (modules/system, fixtures
+   tests/fixtures/system/host: fake tree, hwmon names and files as on my host).
 3. services box (cgroup, journal, watched units); posture: no second alert.
 4. processes box (scan, program, parent chain, zombies) + keys `s`, `v`.
 5. Measure sectop.service CPU before / after, docs/modules/system.md, README legend.
