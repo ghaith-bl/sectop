@@ -39,7 +39,7 @@ Keys now: `1-3` screen, `tab` / arrows box, `j/k` / arrows select line, `PgDn/Pg
 `enter` detail, `/` filter (in a detail: search, `n` `N` next / previous match), `Esc` clear
 filter, `f` follow, `x` hide, `w` whois, `a` ack, `p` pause, `m` mask, `?` help, `q` quit.
 Planned: `t` capture (from detail); program card (`enter` on a program, phase 4); `s` sort
-(processes box: cpu / memory).
+and `v` list / tree (processes box).
 
 ## Firewall screen: network only (2026-10-20)
 
@@ -270,7 +270,15 @@ except `systemctl show` (posture runs it already as user sectop).
 - argv: system processes only, detail only, masked as the commands box (`m` = raw).
   Never in rows. Read for the shown rows only.
 - Temperatures: CPU, NVMe, RAM (hwmon names in config `sensors`, defaults `coretemp`,
-  `nvme`, `spd5118`: to check on host). dGPU not used (Integrated mode): not read.
+  `nvme`, `spd5118`, checked on host 2026-10-27). dGPU not used (Integrated mode): not
+  read. Other hwmon (battery, ACPI zone, Wi-Fi, cable NIC, fan curves): not shown.
+  - coretemp: `Package id 0` only (per core: hottest core in the detail). max = crit =
+    100 C: no warn from the sensor, warn from config (default 90 C for 60 s).
+  - nvme: `Composite` only (max 80.8, crit 84.8). Its other sensors report max
+    65261.8 C (not set): a limit over 200 C counts as none.
+  - spd5118: one per RAM module (2 on host, max 55, crit 85), no label: named by its
+    i2c device (`/sys/class/hwmon/hwmon*/device`), not the hwmon number (changes per
+    boot).
 
 ### Sources
 
@@ -295,7 +303,24 @@ except `systemctl show` (posture runs it already as user sectop).
   make `/sys` and the cgroup tree read-only, not unreadable; `ProtectProc=default`
   (2026-10-26) gives other users' `/proc/<pid>/{stat,cgroup,cmdline}`. To check on host
   inside the unit (nsenter as user sectop), as for the kernel taint.
-- CPU % = delta of usage between two reads. Pid key = pid + start time (pid reuse).
+- CPU % = delta of usage between two reads, of the whole CPU (all cores = 100 %, as
+  the services' cgroup numbers). Pid key = pid + start time (pid reuse).
+- No per-process disk io: `/proc/<pid>/io` needs ptrace access (no CAP_SYS_PTRACE in
+  the collector, kept so). Disk io per service from cgroup `io.stat` instead.
+
+Host checks 2026-10-27 (sandbox: nsenter into sectop.service as user sectop):
+- `/proc/pressure/*`, `/sys/fs/cgroup/system.slice/*/memory.current`, hwmon
+  `temp*_input`, other users' `/proc/<pid>/stat`: readable. system.slice controllers:
+  cpuset cpu io memory pids. 39 system services, 477 processes.
+- Pressure idle: all avg60 0.00. Limits after a week of numbers.
+- Journal, systemd unit messages (`_PID=1`, user manager the same), `MESSAGE_ID`:
+  `39f53479...` started, `7d4958e8...` starting, `98e32220...` main process exited,
+  `d9b373ed...` failed (`UNIT_RESULT=`), `5eb03494...` restart scheduled
+  (`N_RESTARTS=`), `be02cf68...` failed to start (`JOB_RESULT=failed`), `ae8f7b86...`
+  resources consumed (CPU time, memory peak). Stop: to check.
+- auditd.conf (root, read once): `space_left = 75`, `admin_space_left = 50` (MB).
+- sectop.service before screen 3: anon 19 MiB, file cache 84 MiB (memory peak 128M =
+  MemoryMax is cache from the journal files), swap 2 MiB. CPU: to measure per minute.
 
 ### Boxes
 
@@ -305,10 +330,16 @@ except `systemctl show` (posture runs it already as user sectop).
 - services: sev, unit, state, cpu, mem, oom, restarts, last change. Watched units and
   problems first, then by cpu. Detail: last state changes this boot, result, restarts,
   memory peak.
-- processes: sev, pid, user, program, comm, state, cpu, mem, age. Top 30 by cpu (`s`:
-  by memory), plus every zombie and every `D` (uninterruptible) process. Detail: parent
-  chain up to pid 1 (from `/proc/<pid>/stat` ppid, max 32), uid, start, threads, argv
-  (system processes, masked). Zombie: row names its parent.
+- processes: sev, pid, user, program, comm, state, cpu, mem, age. Top 30, plus every
+  zombie and every `D` (uninterruptible) process. Zombie: row names its parent.
+  - `s` sort: cpu -> mem -> pid -> program. cpu sorts by the mean of the last ~30 s
+    (rows stay put), the cell shows the last tick.
+  - `v` view: list <-> tree (children under their parent).
+  - Detail: cpu spark, mem, threads, state, running since, parent chain up to pid 1
+    (`/proc/<pid>/stat` ppid, max 32), user, argv (system processes, masked).
+- Ideas from btop (Apache-2.0, 2026-10-27): tree view, sort switching, a sort that
+  follows time, a process detail with its own graph. Ideas only: own code, own keys
+  (one meaning on every screen), no btop key bindings. Credit in README.
 - Program card (`c`): rows here carry `progs`, so the card shows a program's processes,
   units and the other screens' rows together.
 
@@ -327,7 +358,7 @@ crit (red, alert):
 
 warn (yellow, row; alert only when it lasts):
 - OOM kill elsewhere (kernel or systemd-oomd)
-- temperature >= `temp*_max` for 60 s (when max < crit)
+- temperature >= `temp*_max` for 60 s (when max < crit; CPU: config limit, see Scope)
 - zombie or `D` process older than 60 s
 - unit restarted 3 times in 10 min
 - pressure avg60 over the limit for 2 min. Limits set from my host's numbers (step 1),
@@ -357,13 +388,11 @@ box via polkit, confirm, deny list (see Actions).
 
 ### Plan
 
-1. Host checks + fixtures: hwmon names, labels, max / crit; cgroup files and pressure
-   inside the sandbox; journal fields of systemd unit messages (state change, result,
-   restart counter); auditd `space_left` / `admin_space_left`; process count and scan
-   time. Fixtures in tests/fixtures/system/ (fake trees, privacy rule).
+1. Host checks: done 2026-10-27 (see Sources). Left: unit stop message, scan time.
+   Fixtures in tests/fixtures/system/ (fake trees, privacy rule) with each box.
 2. system box + its checks.
 3. services box (cgroup, journal, watched units); posture: no second alert.
-4. processes box (scan, program, parent chain, zombies) + key `s`.
+4. processes box (scan, program, parent chain, zombies) + keys `s`, `v`.
 5. Measure sectop.service CPU before / after, docs/modules/system.md, README legend.
 6. First public release: tools, requirements, dependencies.
 
