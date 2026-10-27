@@ -5,7 +5,7 @@ import unittest
 
 import modules.system as system
 from core import registry
-from core.module import Context, check_module, spark_cell, validate
+from core.module import Context, check_module, validate
 from core.screens import SCREENS, find
 from modules.system import host
 
@@ -63,7 +63,8 @@ def keys(snap):
 
 class TestParsers(unittest.TestCase):
     def test_cpu_times(self):
-        busy, total, cpus = host.cpu_times(STAT0 + "cpu0 1 0 1 8 0 0 0 0 0 0\ncpu1 1 0 1 8 0 0 0 0 0 0\n")
+        per = "cpu0 1 0 1 8 0 0 0 0 0 0\ncpu1 1 0 1 8 0 0 0 0 0 0\n"
+        busy, total, cpus = host.cpu_times(STAT0 + per)
         self.assertEqual(total, 100000 + 400 + 40000 + 4600000 + 2600 + 11000 + 5000)
         self.assertEqual(busy, total - 4600000 - 2600)          # idle + iowait
         self.assertEqual(cpus, 2)
@@ -129,18 +130,25 @@ class TestModule(Base):
             "space:/var", "space:/boot", "temp:coretemp:coretemp.0:temp1",
             "temp:nvme:nvme0:temp1", "temp:spd5118:14-0050:temp1",
             "temp:spd5118:14-0052:temp1"])
-        self.assertEqual(r["cpu"]["cells"][:2], ["cpu", "-"])        # no delta yet
-        self.assertEqual(r["cpu"]["cells"][3], "20 cpus, all = 100%")
-        self.assertEqual(r["load"]["cells"][2], "0.29/20")               # scale: cpus
-        self.assertEqual(r["io:nvme0n1"]["cells"][1:], ["-", "", "first read"])
-        self.assertEqual(r["memory"]["cells"][1], "5.7G")
-        self.assertEqual(r["swap"]["cells"][1], "98M")
-        self.assertEqual(r["psi:io"]["cells"][1], "0.05%")
-        self.assertEqual(r["space:/var"]["cells"][1:], ["120G", "", "free of 400G, 70% used"])
+        self.assertEqual(r["cpu"]["cells"], ["cpu", "-", "-", "100%", "20 cpus, all = 100%"])
+        self.assertEqual(r["load"]["cells"],
+                         ["load", "0.29", "0.29", "20", "5m 0.65  15m 0.80  (limit = cpus)"])
+        self.assertEqual(r["io:nvme0n1"]["cells"][1:], ["-", "-", "-", "first read"])
+        self.assertEqual(r["memory"]["cells"],
+                         ["memory", "5.7G 19%", "5.7G", "31G", "available 25G"])
+        self.assertEqual(r["swap"]["cells"][1:4], ["98M", "98M", "8.0G"])
+        self.assertEqual(r["psi:io"]["cells"][1:4], ["0.05%", "0.12%", "-"])
+        self.assertEqual(r["space:/var"]["cells"][1:],
+                         ["120G free", "-", "400G", "70% used  (audit: warn < 75M, crit < 50M)"])
+        self.assertEqual(r["space:/boot"]["cells"][4], "41% used")
         self.assertEqual(r["temp:spd5118:14-0050:temp1"]["cells"],
-                         ["temp ram 14-0050", "38 C", "38/85", "warn 70  crit 85"])
+                         ["temp ram 14-0050", "38 C", "38 C", "85 C",
+                          "warn 70 C, yellow after 60 s"])
         self.assertEqual(r["temp:coretemp:coretemp.0:temp1"]["cells"][0], "temp cpu")
-        self.assertEqual(r["temp:nvme:nvme0:temp1"]["cells"][3], "warn 80.85  crit 84.85")
+        self.assertEqual(r["temp:coretemp:coretemp.0:temp1"]["cells"][4],
+                         "warn 75 C, yellow after 60 s")
+        self.assertEqual(r["temp:nvme:nvme0:temp1"]["cells"][3:],
+                         ["84.85 C", "warn 80.85 C, yellow after 60 s"])
         self.assertEqual((snap["status"], snap["checks"]), ("ok", []))
         self.assertEqual(snap["summary"], "mem 5.7G / 31G | cpu 37 C")
         self.assertEqual(snap["panels"][0]["width"], "full")
@@ -151,8 +159,12 @@ class TestModule(Base):
         self.write("/proc/stat", "cpu  100200 400 40050 4600750 2600 11000 5000 0 0 0\n")
         self.write("/proc/diskstats", " 259 0 nvme0n1 1 2 2000020 4 5 6 4000040 8 0 0 0\n")
         r = rows(self.collect(1005.0))
-        self.assertEqual(r["cpu"]["cells"][1:3], ["25%", "25/100"])
-        self.assertEqual(r["io:nvme0n1"]["cells"][1:], ["6.0K/s", "6", "read 2.0K/s  write 4.0K/s"])
+        self.assertEqual(r["cpu"]["cells"][1:3], ["25%", "25%"])
+        self.assertEqual(r["io:nvme0n1"]["cells"][1:],
+                         ["6.0K/s", "6.0K/s", "-", "read 2.0K/s  write 4.0K/s"])
+        self.write("/proc/stat", "cpu  100300 400 40050 4601650 2600 11000 5000 0 0 0\n")
+        r = rows(self.collect(1010.0))
+        self.assertEqual(r["cpu"]["cells"][1:3], ["10%", "25%"])     # peak of 5 min
 
     def test_temp_crit(self):
         self.temp(2, 1, 100000)                                   # coretemp package
@@ -190,7 +202,7 @@ class TestModule(Base):
         self.st = st
         self.temp(2, 1, 99000)
         r = rows(self.collect())["temp:coretemp:coretemp.0:temp1"]
-        self.assertEqual((r["sev"], r["cells"][3]), ("ok", "crit 100"))
+        self.assertEqual((r["sev"], r["cells"][3:]), ("ok", ["100 C", "no warn limit"]))
 
     def test_var_space(self):
         self.h.free["/var"] = 60 * MIB
@@ -210,25 +222,27 @@ class TestModule(Base):
         snap = self.collect()
         r = rows(snap)
         self.assertEqual(r["psi:io"]["sev"], "warn")
-        self.assertIn("FileNotFoundError", r["psi:io"]["cells"][3])
-        self.assertEqual(r["space:/boot"]["cells"][3],
+        self.assertIn("FileNotFoundError", r["psi:io"]["cells"][4])
+        self.assertEqual(r["space:/boot"]["cells"][4],
                          "statvfs /boot: PermissionError: Permission denied")
         self.assertEqual(set(keys(snap)), {"read:/proc/pressure/io", "read:statvfs/boot"})
         self.assertIn("load", r)                                   # the rest still there
 
-    def test_trend_history(self):
-        for i in range(system.HIST + 5):
+    def test_peak_window(self):
+        self.temp(2, 1, 60000)
+        self.collect(1000.0)
+        self.temp(2, 1, 40000)
+        for i in range(1, system.HIST):
             self.collect(1000.0 + 5 * i)
-        cell = rows(self.collect(2000.0))["temp:coretemp:coretemp.0:temp1"]["cells"][2]
-        vals, top = spark_cell(cell)
-        self.assertEqual((len(vals), top), (system.HIST, 100))
+        rid = "temp:coretemp:coretemp.0:temp1"
+        self.assertEqual(rows(self.collect(2000.0))[rid]["cells"][1:3], ["40 C", "40 C"])
 
 
 class TestOptions(unittest.TestCase):
     def test_defaults(self):
         st = system.init({})
         self.assertEqual(st.sensors, system.SENSORS)
-        self.assertEqual(st.temp_warn, {"coretemp": 90, "spd5118": 70})
+        self.assertEqual(st.temp_warn, {"coretemp": 75, "spd5118": 70})
         self.assertEqual((st.space_left, st.admin_space_left), (75, 50))
 
     def test_options(self):

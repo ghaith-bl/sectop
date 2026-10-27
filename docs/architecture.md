@@ -272,8 +272,9 @@ except `systemctl show` (posture runs it already as user sectop).
 - Temperatures: CPU, NVMe, RAM (hwmon names in config `sensors`, defaults `coretemp`,
   `nvme`, `spd5118`, checked on host 2026-10-27). dGPU not used (Integrated mode): not
   read. Other hwmon (battery, ACPI zone, Wi-Fi, cable NIC, fan curves): not shown.
-  - coretemp: `Package id 0` only (per core: hottest core in the detail). max = crit =
-    100 C: no warn from the sensor, warn from config (default 90 C for 60 s).
+  - coretemp: `Package id 0` only (per core: hottest core in the detail, not built
+    yet). max = crit = 100 C: no warn from the sensor, warn from config (default 75 C
+    for 60 s, 2026-10-27).
   - nvme: `Composite` only (max 80.8, crit 84.8). Its other sensors report max
     65261.8 C (not set): a limit over 200 C counts as none.
   - spd5118: one per RAM module (2 on host, max 55, crit 85), no label: named by its
@@ -324,19 +325,20 @@ Host checks 2026-10-27 (sandbox: nsenter into sectop.service as user sectop):
 
 ### Boxes
 
-- system: one row per metric: metric, now, trend, info. Rows: cpu, load, memory, swap,
-  pressure cpu / memory / io, io per whole disk, `/var`, `/boot`, one row per sensor.
-  Built 2026-10-27:
-  - trend = table column type `spark` (docs/module-interface.md): the module sends
-    numbers, core draws the bars (modules never draw). Last 60 reads (5 min). Scale: cpu,
-    memory, swap 0-100 %, load 0-cpus, temp 0-crit, pressure and io: own highest value.
-  - pressure: some avg60 now, trend avg10, no limit yet (a week of my host's numbers).
+- system: one row per metric: metric, now, peak 5m, limit, info. Rows: cpu, load,
+  memory, swap, pressure cpu / memory / io, io per whole disk, `/var`, `/boot`, one row
+  per sensor. Built 2026-10-27:
+  - Numbers only, no bars (my call after the first host run 2026-10-27: bars are hard to
+    read). peak = highest of the last 60 reads (5 min); limit = size, 100 %, cpus (load),
+    crit (temp). The table column type `spark` stays in core (docs/module-interface.md),
+    not used here.
+  - pressure: some avg60 now, peak of avg10, no limit yet (a week of my host's numbers).
   - io: whole disks from `/sys/block` without loop, ram, zram (swap row), dm (same io as
     the disk under it). Host: nvme0n1.
   - `/boot`: row only, no check.
   - sensor names: cpu, nvme, ram + i2c device when a name is there twice (`ram
     14-0050`). Check key = hwmon name + device + temp number (hwmon number changes).
-  - warn limits (config `temp_warn`, per hwmon name): coretemp 90, spd5118 70 (my host:
+  - warn limits (config `temp_warn`, per hwmon name): coretemp 75, spd5118 70 (my host:
     37-43 C idle, 50-70 only in a game; sensor max 55 would be yellow in every game).
     nvme: sensor max 80.85. crit always from the sensor.
 - services: sev, unit, state, cpu, mem, oom, restarts, last change. Watched units and
@@ -370,7 +372,7 @@ crit (red, alert):
 
 warn (yellow, row; alert only when it lasts):
 - OOM kill elsewhere (kernel or systemd-oomd)
-- temperature >= warn limit for 60 s: config `temp_warn` (coretemp 90, spd5118 70), else
+- temperature >= warn limit for 60 s: config `temp_warn` (coretemp 75, spd5118 70), else
   `temp*_max` when max < crit
 - zombie or `D` process older than 60 s
 - unit restarted 3 times in 10 min

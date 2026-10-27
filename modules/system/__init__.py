@@ -2,8 +2,9 @@
 
 Step 2 of the screen 3 plan. One row per metric: cpu, load, memory, swap, pressure
 (cpu, memory, io), io per whole disk, free space of /var and /boot, one row per
-temperature sensor. Columns: metric, now, trend (spark column, last 60 reads = 5 min),
-info. Files only (modules/system/host.py): no commands, no root, no capability.
+temperature sensor. Columns: metric, now, peak (highest of the last 60 reads = 5 min),
+limit (size, 100 %, cpus, crit), info. Numbers only (2026-10-27: no bars). Files only
+(modules/system/host.py): no commands, no root, no capability.
 
 Checks (Severity, red rule 2026-10-25):
 - crit: a sensor at or over its temp*_crit (no crit file: never red).
@@ -11,8 +12,8 @@ Checks (Severity, red rule 2026-10-25):
 - warn: /var free below auditd space_left.
 - warn: a sensor at or over its warn limit for temp_warn_for s (row yellow at once).
   Warn limit: config temp_warn for that hwmon name, else temp*_max when below crit.
-  Defaults 2026-10-27: coretemp 90 (max = crit = 100 on host), spd5118 70 (sensor max
-  55 is reached while gaming; idle 37-43), nvme: sensor max 80.8.
+  Defaults 2026-10-27: coretemp 75 (max = crit = 100 on host; idle 37-43, a game
+  50-70), spd5118 70 (sensor max 55 is reached while gaming), nvme: sensor max 80.85.
 - warn: a source that cannot be read (row shows why).
 Pressure: shown only, no limit yet (limits from a week of my host's numbers).
 /boot: row only.
@@ -28,16 +29,16 @@ from modules.system.host import PSI
 NAME = "system"
 INTERVAL = 5.0
 SPACE_EVERY = 60.0               # statvfs of the mounts
-HIST = 60                        # trend points (MAX_SPARK_CELL)
+HIST = 60                        # reads kept for the peak (5 min)
 MOUNTS = ("/var", "/boot")       # Silverblue: / is the image
 AUDIT_MOUNT = "/var"             # auditd log (space_left / admin_space_left)
 MIB = 1024 * 1024
-COLUMNS = ["metric", "now", "trend", "info"]
-TYPES = ["text", "num", "spark", "text"]
+COLUMNS = ["metric", "now", "peak 5m", "limit", "info"]
+TYPES = ["text", "num", "num", "num", "text"]
 
 SENSORS = ("coretemp:Package id 0", "nvme:Composite", "spd5118")
 SHORT = {"coretemp": "cpu", "nvme": "nvme", "spd5118": "ram"}
-TEMP_WARN = {"coretemp": 90.0, "spd5118": 70.0}
+TEMP_WARN = {"coretemp": 75.0, "spd5118": 70.0}
 TEMP_WARN_FOR = 60.0
 SPACE_LEFT = 75                  # MiB, auditd.conf on host 2026-10-27 (root 0640: copied)
 ADMIN_SPACE_LEFT = 50
@@ -59,10 +60,9 @@ def _num(v: float, digits: int = 0) -> str:
     return s.rstrip("0").rstrip(".") if "." in s else s
 
 
-def spark(vals, top: float | None = None, digits: int = 0) -> str:
-    """Trend cell (core/module.py spark_cell): values as text, optional /top."""
-    body = " ".join(_num(v, digits) for v in vals)
-    return body + (f"/{_num(top, 1)}" if top else "") if body else ""
+def peak(vals, fmt) -> str:
+    """Highest of the kept reads, formatted; - when none."""
+    return fmt(max(vals)) if vals else "-"
 
 
 class State:
@@ -118,9 +118,9 @@ def init(cfg: dict) -> State:
 
 # --- rows ------------------------------------------------------------------
 
-def _row(rid: str, metric: str, now: str, trend: str, info: str, sev: str = "ok",
+def _row(rid: str, metric: str, now: str, top: str, lim: str, info: str, sev: str = "ok",
          detail=()) -> dict:
-    r = {"id": rid, "cells": [metric, now, trend, info], "sev": sev}
+    r = {"id": rid, "cells": [metric, now, top, lim, info], "sev": sev}
     if detail:
         r["detail"] = [{"k": k, "v": v} for k, v in detail]
     return r
@@ -132,9 +132,9 @@ def _err(e: BaseException) -> str:
 
 
 def _unreadable(rows, checks, rid: str, metric: str, what: str, why: str) -> None:
-    rows.append(_row(rid, metric, "?", "", f"{what}: {why}", "warn"))
-    checks.append({"key": "read:" + what.replace(" ", ""), "sev": "warn", "title": f"system: {what} unreadable",
-                   "detail": why})
+    rows.append(_row(rid, metric, "?", "-", "-", f"{what}: {why}", "warn"))
+    checks.append({"key": "read:" + what.replace(" ", ""), "sev": "warn",
+                   "title": f"system: {what} unreadable", "detail": why})
 
 
 def _cpu(st: State, rows, checks, out: dict) -> None:
@@ -151,7 +151,8 @@ def _cpu(st: State, rows, checks, out: dict) -> None:
     st.cpu = (busy, total)
     out["cpu"] = pct
     rows.append(_row("cpu", "cpu", "-" if pct is None else f"{pct:.0f}%",
-                     spark(st.hist["cpu"], 100), f"{cpus} cpus, all = 100%",
+                     peak(st.hist["cpu"], lambda v: f"{v:.0f}%"), "100%",
+                     f"{cpus} cpus, all = 100%",
                      detail=[("busy", "-" if pct is None else f"{pct:.1f}% since the last read"),
                              ("cpus", str(cpus))]))
 
@@ -163,8 +164,8 @@ def _load(st: State, rows, checks) -> None:
         _unreadable(rows, checks, "load", "load", "/proc/loadavg", _err(e))
         return
     st.hist["load"].append(l1)
-    rows.append(_row("load", "load", f"{l1:.2f}", spark(st.hist["load"], st.cpus or None, 2),
-                     f"5m {l5:.2f}  15m {l15:.2f}",
+    rows.append(_row("load", "load", f"{l1:.2f}", peak(st.hist["load"], lambda v: f"{v:.2f}"),
+                     str(st.cpus or "-"), f"5m {l5:.2f}  15m {l15:.2f}  (limit = cpus)",
                      detail=[("1 min", f"{l1:.2f}"), ("5 min", f"{l5:.2f}"),
                              ("15 min", f"{l15:.2f}"), ("cpus", str(st.cpus or "?"))]))
 
@@ -177,17 +178,18 @@ def _memory(st: State, rows, checks, out: dict) -> None:
         return
     total, avail = m["MemTotal"], m["MemAvailable"]
     used = max(0, total - avail)
-    st.hist["memory"].append(used / total * 100 if total else 0)
+    st.hist["memory"].append(used)
     out["memory"] = (used, total)
-    rows.append(_row("memory", "memory", size(used), spark(st.hist["memory"], 100),
-                     f"of {size(total)}, available {size(avail)}",
+    pct = f" {used / total * 100:.0f}%" if total else ""
+    rows.append(_row("memory", "memory", size(used) + pct, peak(st.hist["memory"], size),
+                     size(total), f"available {size(avail)}",
                      detail=[("used", f"{size(used)} (total - available)"),
                              ("available", size(avail)), ("total", size(total))]))
     stot, sfree = m["SwapTotal"], m["SwapFree"]
     sused = max(0, stot - sfree)
-    st.hist["swap"].append(sused / stot * 100 if stot else 0)
-    rows.append(_row("swap", "swap", size(sused), spark(st.hist["swap"], 100),
-                     f"of {size(stot)}" if stot else "no swap",
+    st.hist["swap"].append(sused)
+    rows.append(_row("swap", "swap", size(sused), peak(st.hist["swap"], size),
+                     size(stot) if stot else "-", "" if stot else "no swap",
                      detail=[("used", size(sused)), ("total", size(stot))]))
 
 
@@ -212,7 +214,7 @@ def _pressure(st: State, rows, checks) -> None:
                        ("full avg60", f"{full['avg60']:.2f}%")]
         detail.append(("limit", "none yet (set from a week of my host's numbers)"))
         rows.append(_row(rid, f"pressure {what}", f"{some['avg60']:.2f}%",
-                         spark(st.hist[rid], digits=2), info, detail=detail))
+                         peak(st.hist[rid], lambda v: f"{v:.2f}%"), "-", info, detail=detail))
 
 
 def _io(st: State, rows, checks, now: float) -> None:
@@ -232,14 +234,15 @@ def _io(st: State, rows, checks, now: float) -> None:
         if prev and now > prev[2] and r >= prev[0] and w >= prev[1]:
             dt = now - prev[2]
             rs, ws = (r - prev[0]) / dt, (w - prev[1]) / dt
-            st.hist[rid].append((rs + ws) / 1024)
+            st.hist[rid].append(rs + ws)
             cells = (size(rs + ws) + "/s", f"read {size(rs)}/s  write {size(ws)}/s")
         else:
             cells = ("-", "first read")
-        rows.append(_row(rid, f"io {name}", cells[0], spark(st.hist[rid]), cells[1],
+        rows.append(_row(rid, f"io {name}", cells[0],
+                         peak(st.hist[rid], lambda v: size(v) + "/s"), "-", cells[1],
                          detail=[("read since boot", size(r)),
                                  ("written since boot", size(w)),
-                                 ("trend unit", "KiB/s, read + write")]))
+                                 ("now, peak", "read + write")]))
 
 
 def _space(st: State, rows, checks, now: float) -> None:
@@ -274,8 +277,10 @@ def _space(st: State, rows, checks, now: float) -> None:
                 checks.append({"key": f"space_audit:{m}", "sev": "warn",
                                "title": f"{m} free {size(free)}: audit space low",
                                "detail": f"below auditd space_left {st.space_left:g}M"})
-        rows.append(_row(rid, m, size(free), "", f"free of {size(total)}, {used:.0f}% used",
-                         sev, detail))
+        info = f"{used:.0f}% used"
+        if m == AUDIT_MOUNT:
+            info += f"  (audit: warn < {st.space_left:g}M, crit < {st.admin_space_left:g}M)"
+        rows.append(_row(rid, m, size(free) + " free", "-", size(total), info, sev, detail))
 
 
 def _name(s, dup: bool) -> str:
@@ -318,9 +323,8 @@ def _temps(st: State, rows, checks, now: float, out: dict) -> None:
                                "detail": f"warn {warn:g} C ({src}) for {st.warn_for:g} s"})
         else:
             st.hot.pop(key, None)
-        info = "  ".join(x for x in (f"warn {warn:g}" if warn is not None else "",
-                                     f"crit {s.crit:g}" if s.crit is not None else "") if x)
-        top = s.crit or warn
+        info = (f"warn {warn:g} C, yellow after {st.warn_for:g} s" if warn is not None
+                else "no warn limit")
         detail = [("sensor", f"{s.hw} {s.device} temp{s.n}"),
                   ("label", s.label or "-"), ("now", f"{s.temp:.1f} C"),
                   ("max (sensor)", "-" if s.max is None else f"{s.max:g} C"),
@@ -330,8 +334,9 @@ def _temps(st: State, rows, checks, now: float, out: dict) -> None:
         if key in st.hot:
             detail.append(("at / over warn", f"{now - st.hot[key]:.0f} s"))
         out.setdefault("temp", (name, s.temp))
-        rows.append(_row(rid, f"temp {name}", f"{s.temp:.0f} C", spark(st.hist[rid], top),
-                         info or "no limits", sev, detail))
+        rows.append(_row(rid, f"temp {name}", f"{s.temp:.0f} C",
+                         peak(st.hist[rid], lambda v: f"{v:.0f} C"),
+                         "-" if s.crit is None else f"{s.crit:g} C", info, sev, detail))
     for key in set(st.hot) - seen:
         del st.hot[key]
 
