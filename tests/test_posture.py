@@ -332,7 +332,7 @@ class TestKinds(unittest.TestCase):
         h = FakeHost()
         c = chk(kind="wifi-ipv6", want="disabled")
         self.assertEqual(res(c, h), ("pass", "2 of 2 disabled"))         # wireguard: not wifi
-        h.answers = {"nmcli -g ipv6.method connection show da6a": Result(0, "auto\n", ""),
+        h.answers = {"nmcli -g ipv6.method connection show 0a0a": Result(0, "auto\n", ""),
                      **h.answers}
         r = kinds.check(c, cx(h), [])
         self.assertEqual((r.status, r.have), ("fail", "1 of 2 disabled"))
@@ -346,7 +346,7 @@ class TestKinds(unittest.TestCase):
         self.assertEqual(h.calls[1][1:4], ["-g", "ipv4.dhcp-send-hostname,ipv6.dhcp-send-hostname",
                                            "connection"])
         h.answers = {"nmcli -g ipv4.dhcp-send-hostname,ipv6.dhcp-send-hostname connection show "
-                     "c183": Result(0, "-1\n-1\n", ""), **h.answers}     # a new network
+                     "0b0b": Result(0, "-1\n-1\n", ""), **h.answers}     # a new network
         r = kinds.check(c, cx(h), [])
         self.assertEqual((r.status, r.have), ("fail", "1 of 2 profiles"))
         self.assertEqual(r.lines, [
