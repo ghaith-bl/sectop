@@ -354,6 +354,19 @@ Host checks 2026-10-27 (sandbox: nsenter into sectop.service as user sectop):
 - Ideas from btop (Apache-2.0, 2026-10-27): tree view, sort switching, a sort that
   follows time, a process detail with its own graph. Ideas only: own code, own keys
   (one meaning on every screen), no btop key bindings. Credit in README.
+- programs (built 2026-10-27, before services): one row per program (core/proc.py
+  name of the cgroup; a login session: `comm (session)`, no card), kernel threads left
+  out. Columns: program, procs, cpu, peak, mem (sum of rss), peak, user. By memory, top
+  30. enter = its processes (top 20 by memory: pid, comm, mem, cpu, state, threads,
+  user; no argv); c = card. The cpu and memory rows of the system box: their detail
+  names the top 8 programs, c = the card of the top one. One /proc scan per collect
+  (stat + owner; cgroup once per pid + start): ~9 ms for 460 processes in a test box,
+  my host: to measure (step 6).
+  Zombies and D processes (my ask, same day): own rows on top of the programs box
+  (`comm (zombie, parent X)`, `comm (D)`), info while new, warn + check after 60 s in
+  that state (from the first scan that saw it so; a D process that wakes up starts
+  over). A zombie is not in its program's sums; c = its parent's card (the parent must
+  reap it). Box title counts both. Max 20 rows, 10 checks + one `stuck:more`.
 - Program card (`c`): rows here carry `progs`, so the card shows a program's processes,
   units and the other screens' rows together.
 
@@ -407,10 +420,13 @@ box via polkit, confirm, deny list (see Actions).
    Fixtures in tests/fixtures/system/ (fake trees, privacy rule) with each box.
 2. system box + its checks: done 2026-10-27 (modules/system, fixtures
    tests/fixtures/system/host: fake tree, hwmon names and files as on my host).
-3. services box (cgroup, journal, watched units); posture: no second alert.
-4. processes box (scan, program, parent chain, zombies) + keys `s`, `v`.
-5. Measure sectop.service CPU before / after, docs/modules/system.md, README legend.
-6. First public release: tools, requirements, dependencies.
+3. programs box (moved up 2026-10-27, my ask: "enter or c on memory must show what
+   takes it"): done (modules/system/procs.py), see Boxes.
+4. services box (cgroup, journal, watched units); posture: no second alert.
+5. processes view (parent chain) + keys `s`, `v`, inside the programs box. Zombies and
+   `D`: done 2026-10-27 (rows on top of the programs box).
+6. Measure sectop.service CPU before / after, docs/modules/system.md, README legend.
+7. First public release: tools, requirements, dependencies.
 
 ## Alerts
 

@@ -21,7 +21,7 @@ SCREENS = (
     Screen("firewall", ("firewall",), focus="firewall/audit"),   # audit box instead of events
     Screen("security", ("security", "posture"), focus="security/commands",   # logs: phase 4
            note="modules security, posture not loaded"),
-    Screen("processes", ("system",), focus="system/system",   # services, processes: next
+    Screen("processes", ("system",), focus="system/system",   # services: next
            note="module system not loaded"),
 )
 

@@ -24,6 +24,7 @@ import time
 
 from core.module import worst
 from modules.system import host as hostmod
+from modules.system import procs as procsmod
 from modules.system.host import PSI
 
 NAME = "system"
@@ -84,6 +85,8 @@ class State:
         self.space_at = None
         self.hot = {}                    # sensor key -> mono since it is at / over warn
         self.cpus = 0
+        self.dtotal = None               # machine ticks since the last read (cpu %)
+        self.procs = procsmod.Procs()
 
 
 # --- options ---------------------------------------------------------------
@@ -150,6 +153,7 @@ def _cpu(st: State, rows, checks, out: dict) -> None:
         return
     st.cpus = cpus
     pct = None
+    st.dtotal = total - st.cpu[1] if st.cpu and total > st.cpu[1] else None
     if st.cpu and total > st.cpu[1]:
         pct = max(0.0, min(100.0, (busy - st.cpu[0]) / (total - st.cpu[1]) * 100))
         st.hist["cpu"].append(pct)
@@ -357,6 +361,40 @@ def _temps(st: State, rows, checks, now: float, out: dict) -> None:
         del st.hot[key]
 
 
+def _programs(st: State, rows, checks) -> dict:
+    """Programs box + the top programs in the detail of the cpu and memory rows (enter;
+    c = card of the top one)."""
+    panel = {"id": "programs", "title": "programs", "type": "table",
+             "columns": list(procsmod.COLUMNS), "types": list(procsmod.TYPES),
+             "roles": list(procsmod.ROLES), "rows": [], "width": "full"}
+    try:
+        progs = procsmod.scan(st.procs, st.host, st.dtotal, st.mono())
+    except OSError as e:
+        why = _err(e)
+        checks.append({"key": "read:/proc", "sev": "warn",
+                       "title": "system: /proc unreadable", "detail": why})
+        panel.update(title=f"programs: {why}", sev="warn")
+        return panel
+    known = st.dtotal is not None
+    now = st.mono()
+    panel["rows"] = procsmod.rows(st.procs, size, st.host.page, known, now=now)
+    checks.extend(procsmod.stuck_checks(st.procs, now))
+    n = sum(len(g.procs) for g in progs)
+    z = sum(1 for s in st.procs.stuck if s.p.state == "Z")
+    d = len(st.procs.stuck) - z
+    panel["title"] = (f"programs {len(progs)}  ({n} processes, zombies {z}, D {d}; by "
+                      f"memory, top {procsmod.TOP}; enter = its processes, c = card)")
+    panel["sev"] = worst(*(r["sev"] for r in panel["rows"]))
+    for r in rows:
+        by = {"cpu": "cpu", "memory": "mem"}.get(r["id"])
+        if by:
+            lines, names = procsmod.top_lines(st.procs, size, by, known)
+            r.setdefault("detail", []).extend({"k": k, "v": v} for k, v in lines)
+            if names:
+                r["progs"] = names
+    return panel
+
+
 # --- module API -------------------------------------------------------------
 
 def collect(st: State, ctx) -> dict:
@@ -369,6 +407,7 @@ def collect(st: State, ctx) -> dict:
     _io(st, rows, checks, now)
     _space(st, rows, checks, now)
     _temps(st, rows, checks, now, out)
+    progs = _programs(st, rows, checks)
 
     parts = []
     if out.get("cpu") is not None:
@@ -383,4 +422,4 @@ def collect(st: State, ctx) -> dict:
              "types": list(TYPES), "roles": list(ROLES), "rows": rows, "width": "full",
              "sev": worst(*(r["sev"] for r in rows))}
     return {"v": 2, "status": worst(*(c["sev"] for c in checks)), "summary": summary,
-            "panels": [panel], "events": [], "checks": checks}
+            "panels": [panel, progs], "events": [], "checks": checks}

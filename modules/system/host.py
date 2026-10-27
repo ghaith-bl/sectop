@@ -129,6 +129,8 @@ def wanted(rules, hw: str, label: str) -> bool:
 class Host:
     """Files under root ("/" on the host)."""
 
+    page = os.sysconf("SC_PAGE_SIZE")
+
     def __init__(self, root: str = "/"):
         self.root = root
 
@@ -152,6 +154,27 @@ class Host:
         """-> (free bytes for non-root, size bytes)."""
         st = os.statvfs(self.path(p))
         return st.f_bavail * st.f_frsize, st.f_blocks * st.f_frsize
+
+    def procs(self) -> list:
+        """Every process now: [(Proc, uid)]. Gone between listdir and read: skipped.
+        uid from the /proc/<pid> owner (os.stat, no open)."""
+        out = []
+        for name in os.listdir(self.path("/proc")):
+            if not name.isdigit():
+                continue
+            try:
+                p = proc_stat(self.read(f"/proc/{name}/stat"), int(name))
+                uid = os.stat(self.path(f"/proc/{name}")).st_uid
+            except (OSError, ValueError, IndexError):
+                continue
+            out.append((p, uid))
+        return out
+
+    def cgroup(self, pid: int) -> str:
+        try:
+            return cgroup_path(self.read(f"/proc/{pid}/cgroup"))
+        except OSError:
+            return ""
 
     def disks(self) -> list:
         return whole_disks(self.listdir("/sys/block"))
@@ -185,3 +208,34 @@ class Host:
                                   limit(self.maybe(f"{d}/temp{n}_crit"))))
         order = {r.partition(":")[0]: i for i, r in reversed(list(enumerate(rules)))}
         return sorted(out, key=lambda s: (order.get(s.hw, 99), s.device, int(s.n)))
+
+
+# --- processes (programs box, docs/architecture.md, Processes screen) -------------
+
+@dataclass(frozen=True)
+class Proc:
+    pid: int
+    comm: str
+    state: str           # R S D Z T I ...
+    ppid: int
+    ticks: int           # utime + stime, USER_HZ (same unit as /proc/stat)
+    rss: int             # pages
+    threads: int
+    start: int           # starttime, ticks after boot (pid + start = one process)
+
+
+def proc_stat(text: str, pid: int) -> Proc:
+    """/proc/<pid>/stat -> Proc. comm sits in ( ) and may hold spaces and ')'."""
+    lo, hi = text.index("("), text.rindex(")")
+    f = text[hi + 2:].split()                   # f[0] = field 3 (state)
+    return Proc(pid, text[lo + 1:hi], f[0], int(f[1]), int(f[11]) + int(f[12]),
+                int(f[21]), int(f[17]), int(f[19]))
+
+
+def cgroup_path(text: str) -> str:
+    """/proc/<pid>/cgroup -> the cgroup v2 path ("0::/..."), "" if none."""
+    for line in text.splitlines():
+        if line.startswith("0::"):
+            return line[3:].strip()
+    return ""
+

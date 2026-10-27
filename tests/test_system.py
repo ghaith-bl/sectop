@@ -254,6 +254,165 @@ class TestModule(Base):
         self.assertEqual(rows(self.collect(2000.0))[rid]["cells"][1:3], ["40 C", "40 C"])
 
 
+
+def stat(pid, comm, ppid, ticks, rss, state="S", threads=1, start=100):
+    """A /proc/<pid>/stat line (fields after comm: state ppid ... utime stime ...)."""
+    f = [state, str(ppid)] + ["0"] * 9 + [str(ticks), "0"] + ["0"] * 4 + [str(threads), "0",
+                                                                         str(start), "0", str(rss)]
+    return f"{pid} ({comm}) " + " ".join(f) + " 0 0\n"
+
+
+class TestPrograms(Base):
+    """Programs box: one row per program (fake processes, names generic)."""
+
+    PROCS = {   # pid: (comm, ppid, ticks, rss pages, cgroup)
+        1: ("systemd", 0, 50, 3000, "/init.scope"),
+        2: ("kthreadd", 0, 0, 0, "/"),
+        30: ("kworker/0:1", 2, 900, 0, "/"),
+        800: ("firefox", 1, 1000, 100000, "/user.slice/user-1000.slice/user@1000.service/"
+                                         "app.slice/app-org.mozilla.firefox-1234.scope"),
+        801: ("Web Content", 800, 200, 50000, "/user.slice/user-1000.slice/user@1000.service/"
+                                              "app.slice/app-org.mozilla.firefox-1234.scope"),
+        900: ("bash", 1, 10, 1000, "/user.slice/user-1000.slice/session-2.scope"),
+        950: ("auditd", 1, 30, 2000, "/system.slice/auditd.service"),
+    }
+
+    def setUp(self):
+        super().setUp()
+        self.h.page = 4096
+        for pid, (comm, ppid, ticks, rss, cg) in self.PROCS.items():
+            self.proc(pid, comm, ppid, ticks, rss, cg)
+
+    def proc(self, pid, comm, ppid, ticks, rss, cg=None, start=100):
+        d = os.path.join(self.root, "proc", str(pid))
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "stat"), "w") as f:
+            f.write(stat(pid, comm, ppid, ticks, rss, start=start))
+        if cg is not None:
+            with open(os.path.join(d, "cgroup"), "w") as f:
+                f.write(f"0::{cg}\n")
+
+    def programs(self, snap):
+        return {r["id"]: r for r in snap["panels"][1]["rows"]}
+
+    def test_rows(self):
+        snap = self.collect()
+        p = self.programs(snap)
+        self.assertEqual(list(p), ["prog:org.mozilla.firefox", "prog:init", "prog:auditd",
+                                   "prog:bash (session)"])        # by memory, no kernel
+        ff = p["prog:org.mozilla.firefox"]
+        self.assertEqual(ff["cells"], ["org.mozilla.firefox", "2", "-", "0.0%", "586M",
+                                       "586M", ff["cells"][6]])
+        self.assertEqual((ff["progs"], ff["filter"]), (["org.mozilla.firefox"],
+                                                        "org.mozilla.firefox"))
+        d = [it["v"] for it in ff["detail"]]
+        self.assertEqual(d[0], "2, top 2 by memory")
+        self.assertTrue(d[1].startswith("firefox  391M  - cpu  S  1 threads"))
+        self.assertNotIn("progs", p["prog:bash (session)"])        # a session: no card
+        self.assertEqual(snap["panels"][1]["roles"],
+                         ["name", "note", "value", "peak", "value", "peak", "note"])
+
+    def test_cpu_and_peak(self):
+        self.collect()
+        # machine +1000 ticks; firefox +100 +50, auditd +10
+        self.write("/proc/stat", "cpu  100200 400 40050 4600750 2600 11000 5000 0 0 0\n")
+        self.proc(800, "firefox", 1, 1100, 100000)
+        self.proc(801, "Web Content", 800, 250, 50000)
+        self.proc(950, "auditd", 1, 40, 2000)
+        p = self.programs(self.collect(1005.0))
+        self.assertEqual(p["prog:org.mozilla.firefox"]["cells"][2:4], ["15%", "15%"])
+        self.assertEqual(p["prog:auditd"]["cells"][2], "1.0%")
+        self.proc(800, "firefox", 1, 1100, 10000)                 # idle now, less memory
+        self.write("/proc/stat", "cpu  100300 400 40050 4601650 2600 11000 5000 0 0 0\n")
+        p = self.programs(self.collect(1010.0))
+        ff = p["prog:org.mozilla.firefox"]["cells"]
+        self.assertEqual((ff[2], ff[3], ff[4], ff[5]), ("0.0%", "15%", "234M", "586M"))
+
+    def test_pid_reuse(self):
+        self.collect()
+        self.write("/proc/stat", "cpu  100200 400 40050 4600750 2600 11000 5000 0 0 0\n")
+        self.proc(950, "other", 1, 5000, 2000, "/system.slice/other.service", start=900)
+        p = self.programs(self.collect(1005.0))
+        self.assertIn("prog:other", p)                            # new cgroup read
+        self.assertEqual(p["prog:other"]["cells"][2], "0.0%")     # no delta from auditd
+
+    def test_cpu_and_memory_rows_name_the_top(self):
+        snap = self.collect()
+        r = rows(snap)
+        mem = {it["k"]: it["v"] for it in r["memory"]["detail"]}
+        self.assertEqual(mem["top 1"], "org.mozilla.firefox  586M  (2 procs)")
+        self.assertEqual(r["memory"]["progs"], ["org.mozilla.firefox", "init", "auditd"])
+        cpu = {it["k"]: it["v"] for it in r["cpu"]["detail"]}
+        self.assertEqual(cpu["top programs"], "after the next scan")
+        self.write("/proc/stat", "cpu  100200 400 40050 4600750 2600 11000 5000 0 0 0\n")
+        self.proc(950, "auditd", 1, 130, 2000)
+        r = rows(self.collect(1005.0))
+        cpu = {it["k"]: it["v"] for it in r["cpu"]["detail"]}
+        self.assertEqual(cpu["top 1"], "auditd  10%  (1 procs)")
+        self.assertEqual(r["cpu"]["progs"][0], "auditd")
+
+    def stuck(self, pid, comm, ppid, state, cg=None, rss=0):
+        d = os.path.join(self.root, "proc", str(pid))
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "stat"), "w") as f:
+            f.write(stat(pid, comm, ppid, 0, rss, state=state))
+        if cg is not None:
+            with open(os.path.join(d, "cgroup"), "w") as f:
+                f.write(f"0::{cg}\n")
+
+    def test_zombie(self):
+        self.stuck(990, "defunct-child", 800, "Z")
+        snap = self.collect(1000.0)
+        p = self.programs(snap)
+        z = p["stuck:990:100"]
+        self.assertEqual(list(p)[0], "stuck:990:100")               # on top
+        self.assertEqual(z["cells"][:2], ["defunct-child (zombie, parent firefox)", "1"])
+        self.assertEqual((z["sev"], z["progs"]), ("info", ["org.mozilla.firefox"]))
+        d = {it["k"]: it for it in z["detail"]}
+        self.assertEqual(d["parent"]["v"], "pid 800 firefox (org.mozilla.firefox)")
+        self.assertEqual(p["prog:org.mozilla.firefox"]["cells"][1], "2")   # not counted
+        self.assertNotIn("stuck:990:100", keys(snap))
+        self.assertIn("zombies 1, D 0", snap["panels"][1]["title"])
+        snap = self.collect(1060.0)
+        z = self.programs(snap)["stuck:990:100"]
+        self.assertEqual(z["sev"], "warn")
+        self.assertEqual({it["k"]: it for it in z["detail"]}["state"]["sev"], "warn")
+        c = keys(snap)["stuck:990:100"]
+        self.assertEqual(c["title"], "zombie defunct-child pid 990 for 60 s, parent firefox "
+                                     "pid 800")
+        shutil.rmtree(os.path.join(self.root, "proc", "990"))       # reaped
+        snap = self.collect(1065.0)
+        self.assertNotIn("stuck:990:100", self.programs(snap))
+        self.assertNotIn("stuck:990:100", keys(snap))
+
+    def test_d_state_restarts_when_it_wakes(self):
+        cg = "/system.slice/backup.service"
+        self.stuck(960, "rsync", 1, "D", cg, rss=500)
+        self.collect(1000.0)
+        self.stuck(960, "rsync", 1, "S", cg, rss=500)                 # woke up
+        self.collect(1030.0)
+        self.stuck(960, "rsync", 1, "D", cg, rss=500)
+        snap = self.collect(1060.0)
+        r = self.programs(snap)["stuck:960:100"]
+        self.assertEqual((r["cells"][0], r["sev"], r["progs"]), ("rsync (D)", "info",
+                                                                  ["backup"]))
+        self.assertEqual(self.programs(snap)["prog:backup"]["cells"][1], "1")   # still summed
+        self.assertEqual(keys(self.collect(1120.0))["stuck:960:100"]["sev"], "warn")
+
+    def test_many_stuck_one_more_check(self):
+        for pid in range(3000, 3015):
+            self.stuck(pid, "z", 1, "Z")
+        self.collect(1000.0)
+        k = keys(self.collect(1060.0))
+        self.assertEqual(len([x for x in k if x.startswith("stuck:3")]), 10)
+        self.assertEqual(k["stuck:more"]["title"], "5 more zombie / D processes")
+
+    def test_parse_stat(self):
+        p = host.proc_stat(stat(5, "a (b) c", 1, 7, 9, state="D", threads=3, start=44), 5)
+        self.assertEqual((p.comm, p.state, p.ppid, p.ticks, p.rss, p.threads, p.start),
+                         ("a (b) c", "D", 1, 7, 9, 3, 44))
+
+
 class TestOptions(unittest.TestCase):
     def test_defaults(self):
         st = system.init({})
