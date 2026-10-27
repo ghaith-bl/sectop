@@ -1,7 +1,7 @@
 # firewall module
 
 hostfw + VPN tunnel (Mullvad WireGuard) status. `modules/firewall/`.
-Parsers (`nft.py`, `journal.py`, `conns.py`, `vpn.py`) are pure. `__init__.py` runs
+Parsers (`nft.py`, `journal.py`, `conns.py`, `vpn.py`) and `track.py` are pure. `__init__.py` runs
 commands, applies rules, builds the Snapshot.
 
 ## Sources
@@ -94,8 +94,10 @@ Log kind = counter name: `HFW-OUT-LEAK` -> `out_leak`, `HFW-FWD-VM-LAN` -> `fwd_
   packets (docs/module-interface.md, Alerts). Module status = this tick only. Counter rows
   keep the kind's color for `hold` s (display).
 - Context decides (2026-10-20):
-  - out_leak: crit, info while `pre-connect` (tunnel down, no tunnel flow yet this boot).
-    Same context as the out_leak box (live rule). Title `new out_leak (<context>)`.
+  - out_leak: crit, info while `pre-connect`. Context = the worst context of this tick's
+    leak lines (out_leak box, each at its own time). No line this tick (rate limit, lag):
+    tunnel up at both ends of the tick window = `tunnel up`; first tunnel flow in the
+    window or later = `pre-connect`; else `tunnel down`. Title `new out_leak (<context>)`.
   - in_vpn: warn, info when every in_vpn line of the tick is from a peer this host talked
     to (an allowed flow logged, or a socket open now): late replies after a flow closed.
     No line this tick (rate limit, lag) -> warn, source unknown.
@@ -241,12 +243,19 @@ Leak lines of this boot, newest first, last 8 shown (100 kept). Title: `out_leak
 
 | context | when | sev |
 |---|---|---|
-| pre-connect | before the first tunnel flow (scan), or tunnel down and no flow yet (live) | info (expected: programs that start before the VPN connects) |
-| tunnel up | live, tunnel up at that tick | crit |
-| tunnel down | live, tunnel down after the first flow (reconnect window) | crit |
-| after connect | scan, after the first flow (tunnel state then unknown) | crit |
+| pre-connect | line before the first tunnel flow of the boot (scan and live), tunnel not seen up around it | info (expected: programs that start before the VPN connects) |
+| tunnel up | live, tunnel up at the ticks before and after the line | crit |
+| tunnel down | live, after the first flow, tunnel down or switching around the line (reconnect window) | crit |
+| after connect | after the first flow, before sectop watched the tunnel (scan, or a live line older than the first tick) | crit |
 | unknown | first-flow query failed | crit |
 
+- Context at line time (2026-10-27): `modules/firewall/track.py` keeps the tunnel state
+  per tick; between two ticks with different states it is "switching". A line is read
+  a tick (or more) after it was written, so the state at read time is wrong: on
+  2026-10-26 pre-connect lines read on the tick the tunnel came up showed `tunnel up`
+  (crit). First tunnel flow = the earliest `HFW-OUT-NEW` of the tick, before its leak
+  lines (journal order is not time order). A live line up to 5 s older than the first
+  tick still gets the first tick's state (journal lag).
 - Row detail: meaning of the context, time after boot, then the audit detail of the line.
 - Limit: hostfw reloaded mid-boot -> `HFW-OUT-NEW` starts later, older leaks may show
   `pre-connect`. Alerts still come from counter deltas (Severity).

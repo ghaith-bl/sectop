@@ -26,7 +26,7 @@ import time
 from core import netd
 from core.module import MAX_PROGS as ROW_PROGS, PROG_RE, SEV_RANK, worst
 from core.run import run as _run
-from modules.firewall import conns, journal, nft, vpn
+from modules.firewall import conns, journal, nft, track, vpn
 
 NAME = "firewall"
 INTERVAL = netd.FW_INTERVAL
@@ -101,9 +101,12 @@ CONTEXT_NOTE = {
     "tunnel up": "the tunnel was up: a program sent around it",
     "tunnel down": "the tunnel was down after it had been up (reconnect window)",
     "after connect": "after the first flow via the tunnel this boot, before sectop "
-                     "started: tunnel state at that time unknown",
+                     "watched the tunnel: tunnel state at that time unknown",
     "unknown": "first tunnel flow unknown (boot scan failed)",
 }
+# worst first: the context of a counter delta with several leak lines this tick
+CONTEXT_RANK = {"tunnel up": 4, "tunnel down": 3, "after connect": 2, "unknown": 2,
+                "pre-connect": 0}
 CONTEXT_SEV = {"out_leak": "crit, info pre-connect",            # counter detail text
                "in_vpn": "warn, info for late replies from known peers"}
 # what each hostfw counter matches (silverblue-cis-hardening firewall/docs/rules.md)
@@ -190,6 +193,8 @@ class State:
         self.recent = {}               # counter name -> deque of (ts, summary), newest first
         self.leak_seen = set()         # cursors from the boot scan (live reader skips them)
         self.tunnel_first = None       # epoch of the first HFW-OUT-NEW line this boot
+        self.track = track.Track()     # tunnel state per tick (context at line time)
+        self.tick_ctx = []             # contexts of this tick's live leak lines
         self.boot = None               # boot time, epoch (from /proc/uptime)
         self.boot_note = ""            # boot scan problem, shown in the out_leak title
         self.slow_at = None            # mono time the slow sources are due again
@@ -463,11 +468,28 @@ def _counter_panel(st: State, counters: dict | None, deltas: dict, now: float,
             "columns": list(COUNTER_COLUMNS), "types": list(COUNTER_TYPES), "rows": rows}
 
 
-def _leak_ctx(st: State, up: bool) -> str:
-    """Context of a live out_leak (same rule as the out_leak box)."""
-    if up:
+def _line_ctx(st: State, ts: float) -> str:
+    """Context of a live leak line, from the tunnel state at the line's own time."""
+    state = st.track.at(ts)
+    if state == "up":
         return "tunnel up"
-    return "pre-connect" if st.tunnel_first is None else "tunnel down"
+    if st.tunnel_first is None or ts < st.tunnel_first:
+        return "pre-connect"
+    return "after connect" if state is None else "tunnel down"
+
+
+def _leak_ctx(st: State) -> str:
+    """Context of this tick's out_leak counter delta: the worst context of this tick's
+    leak lines (their own time). No line this tick (rate limit, lag): the tick window."""
+    if st.tick_ctx:
+        return max(st.tick_ctx, key=CONTEXT_RANK.__getitem__)
+    state = st.track.window()
+    if state == "up":
+        return "tunnel up"
+    prev = st.track.prev
+    if st.tunnel_first is None or (prev is not None and st.tunnel_first > prev[0]):
+        return "pre-connect"              # first tunnel flow in this window or later
+    return "tunnel down"
 
 
 def _in_vpn(st: State, entries: list, cs: list) -> tuple:
@@ -501,7 +523,7 @@ def _new_checks(st: State, deltas: dict, up: bool, vpn_in: tuple, now: float,
             continue
         title, detail = f"new {name}", f"+{d} pkt this tick; {MATCH.get(name, name)}"
         if name == "out_leak":
-            ctx = _leak_ctx(st, up)
+            ctx = _leak_ctx(st)
             sev = "info" if ctx == "pre-connect" else "crit"
             title += f" ({ctx})"
             detail += f"; {CONTEXT_NOTE[ctx]}"
@@ -805,17 +827,19 @@ def _boot_scan(st: State) -> None:
     st.boot_note = "boot scan: " + ", ".join(problems) if problems else ""
 
 
-def _leak_box(st: State, entries: list, up: bool, total, live: str) -> dict:
-    """out_leak box: boot scan + live leak lines, newest first, with context."""
+def _leak_box(st: State, entries: list, up: bool, total, live: str, wall: float) -> dict:
+    """out_leak box: boot scan + live leak lines, newest first, with context at line time."""
+    st.track.add(wall, up)
+    if st.tunnel_first is None:
+        news = [e.ts for e in entries if e.kind == "out_new"]
+        if news:
+            st.tunnel_first = min(news)   # before the leak lines: journal order is not ts order
+    st.tick_ctx = []
     for e in entries:
-        if e.kind == "out_new" and st.tunnel_first is None:
-            st.tunnel_first = e.ts
         if e.kind != "out_leak" or e.cursor in st.leak_seen:
             continue
-        if up:
-            ctx = "tunnel up"
-        else:
-            ctx = "pre-connect" if st.tunnel_first is None else "tunnel down"
+        ctx = _line_ctx(st, e.ts)
+        st.tick_ctx.append(ctx)
         st.leaks.appendleft((e, ctx))
     rows = []
     for e, ctx in list(st.leaks)[:LEAK_ROWS]:
@@ -1141,8 +1165,9 @@ def collect(st: State, ctx) -> dict:
     if deltas:
         st.blocked.append(blocked)
 
-    # the leak box sets the first tunnel flow: before the out_leak context
-    leak = _safe(lambda: _leak_box(st, entries, up, totals.get("out_leak"), live),
+    # the leak box sets the first tunnel flow, the tunnel track and this tick's leak
+    # contexts: before the out_leak check
+    leak = _safe(lambda: _leak_box(st, entries, up, totals.get("out_leak"), live, wall),
                  "leak", checks,
                  lambda e: {"id": "leak", "title": f"out_leak: {e}", "type": "table",
                             "columns": list(LEAK_COLUMNS), "types": list(LEAK_TYPES), "rows": [], "sev": "warn"})

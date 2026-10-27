@@ -1254,19 +1254,66 @@ class TestLeakBox(Base):
         self.host.set("journalctl", ok(jline("b1", self.BOOT + 12, LEAK.format(spt=1)) +
                                        jline("l2", self.BOOT + 700, LEAK.format(spt=2))))
         s = self.collect()                                   # b1 again: follower from start
-        self.assertEqual([r[0][-1] for r in self.rows(s)], ["tunnel up", "pre-connect"])
+        self.assertEqual([r[0][-1] for r in self.rows(s)], ["after connect", "pre-connect"])
+        self.tick()                                          # l2: before sectop watched
+        self.host.set("journalctl", ok(jline("l3", self.wall - 1, LEAK.format(spt=3))))
+        s = self.collect()
+        self.assertEqual([r[0][-1] for r in self.rows(s)],
+                         ["tunnel up", "after connect", "pre-connect"])
         self.assertEqual(self.rows(s)[0][1], "crit")
 
     def test_live_tunnel_down(self):
         for key in ("wg latest-handshakes", "wg transfer", "wg endpoints", "wg fwmark"):
             self.host.set(key, NO_DEV)
         self.boot()
-        self.host.set("journalctl", ok(jline("l1", self.BOOT + 20, LEAK.format(spt=1))))
+        self.host.set("journalctl", ok(jline("l1", self.wall - 1, LEAK.format(spt=1))))
         self.assertEqual(self.rows(self.collect())[0][0][-1], "pre-connect")
-        self.host.set("journalctl", ok(jline("n9", self.BOOT + 30, NEW) +
-                                       jline("l2", self.BOOT + 31, LEAK.format(spt=2))))
+        self.tick()
+        self.host.set("journalctl", ok(jline("n9", self.wall - 1.5, NEW) +
+                                       jline("l2", self.wall - 1, LEAK.format(spt=2))))
         self.assertEqual(self.rows(self.collect())[0][0][-1], "tunnel down")
-        self.assertEqual(self.st.tunnel_first, self.BOOT + 30)
+        self.assertEqual(self.st.tunnel_first, self.wall - 1.5)
+
+    def test_connect_tick_pre_connect(self):
+        """2026-10-26: pre-connect lines read on the tick the tunnel came up were
+        `tunnel up` (crit). Context = state at line time."""
+        down = ("wg latest-handshakes", "wg transfer", "wg endpoints", "wg fwmark")
+        saved = {k: self.host.answers[k] for k in down}
+        for key in down:
+            self.host.set(key, NO_DEV)
+        self.boot()
+        self.collect()                                       # tunnel down, no flow yet
+        self.tick()
+        for key, res in saved.items():
+            self.host.set(key, res)                          # tunnel up on this tick
+        self.host.set("journalctl", ok(jline("l1", self.wall - 1.5, LEAK.format(spt=1)) +
+                                       jline("n1", self.wall - 1, NEW)))
+        self.bump("out_leak", 1)
+        s = self.collect()
+        self.assertEqual(self.rows(s), [
+            (["t745", "1000", "tcp", "203.0.113.11:443", "wlo1", "pre-connect"], "info")])
+        c = next(c for c in s["checks"] if c["key"] == "new:out_leak")
+        self.assertEqual((c["sev"], c["title"]), ("info", "new out_leak (pre-connect)"))
+
+    def test_counter_without_line_in_connect_window(self):
+        down = ("wg latest-handshakes", "wg transfer", "wg endpoints", "wg fwmark")
+        saved = {k: self.host.answers[k] for k in down}
+        for key in down:
+            self.host.set(key, NO_DEV)
+        self.boot()
+        self.collect()
+        self.tick()
+        for key, res in saved.items():
+            self.host.set(key, res)
+        self.host.set("journalctl", ok(jline("n1", self.wall - 1, NEW)))
+        self.bump("out_leak", 2)                             # leak lines rate limited
+        c = next(c for c in self.collect()["checks"] if c["key"] == "new:out_leak")
+        self.assertEqual((c["sev"], c["title"]), ("info", "new out_leak (pre-connect)"))
+        self.tick()
+        self.host.set("journalctl", ok(""))
+        self.bump("out_leak", 1)                             # up for the whole window
+        c = next(c for c in self.collect()["checks"] if c["key"] == "new:out_leak")
+        self.assertEqual((c["sev"], c["title"]), ("crit", "new out_leak (tunnel up)"))
 
     def test_boot_scan_error(self):
         self.host.set("journalctl --grep=^HFW-OUT-NEW:", fail("Failed to open journal"))
