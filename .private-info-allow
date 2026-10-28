@@ -8,9 +8,10 @@
 username   *        \(null\)
 username   tests/*  (?:/var)?/home/null|user=null
 home-path  tests/*  /var/home/null
-# Home LAN (private /24) and the wifi card name: low risk, kept as real examples.
+# Home LAN (private /24) and the wifi / cable card names: low risk, kept as real
+# examples. The local-ip rule is used only while the current address is in the repo.
 local-ip   *        192\.168\.8\.\d{1,3}
-iface      *        wlo1
+iface      *        wlo1|enp44s0
 
 # --- generic patterns ---
 # Private and special ranges written without a prefix: RFC 1918, CGNAT,
