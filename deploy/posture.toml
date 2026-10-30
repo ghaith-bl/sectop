@@ -203,7 +203,7 @@ kind = "sysctl"
 sev = "warn"
 why = "kernel sysctls of 90-hardening.conf"
 # net.core.bpf_jit_harden: root-only file (0600), not checked
-values = { "kernel.dmesg_restrict" = "1", "kernel.kptr_restrict" = "2", "kernel.yama.ptrace_scope" = "1", "kernel.randomize_va_space" = "2", "kernel.kexec_load_disabled" = "1", "kernel.unprivileged_bpf_disabled" = "1", "fs.suid_dumpable" = "0", "fs.protected_hardlinks" = "1", "fs.protected_symlinks" = "1" }
+values = { "kernel.dmesg_restrict" = "1", "kernel.kptr_restrict" = "2", "kernel.yama.ptrace_scope" = "2", "kernel.randomize_va_space" = "2", "kernel.kexec_load_disabled" = "1", "kernel.unprivileged_bpf_disabled" = "1", "fs.suid_dumpable" = "0", "fs.protected_hardlinks" = "1", "fs.protected_symlinks" = "1" }
 
 [[check]]
 id = "sysctl-ipv4"
