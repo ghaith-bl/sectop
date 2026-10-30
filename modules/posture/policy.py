@@ -37,7 +37,7 @@ KINDS = {
     "cmdline": ({"want"}, set()),
     "units": ({"units"}, set()),
     "failed-units": (set(), set()),
-    "listeners": ({"allow"}, {"wireguard"}),
+    "listeners": ({"allow"}, {"wireguard", "tunnel_owner"}),
     "taint": ({"want"}, set()),
     "luks": ({"path"}, set()),
     "secureboot": (set(), set()),
@@ -90,6 +90,7 @@ class Check:
     owner: str = ""
     max_days: int = 0
     wireguard: str = ""             # listeners: tunnel whose listen-port is allowed
+    tunnel_owner: str = ""          # listeners: program of a userspace tunnel's socket
     types: tuple = ()               # nm-props: NetworkManager profile types
     props: tuple = ()               # nm-props: ((property, want "a|b"), ...)
 
@@ -187,6 +188,12 @@ def _check(t, i: int, path: str, seen: set) -> Check:
         if not isinstance(wgi, str) or (wgi and not IFACE_RE.fullmatch(wgi)):
             raise ConfigError(f"{w}.wireguard: interface name required")
         args["wireguard"] = wgi
+        owner = t.get("tunnel_owner", "")
+        if not isinstance(owner, str) or (owner and not NAME_RE.fullmatch(owner)):
+            raise ConfigError(f"{w}.tunnel_owner: program name required")
+        if owner and not wgi:
+            raise ConfigError(f"{w}.tunnel_owner: needs wireguard")
+        args["tunnel_owner"] = owner
     if kind == "nm-props":
         types = _texts(t["types"], f"{w}.types", empty=False)
         if any(not NAME_RE.fullmatch(x) for x in types):

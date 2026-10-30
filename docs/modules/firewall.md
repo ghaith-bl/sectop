@@ -33,6 +33,13 @@ Slow (every 30 s, and at once when the tunnel goes up / down):
 | fwmark set | `nft -j list set inet hostfw wg_fwmark` |
 | kill switch | `nft -j -t list table inet mullvad` (filter chain policies) |
 
+Userspace tunnel (2026-10-30): Mullvad with DAITA runs WireGuard in the daemon (GotaTun)
+on a tun device, so `wg show` has no device. `wg show` fails + `/sys/class/net/<tunnel>/tun_flags`
+exists (tun device; kernel WireGuard has none) + `flags` has IFF_UP -> tunnel `up
+(userspace)`, item `wg data: none`, no `tunnel_down` check. No handshake, transfer,
+endpoint or live fwmark then; the fwmark set is shown, no mismatch claim (no live mark).
+Change between kernel and userspace = slow sources run again at once.
+
 - Why few: sectop v1 ran as root from my login, so every command was an audit record
   (rule `root_cmds`, ~7 journal entries each). Was 11 commands per tick. See
   docs/architecture.md, Privilege split.

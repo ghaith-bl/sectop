@@ -363,6 +363,10 @@ allow = ["udp 192.168.122.1:53", "tcp 192.168.122.1:53", "udp 0.0.0.0:67"]
 # WireGuard wg0-mullvad (Mullvad): the port can change on every connect: its udp 0.0.0.0 /
 # [::] port is taken from `wg show wg0-mullvad listen-port` (net unit), not a glob here.
 wireguard = "wg0-mullvad"
+# Mullvad with DAITA runs WireGuard in userspace (tun device): wg show has no port, the
+# socket belongs to the daemon (ss --cgroup). Only udp 0.0.0.0 / [::] of this program,
+# only while wg0-mullvad exists (host 2026-10-30).
+tunnel_owner = "mullvad-daemon"
 
 # ---- network identity (silverblue-cis-hardening netprivacy, 2026-10-27) ----
 # Random MAC on every connect, no hostname on any network, LLMNR + mDNS off.

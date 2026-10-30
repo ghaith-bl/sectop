@@ -4,7 +4,7 @@ Each takes the check (policy.Check) and the collect context (Cx: host access, th
 audit counts, per-collect caches) and returns a Res: pass / fail / unknown, what was
 found (`have`, one short line) and detail lines. Reads files where a file exists;
 commands only where there is no file (systemctl, firewall-cmd, nmcli, rpm-ostree,
-hostnamectl),
+hostnamectl, ss for socket owners),
 fixed argv, run as user sectop. Nothing here changes the host.
 """
 
@@ -19,6 +19,7 @@ import time
 from dataclasses import dataclass, field
 
 from core import netd
+from core.proc import program
 from core.run import Result
 from core.run import run as core_run
 from modules.security.kernel import letters
@@ -28,6 +29,7 @@ FIREWALL_CMD = "/usr/bin/firewall-cmd"
 NMCLI = "/usr/bin/nmcli"
 RPM_OSTREE = "/usr/bin/rpm-ostree"
 HOSTNAMECTL = "/usr/bin/hostnamectl"
+SS = netd.bin_path("ss")
 TIMEOUT = 5.0                      # per command; a whole collect stays well under INTERVAL
 OSTREE_TIMEOUT = 15.0
 OSTREE_EVERY = 86400.0             # rpm-ostree status: once a day (architecture: updates)
@@ -52,6 +54,8 @@ HOSTNAMES = ("Hostname", "StaticHostname", "DefaultHostname")   # hostnamectl --
 MAX_LINES = 12                     # detail lines per check
 MAX_READ = 1024 * 1024
 KV_RE = r"^\s*{}\s*=\s*(.*?)\s*$"
+CGROUP_RE = re.compile(r"(?:^|\s)cgroup:(\S+)")
+WILD_UDP = ("udp 0.0.0.0:", "udp [::]:")
 
 
 @dataclass
@@ -666,6 +670,49 @@ def listening(cx: Cx) -> list:
     return sorted(out)
 
 
+def _ss_key(proto: str, local: str) -> str | None:
+    """ss local address -> the listening() form. '0.0.0.0%virbr0:67', '*:52880' (IPv6
+    socket on any address), '[::]:22', '[fe80::1]%wlo1:546'. Bad: None."""
+    host, sep, port = local.rpartition(":")
+    if not sep or not port.isdigit():
+        return None
+    host = host.split("%", 1)[0].strip("[]")
+    try:
+        ip = ipaddress.ip_address("::" if host == "*" else host)
+    except ValueError:
+        return None
+    return f"{proto} {ip}:{port}" if ip.version == 4 else f"{proto} [{ip}]:{port}"
+
+
+def owners(cx: Cx) -> tuple:
+    """-> ({"proto addr:port": (program, ...)}, error or ''). `ss -Htuln --cgroup`:
+    program = innermost systemd unit of the socket's cgroup (core/proc.py), no
+    CAP_SYS_PTRACE (same as the firewall screen). A socket without a cgroup in ss:
+    not in the result."""
+    res = cx.host.run([SS, "-Htuln", "--cgroup"])
+    if res.rc != 0 or res.timed_out:
+        return {}, f"ss: {_fail_run(res)}"
+    out = {}
+    for line in res.out.splitlines():
+        t = line.split()
+        if not t or t[0] not in ("tcp", "udp"):
+            continue
+        # [state] recv-q send-q local peer: the state column only without a state filter
+        i = next((j for j in range(1, len(t) - 2) if t[j].isdigit() and t[j + 1].isdigit()),
+                 None)
+        m = CGROUP_RE.search(line)
+        key = _ss_key(t[0], t[i + 2]) if i is not None else None
+        name = program(m.group(1)) if m else None
+        if key and name and name not in out.get(key, ()):
+            out[key] = out.get(key, ()) + (name,)
+    return out, ""
+
+
+def _named(s: str, own: dict) -> str:
+    names = own.get(s)
+    return f"{s}  {', '.join(names)}" if names else s
+
+
 def wg_port(cx: Cx, tunnel: str) -> tuple:
     """-> (port or None, note). `wg show <tunnel> listen-port` from the net unit's file
     (core/netd.py: wg needs CAP_NET_ADMIN even to read). The VPN tunnel's port can
@@ -682,24 +729,36 @@ def k_listeners(c, cx: Cx) -> Res:
         socks = listening(cx)
     except OSError as e:
         return Res("unknown", _err(e), source="/proc/net")
-    wg, lines = set(), []
+    own, own_err = owners(cx)
+    wg, lines, user_wg = set(), [], ""
     if c.wireguard:
         port, note = wg_port(cx, c.wireguard)
         lines.append(("wireguard", note))
         if port is not None:
             wg = {f"udp 0.0.0.0:{port}", f"udp [::]:{port}"}
+        elif c.tunnel_owner and cx.host.exists(f"{NET}/{c.wireguard}"):
+            # userspace tunnel (tun device, Mullvad DAITA): no kernel port; its socket
+            # belongs to the VPN daemon's unit
+            user_wg = c.tunnel_owner
+            lines.append(("wireguard", f"{c.wireguard} present, no kernel port: udp 0.0.0.0 "
+                                       f"/ [::] of {user_wg} allowed (userspace tunnel)"))
+    if own_err:
+        lines.append(("programs", own_err))
     extra, ok = [], []
     for s in socks:
         if s in wg:
             ok.append(("allowed", f"{s} ({c.wireguard})"))
+        elif user_wg and s.startswith(WILD_UDP) and own.get(s) == (user_wg,):
+            ok.append(("allowed", f"{s} ({c.wireguard}, {user_wg})"))
         elif any(fnmatch.fnmatchcase(s, a) for a in c.allow):
-            ok.append(("allowed", s))
+            ok.append(("allowed", _named(s, own)))
         else:
             extra.append(s)
     res = Res("fail" if extra else "pass",
               f"{len(extra)} not allowed" if extra else f"{len(socks)} listening, all allowed",
-              source="/proc/net/{tcp,tcp6,udp,udp6}" + (", wg (net unit)" if c.wireguard else ""))
-    res.lines = ([("not allowed", s) for s in extra] + lines + ok)[:MAX_LINES]
+              source="/proc/net/{tcp,tcp6,udp,udp6}, ss --cgroup"
+                     + (", wg (net unit)" if c.wireguard else ""))
+    res.lines = ([("not allowed", _named(s, own)) for s in extra] + lines + ok)[:MAX_LINES]
     return res
 
 

@@ -39,6 +39,24 @@ UDP = HEAD + "".join(ROW.format(i, a, r, st, uid, ino) for i, (a, r, st, uid, in
 UDP6 = HEAD + "".join(ROW.format(i, a, Z6, "07", uid, ino) for i, (a, uid, ino) in enumerate((
     ("00000000000000000000000001000000:0143", 994, 4301),
     ("00000000000000000000000000000000:C832", 0, 51639))))
+# ss -Htuln --cgroup of the same sockets (format of my host 2026-10-30, ss -Htulnp; the
+# cgroup column as in tests/fixtures/firewall/ss-cgroup.txt). WireGuard lines without
+# a cgroup here (owner of a kernel WireGuard socket not checked on the host).
+SS = ("udp   UNCONN 0      0       192.168.122.1%virbr0:53        0.0.0.0:*    "
+      "cgroup:/system.slice/virtnetworkd.service\n"
+      "udp   UNCONN 0      0          127.0.0.54:53        0.0.0.0:*    "
+      "cgroup:/system.slice/systemd-resolved.service\n"
+      "udp   UNCONN 0      0        0.0.0.0%virbr0:67        0.0.0.0:*    "
+      "cgroup:/system.slice/virtnetworkd.service\n"
+      "udp   UNCONN 0      0             0.0.0.0:51250      0.0.0.0:*\n"
+      "udp   UNCONN 0      0                   *:51250            *:*\n"
+      "tcp   LISTEN 0      32      192.168.122.1%virbr0:53        0.0.0.0:*    "
+      "cgroup:/system.slice/virtnetworkd.service\n")
+# Mullvad with DAITA (host 2026-10-30): WireGuard in userspace, the socket is the daemon's
+SS_DAITA = SS.replace("0.0.0.0:51250      0.0.0.0:*", "0.0.0.0:51250      0.0.0.0:*    "
+                      "cgroup:/system.slice/mullvad-daemon.service").replace(
+    "*:51250            *:*", "*:51250            *:*    "
+                              "cgroup:/system.slice/mullvad-daemon.service")
 MOUNTINFO = ("1 0 0:30 / / ro,relatime shared:1 - overlay composefs ro,lowerdir=x\n"
              "60 1 0:39 /var /var rw,relatime shared:4 - btrfs /dev/mapper/luks-1234 rw\n"
              "61 1 0:40 /boot /boot rw shared:5 - ext4 /dev/nvme0n1p2 rw\n")
@@ -100,6 +118,7 @@ class FakeHost(kinds.Host):
             "hostnamectl --json=short": Result(0, json.dumps({   # host 2026-10-27, trimmed
                 "Hostname": "localhost", "StaticHostname": "localhost", "PrettyHostname": None,
                 "DefaultHostname": "localhost", "HostnameSource": "static"}), ""),
+            "ss -Htuln --cgroup": Result(0, SS, ""),
             "rpm-ostree status": Result(0, json.dumps({"deployments": [
                 {"booted": False, "timestamp": 1}, {"booted": True, "timestamp": BOOTED}]}), ""),
         }
@@ -444,6 +463,65 @@ class TestKinds(unittest.TestCase):
         r = kinds.check(c, cx(h), [])
         self.assertEqual((r.status, r.lines[0]), ("fail", ("not allowed", "tcp 0.0.0.0:22")))
 
+    def test_listeners_programs(self):
+        allow = ("udp 192.168.122.1:53", "tcp 192.168.122.1:53")
+        r = kinds.check(chk(kind="listeners", allow=allow, wireguard="wg0-mullvad"), cx(), [])
+        self.assertEqual(r.status, "fail")
+        self.assertEqual(r.lines[0], ("not allowed", "udp 0.0.0.0:67  virtnetworkd"))
+        self.assertIn(("allowed", "udp 192.168.122.1:53  virtnetworkd"), r.lines)
+        self.assertIn(("allowed", "udp 0.0.0.0:51250 (wg0-mullvad)"), r.lines)
+        self.assertIn("ss --cgroup", r.source)
+        h = FakeHost()
+        h.answers["ss -Htuln --cgroup"] = Result(1, "", "Cannot open netlink socket\n")
+        r = kinds.check(chk(kind="listeners", allow=allow), cx(h), [])
+        self.assertEqual(r.lines[0], ("not allowed", "udp 0.0.0.0:51250"))   # no names
+        self.assertIn(("programs", "ss: Cannot open netlink socket"), r.lines)
+
+    def test_listeners_userspace_tunnel(self):
+        allow = ("udp 192.168.122.1:53", "tcp 192.168.122.1:53", "udp 0.0.0.0:67")
+        c = chk(kind="listeners", allow=allow, wireguard="wg0-mullvad",
+                tunnel_owner="mullvad-daemon")
+        h = FakeHost()
+        del h.wg["wg0-mullvad"]                         # wg show: no kernel device
+        h.wg["wg0-mullvad"] = Result(1, "", "Unable to access interface: No such device")
+        h.answers["ss -Htuln --cgroup"] = Result(0, SS_DAITA, "")
+        h.dirs["/sys/class/net/wg0-mullvad"] = ["flags", "tun_flags"]
+        r = kinds.check(c, cx(h), [])
+        self.assertEqual((r.status, r.have), ("pass", "5 listening, all allowed"))
+        self.assertIn(("allowed", "udp [::]:51250 (wg0-mullvad, mullvad-daemon)"), r.lines)
+        self.assertIn(("wireguard", "wg0-mullvad present, no kernel port: udp 0.0.0.0 / [::] "
+                                    "of mullvad-daemon allowed (userspace tunnel)"), r.lines)
+        # no tunnel_owner key: the daemon's sockets are not allowed, named
+        r = kinds.check(chk(kind="listeners", allow=allow, wireguard="wg0-mullvad"), cx(h), [])
+        self.assertEqual(r.lines[:2], [("not allowed", "udp 0.0.0.0:51250  mullvad-daemon"),
+                                       ("not allowed", "udp [::]:51250  mullvad-daemon")])
+        # another program on the port: not the tunnel
+        h.answers["ss -Htuln --cgroup"] = Result(0, SS_DAITA.replace(
+            "mullvad-daemon.service", "app-flatpak-com.valvesoftware.Steam-1234.scope"), "")
+        r = kinds.check(c, cx(h), [])
+        self.assertEqual(r.lines[0], ("not allowed",
+                                      "udp 0.0.0.0:51250  com.valvesoftware.Steam"))
+        # tunnel interface gone: nothing allowed for the daemon
+        h.answers["ss -Htuln --cgroup"] = Result(0, SS_DAITA, "")
+        del h.dirs["/sys/class/net/wg0-mullvad"]
+        r = kinds.check(c, cx(h), [])
+        self.assertEqual((r.status, r.have), ("fail", "2 not allowed"))
+        # kernel port known: the kernel rule wins, the owner rule is not used
+        h = FakeHost()
+        h.answers["ss -Htuln --cgroup"] = Result(0, SS_DAITA, "")
+        r = kinds.check(c, cx(h), [])
+        self.assertIn(("allowed", "udp 0.0.0.0:51250 (wg0-mullvad)"), r.lines)
+
+    def test_ss_key(self):
+        for local, want in (("0.0.0.0%virbr0:67", "udp 0.0.0.0:67"),
+                            ("*:52880", "udp [::]:52880"),
+                            ("[::]:22", "udp [::]:22"),
+                            ("[fe80::1]%wlo1:546", "udp [fe80::1]:546"),
+                            ("[fe80:0:0:0:0:0:0:1%wlo1]:546", "udp [fe80::1]:546"),
+                            ("[::ffff:192.0.2.1]:80", "udp [::ffff:192.0.2.1]:80"),
+                            ("0.0.0.0:*", None), ("noport", None), ("x:1", None)):
+            self.assertEqual(kinds._ss_key("udp", local), want, local)
+
     def test_wg_port_from_net_unit(self):
         """Host.wg_listen_port asks core/netd.py Reader for the net unit's command."""
         from core import netd
@@ -628,6 +706,10 @@ class TestModule(unittest.TestCase):
                b'allow = ["0.0.0.0:22"]\n',
                b'[[check]]\nid = "x"\nkind = "listeners"\nsev = "warn"\nwhy = "w"\n'
                b'allow = []\nwireguard = "a b"\n',
+               b'[[check]]\nid = "x"\nkind = "listeners"\nsev = "warn"\nwhy = "w"\n'
+               b'allow = []\ntunnel_owner = "mullvad-daemon"\n',
+               b'[[check]]\nid = "x"\nkind = "listeners"\nsev = "warn"\nwhy = "w"\n'
+               b'allow = []\nwireguard = "wg0"\ntunnel_owner = "a b"\n',
                b'[[check]]\nid = "x"\nkind = "taint"\nsev = "warn"\nwhy = "w"\nwant = "O"\n'
                b'[[check]]\nid = "x"\nkind = "taint"\nsev = "warn"\nwhy = "w"\nwant = "O"\n',
                b'[[check]]\nid = "x"\nkind = "hostname"\nsev = "warn"\nwhy = "w"\n'

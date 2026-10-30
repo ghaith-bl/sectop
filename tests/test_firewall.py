@@ -385,10 +385,22 @@ class Base(unittest.TestCase):
         self.host = Host()
         self.mono = 1000.0
         self.wall = 1792410745.0                      # 20 s after the fixture handshake
+        self.sysnet = os.path.join(self.tmp.name, "net")     # not the host's /sys/class/net
+        os.mkdir(self.sysnet)
         self.st = fw.State(run=self.host, net=self.host, mono=lambda: self.mono,
                            wall=lambda: self.wall,
                            owner=os.getuid(), mode_file=self.mode_file,
-                           rollback_file=self.rb_file)
+                           rollback_file=self.rb_file, sysnet=self.sysnet)
+
+    def tun(self, flags="0x1091", tun_flags=True):
+        """The tunnel as a tun device in the fake sysfs (userspace WireGuard)."""
+        d = os.path.join(self.sysnet, "wg0-mullvad")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "flags"), "w") as f:
+            f.write(flags + "\n")
+        if tun_flags:
+            with open(os.path.join(d, "tun_flags"), "w") as f:
+                f.write("0x1002\n")
 
     def ctx(self):
         """The fake host's "journalctl" answer = what the follower read since the last
@@ -944,6 +956,51 @@ class TestCollect(Base):
                                        "device)", "warn"))
         self.assertEqual(v["fwmark"], ("set 0x6d6f6c65", "ok"))   # kept while down: fine
         self.assertEqual(v["kill switch"], ("inet mullvad (drop)", "ok"))   # lockdown: kept
+
+    def test_tunnel_userspace(self):
+        # Mullvad DAITA (host 2026-10-30): tun device up, wg show has no device
+        for key in ("wg latest-handshakes", "wg transfer", "wg endpoints", "wg fwmark"):
+            self.host.set(key, NO_DEV)
+        self.tun()
+        s = self.collect()
+        self.assertEqual(s["checks"], [])
+        self.assertEqual(s["status"], "ok")
+        self.assertIn("wg0-mullvad up | userspace", s["summary"])
+        v = self.items(s, "vpn")
+        self.assertEqual(v["tunnel"], ("wg0-mullvad up (userspace)", "ok"))
+        self.assertEqual(v["wg data"][1], "ok")
+        self.assertEqual(v["fwmark"], ("set 0x6d6f6c65", "ok"))   # no live mark: no claim
+        self.assertNotIn("endpoint", v)
+        asked = [" ".join(c[1:]) for c in self.host.calls if c[0].endswith("/wg")]
+        self.assertFalse(any("endpoints" in a or "fwmark" in a for a in asked), asked)
+
+    def test_tunnel_userspace_not(self):
+        for key in ("wg latest-handshakes", "wg transfer", "wg endpoints", "wg fwmark"):
+            self.host.set(key, NO_DEV)
+        for flags, tun_flags in (("0x1090", True), ("0x1091", False), ("zz", True)):
+            with self.subTest(flags=flags, tun_flags=tun_flags):
+                self.setUp()
+                for key in ("wg latest-handshakes", "wg transfer", "wg endpoints",
+                            "wg fwmark"):
+                    self.host.set(key, NO_DEV)
+                self.tun(flags, tun_flags)        # tun down / kernel device / bad file
+                s = self.collect()
+                self.assertEqual([c["key"] for c in s["checks"]], ["tunnel_down:wg0-mullvad"])
+        self.assertFalse(fw.userspace(self.sysnet, "../etc"))
+
+    def test_tunnel_userspace_then_kernel(self):
+        for key in ("wg latest-handshakes", "wg transfer", "wg endpoints", "wg fwmark"):
+            self.host.set(key, NO_DEV)
+        self.tun()
+        self.collect()
+        self.host = Host()                                      # DAITA off: kernel wg again
+        self.st.run = self.st.net = self.host
+        self.tick()
+        s = self.collect()
+        v = self.items(s, "vpn")
+        self.assertEqual(v["tunnel"], ("wg0-mullvad up", "ok"))
+        self.assertIn("endpoint", v)                            # slow sources ran again
+        self.assertEqual(v["fwmark"][1], "ok")
 
     def test_fwmark_mismatch(self):
         for out in ("0x1\n", "off\n"):

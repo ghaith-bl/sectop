@@ -8,8 +8,8 @@ fwmark, nft wg_fwmark set, the VPN kill switch table (nft inet mullvad: filter
 chain policies, without its rules). nft and wg need CAP_NET_ADMIN:
 their results come from the net unit's files (core/netd.py Reader), the rest via
 core.run.run as user sectop. Files:
-/etc/hostfw/mode, /run/hostfw/rollback, /proc/uptime. At start: one boot
-journal scan (leak lines, first tunnel flow).
+/etc/hostfw/mode, /run/hostfw/rollback, /proc/uptime, /sys/class/net/<tunnel>
+(userspace tunnel). At start: one boot journal scan (leak lines, first tunnel flow).
 Audit box: every HFW line (allowed + blocked, in + out), program from ss.
 Programs box: the same lines + open sockets, one row per program.
 Snapshot v2: problems are checks with keys (core/alerts.py keeps the alerts).
@@ -55,6 +55,8 @@ TABLE = netd.TABLE
 MODE_FILE = "/etc/hostfw/mode"
 ROLLBACK_FILE = "/run/hostfw/rollback"
 UPTIME_FILE = "/proc/uptime"
+SYSNET = "/sys/class/net"
+IFF_UP = 0x1
 DEFAULT_TUNNEL = netd.DEFAULT_TUNNEL
 KS_TABLE = netd.KS_TABLE
 KS_HOOKS = ("input", "output", "forward")      # kill switch: drop policy on all three
@@ -171,11 +173,13 @@ class State:
     def __init__(self, tunnel=DEFAULT_TUNNEL, hold=HOLD, run=_run, net=None,
                  mono=time.monotonic, wall=time.time, owner=0,
                  mode_file=MODE_FILE, rollback_file=ROLLBACK_FILE, hms=_hms, stamp=_stamp,
-                 uptime_file=UPTIME_FILE):
+                 uptime_file=UPTIME_FILE, sysnet=SYSNET):
         self.tunnel, self.hold = tunnel, hold
         self.run, self.mono, self.wall, self.owner = run, mono, wall, owner
         self.mode_file, self.rollback_file = mode_file, rollback_file
         self.uptime_file = uptime_file
+        self.sysnet = sysnet           # /sys/class/net: tunnel kind (tun = userspace)
+        self.userspace = False         # tunnel up as a tun device, no wg data
         self.hms = hms                 # epoch -> "HH:MM:SS" for audit rows
         self.stamp = stamp             # epoch -> full local time for audit detail
         self.comments = {}             # counter name -> hostfw rule comment
@@ -198,7 +202,7 @@ class State:
         self.boot = None               # boot time, epoch (from /proc/uptime)
         self.boot_note = ""            # boot scan problem, shown in the out_leak title
         self.slow_at = None            # mono time the slow sources are due again
-        self.slow_up = None            # tunnel state at the last slow refresh
+        self.slow_up = None            # (up, userspace) at the last slow refresh
         self.slow = (None, [], [])     # last slow result: endpoint item, items, checks
 
     def cmd(self, *argv, timeout=TIMEOUT):
@@ -210,6 +214,22 @@ class State:
 
 
 # --- helpers --------------------------------------------------------------
+
+def userspace(sysnet: str, iface: str) -> bool:
+    """The tunnel is a tun device and up: WireGuard in userspace (Mullvad with DAITA,
+    2026-10-28 / 10-30), where `wg show` has no device to read. A tun device has
+    tun_flags in sysfs, kernel WireGuard has not. Unreadable: False (down as before)."""
+    if not netd.IFACE_RE.fullmatch(iface):
+        return False
+    base = os.path.join(sysnet, iface)
+    try:
+        if not os.path.isfile(os.path.join(base, "tun_flags")):
+            return False
+        with open(os.path.join(base, "flags"), "rb") as f:
+            return int(f.read(32).strip(), 16) & IFF_UP == IFF_UP
+    except (OSError, ValueError):
+        return False
+
 
 def _first(text: str) -> str:
     for line in text.splitlines():
@@ -666,9 +686,15 @@ def _vpn(st: State, checks: list, wall: float) -> tuple:
     """Every tick: handshake + transfer. -> (kv items, summary text, tunnel up)."""
     t = st.tunnel
     res = st.cmd("wg", "show", t, "latest-handshakes")
+    st.userspace = False
     if res.rc != 0:
-        _chk(checks, f"tunnel_down:{t}", "warn", f"{t} down", _fail(res))
         st.prev_tx = None
+        if userspace(st.sysnet, t):
+            st.userspace = True
+            return ([_item("tunnel", f"{t} up (userspace)", tone="green"),
+                     _item("wg data", "none: tun device, wg show cannot read it")],
+                    f"{t} up | userspace", True)
+        _chk(checks, f"tunnel_down:{t}", "warn", f"{t} down", _fail(res))
         return [_item("tunnel", f"{t} down ({_fail(res)})", "warn")], f"{t} down", False
     hs = vpn.handshake(res.out)
     items = [_item("tunnel", f"{t} up", tone="green")]
@@ -722,14 +748,15 @@ def _slow(st: State, up: bool) -> tuple:
     -> (endpoint item or None, items, checks).
     """
     checks, items, ep, mark, bad = [], [], None, None, []
-    if up:
+    kernel = up and not st.userspace   # userspace tunnel: no endpoint / live mark from wg
+    if kernel:
         ep = _safe(lambda: _endpoint(st), "wg", checks,
                    lambda e: _item("endpoint", e, "warn"))
         mark = _safe(lambda: _live_mark(st), "wg", checks, bad.append)
     if bad:                            # live fwmark unreadable: no mismatch claim
         items.append(_item("fwmark", f"live: {bad[0]}", "warn"))
     else:
-        fm = _safe(lambda: _fwmark(st, mark, up, checks), "fwmark", checks,
+        fm = _safe(lambda: _fwmark(st, mark, kernel, checks), "fwmark", checks,
                    lambda e: _item("fwmark", e, "warn"))
         if fm:
             items.append(fm)
@@ -1154,9 +1181,9 @@ def collect(st: State, ctx) -> dict:
     vpn_items, vpn_text, up = _safe(
         lambda: _vpn(st, checks, wall), "wg", checks,
         lambda e: ([_item("tunnel", e, "warn")], f"{st.tunnel} ?", False))
-    if st.slow_at is None or now >= st.slow_at or up != st.slow_up:
+    if st.slow_at is None or now >= st.slow_at or (up, st.userspace) != st.slow_up:
         st.slow = _slow(st, up)
-        st.slow_at, st.slow_up = now + SLOW, up
+        st.slow_at, st.slow_up = now + SLOW, (up, st.userspace)
     ep, slow_items, slow_checks = st.slow
     checks += slow_checks
     vpn_items = vpn_items[:1] + ([ep] if ep else []) + vpn_items[1:] + slow_items
