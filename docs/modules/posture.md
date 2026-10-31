@@ -113,7 +113,8 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
           no failed units; core dumps off; journal persistent; GNOME locks; wifi IPv6
           off; booted system <= 14 days; random MAC config; dhcp-send-hostname 0 on
           every Wi-Fi / cable profile; LLMNR + mDNS off; fallback hostname kernel arg;
-          DNS servers only on the tunnel; no DNS in Wi-Fi / cable profiles
+          DNS servers only on the tunnel; no DNS in Wi-Fi / cable profiles; chronyd
+          running; chrony NTS only (authselectmode require, minsources 2)
     info  update staged, waiting for a reboot
 
 - hostfw mode / boot mode: not here, the firewall screen checks them (alerts there).
@@ -154,3 +155,7 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
   network fails until netprivacy runs again). warn: hostfw blocks it. `resolvectl
   status` as user sectop in the sandbox: not checked on the host yet. "Current DNS
   Server:" and "Fallback DNS Servers:" lines are not indented.
+- Time (2026-10-31, silverblue-cis-hardening `time`): chrony NTS only, Netnod + PTB.
+  Config checked, not the live state: `chronyc -N authdata` needs root (501 Not
+  authorised as a user), `chronyc sources` shows no authentication. `authselectmode
+  require` is the guard: a source without NTS is never selected.

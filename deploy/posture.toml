@@ -436,3 +436,23 @@ sev = "warn"
 why = "no DNS servers in Wi-Fi / cable profiles, none taken from DHCP"
 types = ["802-11-wireless", "802-3-ethernet"]
 props = { "ipv4.dns" = "", "ipv6.dns" = "", "ipv4.ignore-auto-dns" = "yes", "ipv6.ignore-auto-dns" = "yes" }
+
+# ---- time (silverblue-cis-hardening time, 2026-10-31) ----
+# chrony with NTS only (Netnod + PTB). authselectmode require: a source without NTS
+# (pool, DHCP servers) is never selected, even if added later. Live NTS state needs
+# root (`chronyc -N authdata`: 501 Not authorised as a user): the config is checked.
+
+[[check]]
+id = "chronyd-active"
+kind = "units"
+sev = "warn"
+why = "chronyd running"
+units = { "chronyd.service" = "active" }
+
+[[check]]
+id = "time-nts-only"
+kind = "lines"
+sev = "warn"
+why = "chrony: authenticated time only (NTS), 2 sources must agree"
+path = "/etc/chrony.conf"
+want = ["authselectmode require", "minsources 2"]
