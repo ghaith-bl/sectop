@@ -416,3 +416,23 @@ sev = "warn"
 why = "resolved: LLMNR + mDNS off (they announce the hostname on the LAN)"
 path = "/etc/systemd/resolved.conf.d/90-privacy.conf"
 want = ["LLMNR=no", "MulticastDNS=no"]
+
+# DNS only in the tunnel (netprivacy, 2026-10-31). A server on the Wi-Fi / cable link
+# (static in a profile, or from DHCP on a new network) is where resolved goes while the
+# tunnel has none (connect / reconnect): seen 2026-10-31, uid 990 to port 53 on the
+# uplink, blocked by hostfw (out_dns). warn: hostfw blocks it, not a leak.
+
+[[check]]
+id = "dns-tunnel-only"
+kind = "dns-servers"
+sev = "warn"
+why = "DNS servers only on the tunnel: none on the uplink, global or fallback"
+allow = ["wg0-mullvad"]
+
+[[check]]
+id = "nm-no-dns"
+kind = "nm-props"
+sev = "warn"
+why = "no DNS servers in Wi-Fi / cable profiles, none taken from DHCP"
+types = ["802-11-wireless", "802-3-ethernet"]
+props = { "ipv4.dns" = "", "ipv6.dns" = "", "ipv4.ignore-auto-dns" = "yes", "ipv6.ignore-auto-dns" = "yes" }

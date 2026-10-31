@@ -57,6 +57,30 @@ SS_DAITA = SS.replace("0.0.0.0:51250      0.0.0.0:*", "0.0.0.0:51250      0.0.0.
                       "cgroup:/system.slice/mullvad-daemon.service").replace(
     "*:51250            *:*", "*:51250            *:*    "
                               "cgroup:/system.slice/mullvad-daemon.service")
+# resolvectl status, format of my host 2026-10-31 after netprivacy (no DNS on the uplink).
+# Fake names and addresses.
+RESOLVED = """Global
+         Protocols: -LLMNR -mDNS -DNSOverTLS DNSSEC=no/unsupported
+  resolv.conf mode: stub
+
+Link 2 (eth0)
+    Current Scopes: none
+         Protocols: -DefaultRoute -LLMNR -mDNS -DNSOverTLS DNSSEC=no/unsupported
+     Default Route: no
+
+Link 3 (wlan0)
+    Current Scopes: none
+         Protocols: +DefaultRoute -LLMNR -mDNS -DNSOverTLS DNSSEC=no/unsupported
+     Default Route: yes
+
+Link 4 (wg0-mullvad)
+    Current Scopes: DNS
+         Protocols: +DefaultRoute -LLMNR -mDNS -DNSOverTLS DNSSEC=no/unsupported
+Current DNS Server: 10.2.0.1
+       DNS Servers: 10.2.0.1
+        DNS Domain: ~.
+     Default Route: yes
+"""
 MOUNTINFO = ("1 0 0:30 / / ro,relatime shared:1 - overlay composefs ro,lowerdir=x\n"
              "60 1 0:39 /var /var rw,relatime shared:4 - btrfs /dev/mapper/luks-1234 rw\n"
              "61 1 0:40 /boot /boot rw shared:5 - ext4 /dev/nvme0n1p2 rw\n")
@@ -115,6 +139,9 @@ class FakeHost(kinds.Host):
                                             "11111111-2222-3333-4444-555555555555:wireguard\n", ""),
             "nmcli -g ipv6.method": Result(0, "disabled\n", ""),
             "nmcli -g ipv4.dhcp-send-hostname,ipv6.dhcp-send-hostname": Result(0, "0\n0\n", ""),
+            "nmcli -g ipv4.dns,ipv6.dns,ipv4.ignore-auto-dns,ipv6.ignore-auto-dns":
+                Result(0, "\n\nyes\nyes\n", ""),
+            "resolvectl status": Result(0, RESOLVED, ""),
             "hostnamectl --json=short": Result(0, json.dumps({   # host 2026-10-27, trimmed
                 "Hostname": "localhost", "StaticHostname": "localhost", "PrettyHostname": None,
                 "DefaultHostname": "localhost", "HostnameSource": "static"}), ""),
@@ -376,6 +403,63 @@ class TestKinds(unittest.TestCase):
         self.assertEqual(res(c, h), ("unknown", "0 of 2 profiles"))      # one value missing
         h.answers["nmcli -g UUID,TYPE"] = Result(8, "", "Error: NetworkManager is not running.\n")
         self.assertEqual(res(c, h), ("unknown", "Error: NetworkManager is not running."))
+
+    def test_nm_props_empty(self):
+        props = (("ipv4.dns", ""), ("ipv6.dns", ""), ("ipv4.ignore-auto-dns", "yes"),
+                 ("ipv6.ignore-auto-dns", "yes"))
+        c = chk(kind="nm-props", types=("802-11-wireless", "802-3-ethernet"), props=props)
+        self.assertEqual(res(c), ("pass", "2 of 2 profiles"))
+        self.assertEqual(kinds.want_text(c), "ipv4.dns=- ipv6.dns=- ipv4.ignore-auto-dns=yes "
+                                             "ipv6.ignore-auto-dns=yes")
+        h = FakeHost()
+        h.answers = {"nmcli -g ipv4.dns,ipv6.dns,ipv4.ignore-auto-dns,ipv6.ignore-auto-dns "
+                     "connection show 0a0a": Result(0, "192.0.2.53,192.0.2.54\n\nyes\nyes\n", ""),
+                     "nmcli -g ipv4.dns,ipv6.dns,ipv4.ignore-auto-dns,ipv6.ignore-auto-dns "
+                     "connection show 0b0b": Result(0, "\n\nno\nno\n", ""),     # a new network
+                     **h.answers}
+        r = kinds.check(c, cx(h), [])
+        self.assertEqual((r.status, r.have), ("fail", "0 of 2 profiles"))
+        self.assertEqual(r.lines, [
+            ("differs", "0a0a0a0a-0000-4000-8000-000000000001 ipv4.dns=192.0.2.53,192.0.2.54"),
+            ("differs", "0b0b0b0b-0000-4000-8000-000000000002 ipv4.ignore-auto-dns=no"),
+            ("differs", "0b0b0b0b-0000-4000-8000-000000000002 ipv6.ignore-auto-dns=no")])
+
+    def test_dns_servers(self):
+        c = chk(kind="dns-servers", allow=("wg0-mullvad",))
+        r = kinds.check(c, cx(), [])
+        self.assertEqual((r.status, r.have, r.lines),
+                         ("pass", "only wg0-mullvad", [("allowed", "wg0-mullvad 10.2.0.1")]))
+        self.assertEqual(kinds.want_text(c), "only wg0-mullvad")
+        # before netprivacy (host 2026-10-31): static resolver in the wifi profile
+        h = FakeHost()
+        h.answers["resolvectl status"] = Result(0, RESOLVED.replace(
+            "     Default Route: yes\n\nLink 4",
+            "Current DNS Server: 192.0.2.53\n       DNS Servers: 192.0.2.53 192.0.2.54\n"
+            "     Default Route: yes\n\nLink 4"), "")
+        r = kinds.check(c, cx(h), [])
+        self.assertEqual((r.status, r.have), ("fail", "DNS on wlan0"))
+        self.assertEqual(r.lines, [("not allowed", "wlan0 192.0.2.53 192.0.2.54"),
+                                   ("allowed", "wg0-mullvad 10.2.0.1")])
+        # global and fallback servers, servers on the lines under the key, IPv6
+        h.answers["resolvectl status"] = Result(0, RESOLVED.replace(
+            "  resolv.conf mode: stub\n",
+            "  resolv.conf mode: stub\n       DNS Servers: 192.0.2.1\n"
+            "Fallback DNS Servers: 192.0.2.2#dns.example\n                      2001:db8::53\n"), "")
+        r = kinds.check(c, cx(h), [])
+        self.assertEqual((r.status, r.have), ("fail", "DNS on global fallback"))
+        self.assertEqual(r.lines[:2], [("global", "192.0.2.1"),
+                                       ("fallback", "192.0.2.2#dns.example 2001:db8::53")])
+        # tunnel down: no server anywhere, nothing leaves
+        h.answers["resolvectl status"] = Result(0, RESOLVED.replace(
+            "Current DNS Server: 10.2.0.1\n       DNS Servers: 10.2.0.1\n", ""), "")
+        self.assertEqual(res(c, h), ("pass", "no DNS server"))
+        self.assertEqual(res(chk(kind="dns-servers", allow=()), FakeHost()),
+                         ("fail", "DNS on wg0-mullvad"))
+        h.answers["resolvectl status"] = Result(0, "something else\n", "")
+        self.assertEqual(res(c, h), ("unknown", "resolvectl: no Global section"))
+        h.answers["resolvectl status"] = Result(1, "", "Failed to get global data: Access denied\n")
+        self.assertEqual(res(c, h), ("unknown", "Failed to get global data: Access denied"))
+        self.assertEqual(FakeHost().run(["/usr/bin/resolvectl", "status", "--no-pager"]).rc, 0)
 
     def test_mac_local(self):
         c = chk(kind="mac-local")
@@ -719,6 +803,11 @@ class TestModule(unittest.TestCase):
                b'[[check]]\nid = "x"\nkind = "nm-props"\nsev = "warn"\nwhy = "w"\n'
                b'types = ["802-11-wireless"]\nprops = { "method" = "disabled" }\n',
                b'[[check]]\nid = "x"\nkind = "mac-local"\nsev = "warn"\nwhy = "w"\nwant = "x"\n',
+               b'[[check]]\nid = "x"\nkind = "dns-servers"\nsev = "warn"\nwhy = "w"\n',
+               b'[[check]]\nid = "x"\nkind = "dns-servers"\nsev = "warn"\nwhy = "w"\n'
+               b'allow = ["wg0 mullvad"]\n',
+               b'[[check]]\nid = "x"\nkind = "nm-props"\nsev = "warn"\nwhy = "w"\n'
+               b'types = ["802-11-wireless"]\nprops = { "ipv4.dns" = "\\u00e9" }\n',
                b'[[nope]]\n']
         for data in bad:
             with self.subTest(data=data), self.assertRaises(ConfigError):

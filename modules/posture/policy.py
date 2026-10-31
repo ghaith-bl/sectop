@@ -56,6 +56,7 @@ KINDS = {
     "nm-props": ({"types", "props"}, set()),
     "mac-local": (set(), set()),
     "hostname": ({"want"}, set()),
+    "dns-servers": ({"allow"}, set()),
 }
 MAX_CHECKS = 100
 MAX_ITEMS = 64                      # values / units / lines / allow / want lists
@@ -84,7 +85,7 @@ class Check:
     want: object = None             # str, int or tuple of str (per kind)
     values: tuple = ()              # sysctl: ((key, want), ...)
     units: tuple = ()               # units: ((unit, state), ...)
-    allow: tuple = ()               # listeners: "proto addr:port" globs
+    allow: tuple = ()               # listeners: "proto addr:port" globs; dns-servers: links
     group: str = ""
     mode: int = 0
     owner: str = ""
@@ -92,7 +93,7 @@ class Check:
     wireguard: str = ""             # listeners: tunnel whose listen-port is allowed
     tunnel_owner: str = ""          # listeners: program of a userspace tunnel's socket
     types: tuple = ()               # nm-props: NetworkManager profile types
-    props: tuple = ()               # nm-props: ((property, want "a|b"), ...)
+    props: tuple = ()               # nm-props: ((property, want "a|b"), ...), "" = empty
 
 
 def _text(v, w: str, most: int = MAX_TEXT, empty: bool = False) -> str:
@@ -200,10 +201,16 @@ def _check(t, i: int, path: str, seen: set) -> Check:
             raise ConfigError(f"{w}.types: NetworkManager type names required")
         props = []
         for k, v in _table(t["props"], f"{w}.props").items():
-            if not PROP_RE.fullmatch(k) or not isinstance(v, str) or not TEXT_RE.fullmatch(v):
+            if not PROP_RE.fullmatch(k) or not isinstance(v, str) \
+                    or (v and not TEXT_RE.fullmatch(v)) or len(v) > MAX_TEXT:
                 raise ConfigError(f"{w}.props.{k}: setting.property = \"value\" required")
             props.append((k, v))
         args["types"], args["props"] = types, tuple(props)
+    if kind == "dns-servers":
+        allow = _texts(t["allow"], f"{w}.allow")
+        if any(not IFACE_RE.fullmatch(a) for a in allow):
+            raise ConfigError(f"{w}.allow: interface names required")
+        args["allow"] = allow
     if kind == "group":
         g = t["group"]
         if not isinstance(g, str) or not NAME_RE.fullmatch(g):

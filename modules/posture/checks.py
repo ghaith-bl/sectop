@@ -4,7 +4,7 @@ Each takes the check (policy.Check) and the collect context (Cx: host access, th
 audit counts, per-collect caches) and returns a Res: pass / fail / unknown, what was
 found (`have`, one short line) and detail lines. Reads files where a file exists;
 commands only where there is no file (systemctl, firewall-cmd, nmcli, rpm-ostree,
-hostnamectl, ss for socket owners),
+hostnamectl, ss for socket owners, resolvectl),
 fixed argv, run as user sectop. Nothing here changes the host.
 """
 
@@ -29,6 +29,7 @@ FIREWALL_CMD = "/usr/bin/firewall-cmd"
 NMCLI = "/usr/bin/nmcli"
 RPM_OSTREE = "/usr/bin/rpm-ostree"
 HOSTNAMECTL = "/usr/bin/hostnamectl"
+RESOLVECTL = "/usr/bin/resolvectl"
 SS = netd.bin_path("ss")
 TIMEOUT = 5.0                      # per command; a whole collect stays well under INTERVAL
 OSTREE_TIMEOUT = 15.0
@@ -56,6 +57,8 @@ MAX_READ = 1024 * 1024
 KV_RE = r"^\s*{}\s*=\s*(.*?)\s*$"
 CGROUP_RE = re.compile(r"(?:^|\s)cgroup:(\S+)")
 WILD_UDP = ("udp 0.0.0.0:", "udp [::]:")
+LINK_RE = re.compile(r"Link \d+ \(([^)]{1,15})\)")       # resolvectl status section
+RKEY_RE = re.compile(r"([A-Za-z][A-Za-z .]*?):(?: (.*)|$)")  # "DNS Servers: a b", not "fe::1"
 
 
 @dataclass
@@ -582,6 +585,64 @@ def k_hostname(c, cx: Cx) -> Res:
     return out
 
 
+def resolved_servers(text: str) -> tuple | None:
+    """`resolvectl status` -> (global, fallback, {link: servers}), None without a Global
+    section. Servers on the key's line or on the lines under it (no key there)."""
+    glob, fallback, links = [], [], {}
+    sec, key, seen = None, "", False
+    for raw in text.splitlines():
+        if not raw.strip():
+            continue
+        line = raw.strip()
+        m = LINK_RE.fullmatch(line)
+        if not raw[0].isspace() and (m or line == "Global"):    # "Current DNS Server:" is
+            sec = m.group(1) if m else True                      # not indented either
+            seen = seen or sec is True
+            key = ""
+            continue
+        m = RKEY_RE.fullmatch(line)
+        if m:
+            key, vals = m.group(1), (m.group(2) or "").split()
+        else:
+            vals = raw.split()                           # continuation of the last key
+        if sec is None or key not in ("DNS Servers", "Fallback DNS Servers"):
+            continue
+        if sec is True:
+            (glob if key == "DNS Servers" else fallback).extend(vals)
+        elif key == "DNS Servers":
+            links.setdefault(sec, []).extend(vals)
+    return (glob, fallback, links) if seen else None
+
+
+def k_dns_servers(c, cx: Cx) -> Res:
+    """Only the allowed links (the tunnel) have DNS servers; none global, no fallback.
+    A server anywhere else is where resolved goes while the tunnel has none (connect,
+    reconnect): unencrypted, outside the tunnel."""
+    src = "resolvectl status (global, fallback and per-link DNS servers)"
+    res = cx.host.run([RESOLVECTL, "status", "--no-pager"])
+    if res.rc != 0 or res.timed_out or res.truncated:
+        return Res("unknown", _fail_run(res), source=src)
+    found = resolved_servers(res.out)
+    if found is None:
+        return Res("unknown", "resolvectl: no Global section", source=src)
+    glob, fallback, links = found
+    bad = [("global", glob), ("fallback", fallback)]
+    bad = [(k, v) for k, v in bad if v]
+    out_links = [(n, v) for n, v in links.items() if v and n not in c.allow]
+    ok = [(n, v) for n, v in links.items() if v and n in c.allow]
+    if bad or out_links:
+        have = "DNS on " + " ".join(n for n, _ in bad + out_links)
+    elif ok:
+        have = "only " + " ".join(n for n, _ in ok)
+    else:
+        have = "no DNS server"                           # tunnel down: nothing leaves
+    out = Res("fail" if bad or out_links else "pass", have, source=src)
+    out.lines = ([(k, " ".join(v)[:120]) for k, v in bad] +
+                 [("not allowed", f"{n} {' '.join(v)}"[:120]) for n, v in out_links] +
+                 [("allowed", f"{n} {' '.join(v)}"[:120]) for n, v in ok])[:MAX_LINES]
+    return out
+
+
 # --- units ---------------------------------------------------------------------
 
 def _units(host: Host, names: list) -> dict | str:
@@ -793,7 +854,7 @@ KINDS = {
     "group": k_group, "perms": k_perms, "ostree-unlocked": k_ostree_unlocked,
     "ostree-staged": k_ostree_staged, "ostree-age": k_ostree_age, "ostree-gpg": k_ostree_gpg,
     "firewalld-zone": k_firewalld_zone, "wifi-ipv6": k_wifi_ipv6, "nm-props": k_nm_props,
-    "mac-local": k_mac_local, "hostname": k_hostname,
+    "mac-local": k_mac_local, "hostname": k_hostname, "dns-servers": k_dns_servers,
 }
 
 
@@ -828,7 +889,9 @@ def want_text(c) -> str:
     if k == "hostname":
         return f"{c.want}, no pretty name"
     if k == "nm-props":
-        return " ".join(f"{p}={w}" for p, w in c.props)
+        return " ".join(f"{p}={w or '-'}" for p, w in c.props)
+    if k == "dns-servers":
+        return "only " + " ".join(c.allow) if c.allow else "none"
     return {"luks": "CRYPT-LUKS", "secureboot": "on", "audit-enabled": "not 0",
             "ostree-unlocked": "locked", "ostree-staged": "none",
             "ostree-gpg": "all verify", "mac-local": "local MAC"}.get(k, "-")

@@ -16,8 +16,8 @@ Security posture.
 - Files where a file exists. Commands only where there is none, fixed argv, run as user
   sectop (core/run.py): `systemctl show` (one call for all units), `systemctl
   list-units --state=failed`, `firewall-cmd --get-default-zone`, `nmcli` (1 + one per
-  profile, max 32, per check), `hostnamectl --json=short`, `rpm-ostree status --json`
-  (once a day, cached). WireGuard
+  profile, max 32, per check), `hostnamectl --json=short`, `resolvectl status
+  --no-pager`, `rpm-ostree status --json` (once a day, cached). WireGuard
   listen-port: the net unit's file (`wg show <tunnel> listen-port`, every 1 s).
 - Audit counts: journal CONFIG_CHANGE (1305) of this boot. One scan in init
   (`journalctl -b _TRANSPORT=audit _AUDIT_TYPE=1305`, 5 s), then core's follower:
@@ -87,8 +87,9 @@ Summary `pass <n> | fail <n> | unknown <n> | accepted <n>`.
 | ostree-gpg | - | no remote in `/etc/ostree/remotes.d/*.conf` with gpg-verify off (default on) |
 | firewalld-zone | want | `firewall-cmd --get-default-zone` = want |
 | wifi-ipv6 | want | every wifi profile ipv6.method = want. Never names: UUIDs in the detail |
-| nm-props | types (list), props (table property = want) | every NetworkManager profile of these types has each property in want (`a|b`). One `nmcli -g` per profile. UUIDs in the detail |
+| nm-props | types (list), props (table property = want) | every NetworkManager profile of these types has each property in want (`a|b`, `""` = empty). One `nmcli -g` per profile. UUIDs in the detail |
 | mac-local | - | every physical link that is up (`/sys/class/net/<if>/device`, type 1, operstate up) has a locally administered MAC (bit 0x02 of the first byte). The address is never shown |
+| dns-servers | allow (list of links) | `resolvectl status`: DNS servers only on the allowed links, none global (`DNS=`), no fallback list. No server anywhere (tunnel down): pass. No `Global` section: unknown |
 | hostname | want | `hostnamectl --json=short`: Hostname, StaticHostname, DefaultHostname = want, PrettyHostname empty. Not `/proc/sys/kernel/hostname`: sectop.service has `ProtectHostname=yes` (its own copy from its start) |
 
 Limits: 100 checks, 64 items per list / table, paths `A-Z a-z 0-9 _ . @ % + : / -`
@@ -111,7 +112,8 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
           lockdown integrity; crypto policy not LEGACY; masked units;
           no failed units; core dumps off; journal persistent; GNOME locks; wifi IPv6
           off; booted system <= 14 days; random MAC config; dhcp-send-hostname 0 on
-          every Wi-Fi / cable profile; LLMNR + mDNS off; fallback hostname kernel arg
+          every Wi-Fi / cable profile; LLMNR + mDNS off; fallback hostname kernel arg;
+          DNS servers only on the tunnel; no DNS in Wi-Fi / cable profiles
     info  update staged, waiting for a reboot
 
 - hostfw mode / boot mode: not here, the firewall screen checks them (alerts there).
@@ -144,3 +146,11 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
   in the firmware, behind the admin password). Lockdown stays warn: it follows Secure
   Boot, one alert is enough. Taint want "" (any bit = warn; new bits since sectop start
   are the kernel box's crit).
+- DNS only in the tunnel (2026-10-31, silverblue-cis-hardening `netprivacy`). Host:
+  2 profiles had a static resolver, the others took the router's from DHCP. resolved
+  used the uplink server while the tunnel had none (reconnect): uid 990 to port 53 on
+  the uplink, blocked by hostfw (`out_dns`). Two checks: `dns-tunnel-only` (live, what
+  resolved uses now) and `nm-no-dns` (every profile, also networks not joined now; a new
+  network fails until netprivacy runs again). warn: hostfw blocks it. `resolvectl
+  status` as user sectop in the sandbox: not checked on the host yet. "Current DNS
+  Server:" and "Fallback DNS Servers:" lines are not indented.
