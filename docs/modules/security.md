@@ -304,7 +304,7 @@ a change (install.sh restarts it too). Missing: no rules, every row ok, summary
   alerts start empty (state in memory). A crit row pushed out of the 200 groups: its
   alert ends.
 - Changes nothing on the host (no block, no kill).
-- Defaults: 57 rules (15 crit, 33 warn, 9 info) for my baseline (silverblue-cis-hardening:
+- Defaults: 58 rules (15 crit, 34 warn, 9 info) for my baseline (silverblue-cis-hardening:
   SELinux, auditd + CIS rules, firewalld drop zone, hostfw, wheel). Examples from the
   host screenshots 2026-10-25 in tests/test_watch.py (TestDefaults): install.sh commands
   info or ok, `modprobe nvidia` warn, `systemctl stop hostfw-rollback.*` (hostfw
@@ -315,7 +315,8 @@ a change (install.sh restarts it too). Missing: no rules, every row ok, summary
 Groups 200, pids 4096 (parents), parent chain 8, launches 256 / 600 s, USER_CMD 100, argv
 per group 5, uid names 256 (cache, cleared when full). Assembler: core/audit.py (1000 open
 events, 2 s timeout). Watch list: 200 rules, 16 words, cmd 200 chars, why 120; checks 50.
-Rating cost: ~0.1 ms per root command with the 57 default rules (2026-10-25, 3.14).
+Rating cost: ~0.1 ms per root command with the 57 default rules (2026-10-25, 3.14; 58 since
+2026-11-01, not measured again).
 Auth box: 200 rows, checks 50. Kernel box: 180 rows + up to 20 taint rows (panel max
 200), 3 lines per log row, modprobe runs 64 / 60 s, checks 50. Logs box: 200 rows, 3
 lines per row, checks 50.

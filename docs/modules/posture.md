@@ -164,3 +164,9 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
   key af-alg, logs box), a missing arg opens an attack surface, not a hole by itself.
   Live state not read: a test socket would hit the af-alg rule on every collect.
   Audit rules want 72 (70 CIS + 2 af-alg).
+- Audit rules want 73 (2026-11-01): host had 73, 1 more than expected. The `privileged`
+  list (55-privileged.rules) is built from the setuid / setgid files under /usr when the
+  `audit-rules` section runs: 28 on the host, new one `/usr/bin/mullvad-exclude`
+  (setuid root, mullvad-vpn, installed after the count of 70). The check is a floor
+  (`>= want`): a package that adds a setuid file passes, one that removes it fails
+  until `want` follows. Split tunneling itself: watch rule `split-tunnel` (warn).

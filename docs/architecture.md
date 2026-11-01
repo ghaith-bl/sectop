@@ -508,7 +508,8 @@ plan of 2026-10-20, kept for history.
   - listeners: `/proc/net/{tcp,tcp6,udp,udp6}` vs allowlist (addr:port)
   - sysctl: `/proc/sys/*` vs the hardening values
   - audit: `audit=1` in `/proc/cmdline`, auditd active, rules loaded = CONFIG_CHANGE
-    `op=add_rule` - `op=remove_rule` this boot (2026-10-20: 70, verification.md ~70; 72 with af-alg 2026-11-01)
+    `op=add_rule` - `op=remove_rule` this boot (2026-10-20: 70, verification.md ~70; 72 with af-alg 2026-11-01;
+    73 with mullvad-exclude in the setuid list)
   - taint: decoded, expected bits in the policy (none since step 9, 2026-10-26)
   - failed units: `systemctl list-units --state=failed`
   - updates: `rpm-ostree status --json`, cached only, once per day (collector has no

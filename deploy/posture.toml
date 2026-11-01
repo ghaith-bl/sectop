@@ -59,8 +59,8 @@ units = { "auditd.service" = "active" }
 id = "audit-rules"
 kind = "audit-rules"
 sev = "warn"
-why = "audit rules loaded (verification.md: ~72)"
-want = 72
+why = "audit rules loaded (verification.md: ~73)"
+want = 73
 
 [[check]]
 id = "journald-audit"

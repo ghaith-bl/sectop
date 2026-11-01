@@ -184,6 +184,10 @@ class TestDefaults(unittest.TestCase):
             ("/usr/bin/firewall-cmd", ["firewall-cmd", "--state"], "ok"),
             ("/usr/bin/firewall-cmd", ["firewall-cmd", "--zone=drop", "--remove-rich-rule=x"],
              "warn"),
+            # host 2026-11-01: setuid helper from mullvad-vpn (split tunneling)
+            ("/usr/bin/mullvad-exclude", ["mullvad-exclude", "curl", "-sS",
+                                          "https://example.org"], "warn"),
+            ("/usr/bin/mullvad", ["mullvad", "status"], "ok"),
             # accounts, sudo
             ("/usr/bin/usermod", ["usermod", "-aG", "wheel", "bob"], "crit"),
             ("/usr/bin/gpasswd", ["gpasswd", "-d", "bob", "wheel"], "warn"),
@@ -215,4 +219,4 @@ class TestDefaults(unittest.TestCase):
 
     def test_levels(self):
         count = {s: sum(r.sev == s for r in self.rules) for s in watch.SEVS}
-        self.assertEqual(count, {"crit": 15, "warn": 33, "info": 9})
+        self.assertEqual(count, {"crit": 15, "warn": 34, "info": 9})

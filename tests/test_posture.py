@@ -721,7 +721,7 @@ class TestModule(unittest.TestCase):
 })
         self.assertTrue(allow)
         st = pos.State(checks=checks, host=h, wall=lambda: NOW, stamp=lambda ts: "12:00:00")
-        st.audit.added = 72
+        st.audit.added = 73   # 70 CIS + 2 af-alg + mullvad-exclude
         snap = validate(pos.collect(st, Context((), True, "")))
         got = {r["cells"][0]: r["cells"][1] for r in snap["panels"][0]["rows"]}
         self.assertEqual({k: v for k, v in got.items() if v != "pass"}, {})

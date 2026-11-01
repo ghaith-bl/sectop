@@ -224,6 +224,12 @@ cmd = "wg set|setconf|addconf|syncconf"
 why = "WireGuard config changed"
 
 [[rule]]
+id = "split-tunnel"
+sev = "warn"
+cmd = "mullvad-exclude"
+why = "program started outside the VPN tunnel (split tunneling, hostfw blocks it)"
+
+[[rule]]
 id = "ip-change"
 sev = "warn"
 cmd = "ip add|del|delete|change|replace|flush|set|append|prepend"
