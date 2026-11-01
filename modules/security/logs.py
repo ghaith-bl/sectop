@@ -7,7 +7,9 @@ What the rest of the system logged that the other boxes do not show:
 - audit file watches and exec rules of the hardening rules that no other box reads
   (identity, scope, MAC-policy, sudo_log_file, logins, session, system-locale,
   time-change, perm_chng, usermod, privileged; volume keys mounts, delete, perm_mod,
-  access). Grouped by key + exe + file.
+  access) plus af-alg (socket family 38, AF_ALG, blocked by kernel arg
+  initcall_blacklist=af_alg_init in the hardening repo). Grouped by key + exe + file;
+  an event without PATH records (socket rule): key + exe + syscall + result.
 - audit SELINUX_ERR (1401): SELinux errors that are not denials (invalid context).
 
 Severity (red = dangerous or suspicious, worth following up; decided 2026-10-25):
@@ -15,9 +17,11 @@ Severity (red = dangerous or suspicious, worth following up; decided 2026-10-25)
 - audit keys: a file watch written by the program that owns the file is routine (sudo
   writes the sudo log, NetworkManager its profiles, pam the faillock / lastlog files):
   info. The same file written by any other program: warn. scope (sudoers) and
-  MAC-policy (SELinux policy) changes: warn whoever writes. Exec rules and volume
-  keys: info. Fixture 2h 2026-10-26: 20 sudo_log_file, 14 logins, 40 session, 12
-  system-locale events, all from their owners.
+  MAC-policy (SELinux policy) changes: warn whoever writes. af-alg: warn, any program
+  (with the kernel arg every try fails: a program that needs it or a probe; without it,
+  the interface is open). Exec rules and volume keys: info. Fixture 2h 2026-10-26:
+  20 sudo_log_file, 14 logins, 40 session, 12 system-locale events, all from their
+  owners.
 - Own entries (sectop units): tagged own in the from cell, never dropped.
 - Noise list (/etc/sectop/noise.toml, core/noise.py): an entry matching
   `security/log:<id>` marks the row noise (dim, reason in the detail) and keeps a crit
@@ -25,6 +29,7 @@ Severity (red = dangerous or suspicious, worth following up; decided 2026-10-25)
 """
 
 import collections
+import errno
 import hashlib
 import os
 import re
@@ -52,7 +57,10 @@ OWNERS = {
                  "groupdel", "passwd", "chpasswd", "chage", "gpasswd", "newusers", "pwconv",
                  "grpconv"},
 }
-ALWAYS_WARN = {"scope": "sudoers changed", "MAC-policy": "SELinux policy files changed"}
+ALWAYS_WARN = {"scope": "sudoers changed", "MAC-policy": "SELinux policy files changed",
+               "af-alg": "AF_ALG socket, kernel crypto API from user space"}
+# arch -> syscall number -> name, for rules without a file (x86_64, i386)
+CALLS = {"c000003e": {"41": "socket"}, "40000003": {"359": "socket"}}
 INFO_KEYS = {"perm_chng", "usermod", "privileged", "mounts", "delete", "perm_mod", "access"}
 HANDLED = {"root_cmds", "user_emulation", "kernel_modules"}     # other boxes
 MAX_ROWS = 200
@@ -185,6 +193,21 @@ def _rate(key: str, exe: str) -> tuple:
     return "info", f"audit key {key}"
 
 
+def _result(ev) -> str:
+    if ev.get("success") != "no":
+        return "ok"
+    code = ev.get("exit") or ""
+    try:
+        return "failed " + errno.errorcode.get(-int(code), code)
+    except ValueError:
+        return "failed"
+
+
+def _call(ev) -> str:
+    nr = ev.get("syscall") or "?"
+    return CALLS.get(ev.get("arch") or "", {}).get(nr, nr)
+
+
 def _none(pid, ts):
     return None
 
@@ -202,14 +225,19 @@ def audit_event(lg: Logs, ev, ts: float, name, prog=_none) -> None:
         path = _path(ev)
         sev, why = _rate(key, exe)
         who = name(ev.get("auid"))
-        r = _add(lg, "\x1f".join(("a", key, exe, TMP_RE.sub(".<tmp>", path))), f"audit {key}",
-                 f"{os.path.basename(exe)} {path}", sev, why, ts)
+        call, result = _call(ev), _result(ev)
+        # no PATH record at all (socket rule): the call and its result tell rows apart
+        filed = bool(ev.all("PATH"))
+        target = TMP_RE.sub(".<tmp>", path) if filed else f"{call} {result}"
+        r = _add(lg, "\x1f".join(("a", key, exe, target)), f"audit {key}",
+                 f"{os.path.basename(exe)} {path if filed else target}", sev, why, ts)
         r.label = key
         procmod.add(r.progs, prog(ev.get("pid"), ts) or prog(ev.get("ppid"), ts))
-        ok = "ok" if ev.get("success") != "no" else "failed"
         r.detail = {"exe": exe, "file": path, "login": who,
-                    "syscall": f"{ev.get('syscall') or '?'} {ok}",
+                    "syscall": f"{call} {result.split()[0]}",
                     "pid": ev.get("pid") or "-", "cmdline": ev.proctitle or "-"}
+        if result != "ok":
+            r.detail["result"] = result
 
 
 def _selinux_err(lg: Logs, rec, ts: float) -> None:

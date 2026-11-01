@@ -159,3 +159,8 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
   Config checked, not the live state: `chronyc -N authdata` needs root (501 Not
   authorised as a user), `chronyc sources` shows no authentication. `authselectmode
   require` is the guard: a source without NTS is never selected.
+- AF_ALG off (2026-11-01, silverblue-cis-hardening `kargs`): `af-alg-off`, cmdline
+  `initcall_blacklist=af_alg_init`. warn: nothing used AF_ALG in 2 days of audit (rule
+  key af-alg, logs box), a missing arg opens an attack surface, not a hole by itself.
+  Live state not read: a test socket would hit the af-alg rule on every collect.
+  Audit rules want 72 (70 CIS + 2 af-alg).

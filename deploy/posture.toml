@@ -59,8 +59,8 @@ units = { "auditd.service" = "active" }
 id = "audit-rules"
 kind = "audit-rules"
 sev = "warn"
-why = "audit rules loaded (verification.md: ~70)"
-want = 70
+why = "audit rules loaded (verification.md: ~72)"
+want = 72
 
 [[check]]
 id = "journald-audit"
@@ -233,6 +233,16 @@ sev = "warn"
 why = "CIS modules blocked (90-cis-blacklist.conf)"
 path = "/etc/modprobe.d/90-cis-blacklist.conf"
 want = ["install cramfs /bin/false", "install freevxfs /bin/false", "install hfs /bin/false", "install hfsplus /bin/false", "install jffs2 /bin/false", "install squashfs /bin/false", "install udf /bin/false", "install atm /bin/false", "install can /bin/false", "install dccp /bin/false", "install rds /bin/false", "install sctp /bin/false", "install tipc /bin/false", "install firewire-core /bin/false"]
+
+# AF_ALG (kernel crypto API from user space) not started at boot (silverblue-cis-hardening
+# kargs, 2026-11-01). One word: initcall_blacklist=a,b would need a new want.
+
+[[check]]
+id = "af-alg-off"
+kind = "cmdline"
+sev = "warn"
+why = "AF_ALG off from boot (kernel arg)"
+want = ["initcall_blacklist=af_alg_init"]
 
 # Secure Boot on since step 9 (2026-10-26). Off again = switched off in the firmware
 # setup (admin password): crit. Lockdown follows it: warn, one alert is enough.

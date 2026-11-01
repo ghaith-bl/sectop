@@ -209,7 +209,7 @@ from, what. Full width, below the kernel box. Newest first. Title:
 | from | row = group | what |
 |---|---|---|
 | SYSLOG_IDENTIFIER (else _COMM, unit), `(own)` for sectop | identifier + PRIORITY + normalized message (quoted names, UUIDs, IPs, hex, numbers) | newest line |
-| `audit <key>` | key + exe + file (mkstemp suffix `.XXXXXX` folded) | `<exe name> <file>` |
+| `audit <key>` | key + exe + file (mkstemp suffix `.XXXXXX` folded); no PATH record (af-alg socket rule): key + exe + syscall + result | `<exe name> <file>`, `<exe name> socket failed EAFNOSUPPORT` |
 | `selinux` | op + invalid context type | `setxattr invalid context <type>` |
 
 - Severity (decided 2026-10-26, red = dangerous or suspicious):
@@ -224,6 +224,7 @@ from, what. Full width, below the kernel box. Newest first. Title:
               (systemd-timedated), identity (shadow-utils, passwd, chage, gpasswd,
               systemd-sysusers)
             scope (sudoers) and MAC-policy (SELinux policy files): any writer
+            af-alg (socket family 38): any program
       info  journal PRIORITY 4 (warning); a file watch written by its owner; exec rules
             perm_chng usermod privileged; volume keys mounts delete perm_mod access;
             SELINUX_ERR
@@ -233,9 +234,15 @@ from, what. Full width, below the kernel box. Newest first. Title:
   writes its profiles (system-locale: the 4 wifi profiles fixed that day). As warn,
   every sudo would color 3 rows yellow; the same file written by vi or sed is the
   suspicious case.
+- af-alg (2026-11-01): hardening rule `socket` with a0=38 (AF_ALG), b64 + b32, key
+  af-alg. 2 days of audit before the block: no program used it. With kernel arg
+  `initcall_blacklist=af_alg_init` every try fails (`EAFNOSUPPORT`): a program that
+  needs it (breaks) or a probe. ok = the arg is gone (posture `af-alg-off` fails too).
+  warn, not crit: blocked tries do nothing. 32-bit programs that use `socketcall`
+  (old i386 glibc) are not matched by family: the arg blocks them anyway.
 - Detail: why, first, last 3 distinct lines, priority, unit (`session-#.scope` for
-  sudo / login scopes), user unit; audit: exe, file, login, syscall ok / failed, pid,
-  cmdline; `noise key security/log:<12 hex>`; noise reason when one matches.
+  sudo / login scopes), user unit; audit: exe, file, login, syscall (name for socket)
+  ok / failed, result (`failed <errno>`, when failed), pid, cmdline; `noise key security/log:<12 hex>`; noise reason when one matches.
 - Own entries: sectop.service, sectop-net.service, sectop-whois@*.service or
   SYSLOG_IDENTIFIER sectop, sectop-collector, sectop-net: `<id> (own)`, never dropped.
 - Noise (`/etc/sectop/noise.toml`, read once in init, same list as the alert engine): an

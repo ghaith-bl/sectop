@@ -748,6 +748,26 @@ def _watch_events(*writes) -> list:
     return out
 
 
+def _socket_events(*calls) -> list:
+    """Audit entries of af-alg socket rule hits (no PATH record), one second apart:
+    (arch, syscall, exit, exe)."""
+    out = []
+    for i, (arch, nr, code, exe) in enumerate(calls):
+        us, aid = str(650_000_000 + i * 1_000_000), str(97000 + i)
+        ok = "no" if code.startswith("-") else "yes"
+        for typ, name, msg in (
+                ("1300", "SYSCALL", f"SYSCALL arch={arch} syscall={nr} success={ok} exit={code} "
+                 f"a0=26 a1=5 a2=0 a3=0 items=0 ppid=1 pid={800 + i} auid=1000 uid=1000 "
+                 f"gid=1000 euid=1000 suid=1000 fsuid=1000 egid=1000 sgid=1000 fsgid=1000 "
+                 f'tty=pts0 ses=3 comm="x" exe="{exe}" '
+                 f'subj=unconfined_u:unconfined_r:unconfined_t:s0 key="af-alg"'),
+                ("1327", "PROCTITLE", "PROCTITLE proctitle=" + os.path.basename(exe)
+                 .encode().hex().upper())):
+            out.append({"__REALTIME_TIMESTAMP": us, "_TRANSPORT": "audit", "_AUDIT_ID": aid,
+                        "_AUDIT_TYPE": typ, "_AUDIT_TYPE_NAME": name, "MESSAGE": msg})
+    return out
+
+
 def _jlines(*lines) -> list:
     """Journal entries one second apart: (PRIORITY, SYSLOG_IDENTIFIER, MESSAGE, unit)."""
     return [{"__REALTIME_TIMESTAMP": str(700_000_000 + i * 1_000_000), "_TRANSPORT": "journal",
@@ -812,6 +832,27 @@ class TestLogs(unittest.TestCase):
         d = got[("audit identity", "vim /etc/shadow")][2]
         self.assertEqual((d["login"], d["why"][:38]), ("null", "audit key identity: written by vim, no"))
         self.assertEqual(r.st.runs, 0)                               # not commands rows
+
+    def test_af_alg(self):
+        """socket(AF_ALG) rule (key af-alg): no file; blocked by initcall_blacklist =
+        EAFNOSUPPORT (host test 2026-11-01: python3 socket(AF_ALG) -> errno 97)."""
+        r = Run()
+        snap = r.collect(_socket_events(
+            ("c000003e", "41", "-97", "/usr/bin/python3.14"),
+            ("c000003e", "41", "-97", "/usr/bin/python3.14"),
+            ("40000003", "359", "-97", "/opt/game/bin32"),
+            ("c000003e", "41", "3", "/usr/bin/python3.14")), 660.0)
+        got = log_rows(snap)
+        self.assertEqual({k: (v[0], v[1]) for k, v in got.items()}, {
+            ("audit af-alg", "python3.14 socket failed EAFNOSUPPORT"): ("2", "warn"),
+            ("audit af-alg", "bin32 socket failed EAFNOSUPPORT"): ("1", "warn"),
+            ("audit af-alg", "python3.14 socket ok"): ("1", "warn")})
+        d = got[("audit af-alg", "python3.14 socket failed EAFNOSUPPORT")][2]
+        self.assertEqual((d["file"], d["syscall"], d["result"], d["login"]),
+                         ("-", "socket failed", "failed EAFNOSUPPORT", "null"))
+        self.assertTrue(d["why"].startswith("AF_ALG socket"))
+        self.assertNotIn("result", got[("audit af-alg", "python3.14 socket ok")][2])
+        self.assertEqual([c for c in snap["checks"] if c["key"].startswith("log:")], [])
 
     def test_levels_alert_and_own(self):
         r = Run()
