@@ -91,6 +91,18 @@ class TestWriteLoad(unittest.TestCase):
             with self.assertRaises(sf.StateError, msg=data[:10]):
                 sf.load(self.path, self.uid)
 
+    def test_depth(self):
+        """Limit checked before json.loads: same result on every Python build."""
+        self.assertEqual(sf.depth('{"a":[1,{"b":"[[{"}],"c":"\\"[["}'), 3)  # skips strings
+        for n, ok in ((sf.MAX_DEPTH, True), (sf.MAX_DEPTH + 1, False)):
+            with open(self.path, "wb") as f:
+                f.write(b"[" * n + b"]" * n)
+            if ok:
+                self.assertIsInstance(sf.load(self.path, self.uid), list)
+            else:
+                with self.assertRaisesRegex(sf.StateError, "nested deeper"):
+                    sf.load(self.path, self.uid)
+
 
 class TestCheckState(unittest.TestCase):
     def test_good(self):

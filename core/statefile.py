@@ -15,6 +15,7 @@ Snapshot rules of core/module.py. The writer is a less trusted process.
 
 import json
 import os
+import re
 
 from core import alerts as alertsmod
 from core import module as m
@@ -27,6 +28,12 @@ MAX_MODULES = 32
 MAX_FEED = 500
 MAX_FLAGS = 20
 MAX_COUNT = 10 ** 12
+# [ / { nesting: state.json and the net unit's nft JSON stay under ~12. Checked before
+# json.loads, not left to RecursionError: how deep json.loads gets depends on the build
+# (3.14 checks the C stack: a CI runner parsed 100000 levels, my host did not).
+MAX_DEPTH = 64
+_STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
+_NOT_BRACKET = re.compile(r"[^\[\]{}]+")
 VIEW_STATUSES = m.STATUSES + ("off",)
 ALERT_STATES = ("open", "held")
 
@@ -64,6 +71,18 @@ def write(path: str, obj, mode: int = 0o640) -> None:
     os.replace(tmp, path)
 
 
+def depth(text: str) -> int:
+    """Deepest [ / { nesting outside JSON strings (brackets only, no validation)."""
+    deepest = level = 0
+    for ch in _NOT_BRACKET.sub("", _STRING.sub("", text)):
+        if ch in "[{":
+            level += 1
+            deepest = max(deepest, level)
+        else:
+            level -= 1
+    return deepest
+
+
 def load(path: str, owner_uid: int, max_size: int = MAX_SIZE):
     """-> parsed JSON, None if the file is missing. Unsafe file or bad JSON -> StateError."""
     try:
@@ -73,7 +92,10 @@ def load(path: str, owner_uid: int, max_size: int = MAX_SIZE):
     if data is None:
         return None
     try:
-        return json.loads(data.decode("utf-8"))
+        text = data.decode("utf-8")
+        if depth(text) > MAX_DEPTH:
+            raise StateError(f"{path}: bad JSON: nested deeper than {MAX_DEPTH}")
+        return json.loads(text)
     except (UnicodeDecodeError, ValueError, RecursionError) as e:
         raise StateError(f"{path}: bad JSON: {e}") from None
 
