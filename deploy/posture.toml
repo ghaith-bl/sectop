@@ -244,6 +244,22 @@ sev = "warn"
 why = "AF_ALG off from boot (kernel arg)"
 want = ["initcall_blacklist=af_alg_init"]
 
+[[check]]
+id = "page-shuffle"
+kind = "cmdline"
+sev = "warn"
+why = "page allocator free lists in random order from boot (kernel arg)"
+want = ["page_alloc.shuffle=1"]
+
+# Only worth it with a GRUB password (grub2-setpassword): /boot/grub2 is not readable
+# for the collector, so that part is not checked here.
+[[check]]
+id = "initrd-no-shell"
+kind = "cmdline"
+sev = "warn"
+why = "initramfs failure halts, no root shell (kernel args)"
+want = ["rd.shell=0", "rd.emergency=halt"]
+
 # Secure Boot on since step 9 (2026-10-26). Off again = switched off in the firmware
 # setup (admin password): crit. Lockdown follows it: warn, one alert is enough.
 

@@ -95,7 +95,8 @@ class FakeHost(kinds.Host):
             "/etc/selinux/config": "# c\nSELINUX=enforcing\nSELINUXTYPE=targeted\n",
             "/proc/cmdline": "BOOT_IMAGE=x rhgb audit=1 audit_backlog_limit=8192 quiet "
                              "SYSTEMD_DEFAULT_HOSTNAME=localhost "
-                             "initcall_blacklist=af_alg_init\n",
+                             "initcall_blacklist=af_alg_init page_alloc.shuffle=1 rd.shell=0 "
+                             "rd.emergency=halt\n",
             "/etc/security/faillock.conf": "# deny = 3\ndeny = 5\nunlock_time = 900\n",
             "/etc/security/pwquality.conf": "minlen = 14\nminclass = 4\nenforce_for_root\n",
             "/proc/sys/kernel/tainted": "12288\n",

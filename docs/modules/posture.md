@@ -170,3 +170,8 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
   (setuid root, mullvad-vpn, installed after the count of 70). The check is a floor
   (`>= want`): a package that adds a setuid file passes, one that removes it fails
   until `want` follows. Split tunneling itself: watch rule `split-tunnel` (warn).
+- Kernel args 2026-11-01 (silverblue-cis-hardening `kargs`, ideas from secureblue):
+  `page-shuffle` (`page_alloc.shuffle=1`) and `initrd-no-shell` (`rd.shell=0
+  rd.emergency=halt`), both cmdline, warn: missing = less hardening, not a hole. The
+  GRUB password that makes `initrd-no-shell` worth it is not checked: /boot/grub2 is not
+  readable for user sectop (not verified on the host). 56 checks.
