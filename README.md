@@ -149,6 +149,10 @@ No sudo: collector, net unit and UI refuse to run as root.
 
     python3 -I -m unittest discover -s tests -t .
 
+CI (.github/workflows/check.yml), every push: tests on Python 3.11 - 3.14 as a user and
+as root, ASCII-only source, `bash -n` + ShellCheck (warnings) on install.sh, private-info
+check of the working tree (generic patterns, script from silverblue-cis-hardening).
+
 ## Notes
 
 - Test fixtures come from my own host, made with tests/journal_fixture.py (journalctl

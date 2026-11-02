@@ -1,0 +1,64 @@
+name: check
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: tests as a user
+        run: python -I -m unittest discover -s tests -t .
+
+      - name: tests as root
+        run: sudo "$(command -v python)" -I -m unittest discover -s tests -t .
+
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: sectop
+          persist-credentials: false
+
+      # check-private-info.sh lives in the hardening repo (public)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ghaith-bl/silverblue-cis-hardening
+          path: hardening
+          persist-credentials: false
+
+      - name: ASCII only
+        working-directory: sectop
+        run: |
+          ! grep -rnIP '[^\x00-\x7F]' core tests docs modules README.md bin deploy install.sh
+
+      - name: install.sh (bash -n, shellcheck warnings)
+        working-directory: sectop
+        run: |
+          bash -n install.sh
+          shellcheck -S warning install.sh
+
+      - name: private info (working tree, generic patterns)
+        working-directory: sectop
+        env:
+          PRIVATE_INFO_GENERIC: "1"
+        run: ../hardening/tools/check-private-info.sh --tree
