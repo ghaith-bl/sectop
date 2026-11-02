@@ -9,6 +9,16 @@ sectop runs as separate parts (docs/architecture.md, Privilege split):
 | sectop-whois.socket + sectop-whois@.service | dynamic, per lookup | network only | the answer, on the socket |
 | sectop (UI) | my user, no sudo | group sectop: reads /run/sectop, connects to the whois socket | nothing |
 
+## Check first
+
+    sudo ./install.sh --check
+
+Changes nothing. Must-haves (missing = install stops before writing anything): systemd
+as init, /usr/bin/python3 >= 3.11, git, journalctl, systemctl, systemd-sysusers.
+Extras (missing = warning, the install goes on, boxes stay empty): journald audit
+socket, auditd + rule key root_cmds, nft / ss / ip, table inet hostfw, wg, restorecon.
+`sudo ./install.sh` runs the same check first.
+
 ## Install / update
 
     cd ~/my-project/sectop

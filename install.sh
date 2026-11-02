@@ -3,6 +3,7 @@
 # install.sh - install sectop from this repo's git HEAD as root-owned code + services.
 #
 #   sudo ./install.sh            install or update (HEAD, not uncommitted changes)
+#   sudo ./install.sh --check    requirements only, changes nothing
 #   sudo ./install.sh --remove   stop + remove units, code, launcher, sysusers file
 #
 # Why: code a service runs must not be writable by my user (docs/architecture.md,
@@ -37,6 +38,42 @@ remove() {
   log "removed: units, $DEST, $BIN, $SYSUSERS"
   log "kept: $CONF; users sectop, sectop-net and group sectop"
   log "  (by hand: userdel sectop; userdel sectop-net; groupdel sectop)"
+}
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# preflight: a missing must-have stops before anything is written; a missing extra
+# only warns (v0.1 reads what silverblue-cis-hardening sets up: README Requirements)
+preflight() {
+  local miss=0 c v
+  [[ -d /run/systemd/system ]] || { warn "need: systemd as init"; miss=1; }
+  if [[ -x /usr/bin/python3 ]]; then
+    v=$(/usr/bin/python3 -I -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+    /usr/bin/python3 -I -c 'import sys; sys.exit(sys.version_info < (3, 11))' \
+      || { warn "need: python3 >= 3.11 (tomllib), found $v"; miss=1; }
+  else
+    warn "need: /usr/bin/python3 >= 3.11"; miss=1
+  fi
+  for c in git journalctl systemctl systemd-sysusers; do
+    have "$c" || { warn "need: $c"; miss=1; }
+  done
+  (( miss == 0 )) || die "requirements missing (README Requirements): nothing changed"
+  log "must-haves: systemd, python3 $v, git, journalctl, systemd-sysusers"
+
+  systemctl is-active --quiet systemd-journald-audit.socket \
+    || warn "systemd-journald-audit.socket not active: no audit records for sectop"
+  if ! systemctl is-active --quiet auditd.service; then
+    warn "auditd not running: security screen mostly empty"
+  elif ! auditctl -l 2>/dev/null | grep -q 'key=root_cmds'; then
+    warn "no audit rule key root_cmds (silverblue-cis-hardening audit-rules): no commands"
+  fi
+  for c in nft ss ip; do have "$c" || warn "no $c: firewall screen incomplete"; done
+  if have nft && ! nft list table inet hostfw >/dev/null 2>&1; then
+    warn "no nftables table inet hostfw (silverblue-cis-hardening firewall/): firewall boxes empty"
+  fi
+  have wg || warn "no wg (wireguard-tools): no tunnel details"
+  have restorecon || warn "no restorecon: SELinux labels not set (fine without SELinux)"
+  log "posture: /etc/sectop/posture.toml checks my baseline; other hosts: expect fails"
 }
 
 install_code() {   # $1 = repo, $2 = login user
@@ -130,13 +167,15 @@ install_units() {
 main() {
   [[ $EUID -eq 0 ]] || die "run with sudo"
   [[ ${1:-} == --remove ]] && { remove; return; }
-  [[ $# -eq 0 ]] || die "usage: sudo $0 [--remove]"
+  [[ ${1:-} == --check ]] && { preflight; return; }
+  [[ $# -eq 0 ]] || die "usage: sudo $0 [--check | --remove]"
   local user=${SUDO_USER:-} repo
   [[ $user =~ ^[a-z_][a-z0-9_-]*$ && $user != root ]] \
     || die "run with sudo from your login (SUDO_USER missing or root)"
   repo=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
   local member=no
   if id -nG "$user" | tr ' ' '\n' | grep -qx sectop; then member=yes; fi
+  preflight
   install_code "$repo" "$user"
   install_users "$user"
   check_conf

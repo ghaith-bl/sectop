@@ -1,9 +1,54 @@
 # sectop
 
-Terminal security dashboard for my Silverblue workstation.
-Python 3 stdlib only (curses, tomllib). No third-party packages.
+Terminal security dashboard for my Fedora Silverblue workstation: firewall and VPN
+traffic per program, root commands, logins, kernel events, logs, and whether my
+hardening baseline still holds. Like btop, but for security. Python 3 stdlib only
+(curses, tomllib), no third-party packages, nothing runs as root.
 
-Status: in progress (phase 3: privilege split, docs/architecture.md).
+> **Status: v0.1, built for one machine.** It reads what
+> [silverblue-cis-hardening](https://github.com/ghaith-bl/silverblue-cis-hardening) sets
+> up on my laptop: its audit rule keys, its nftables table `hostfw`, its posture
+> baseline, Mullvad VPN. On another host many boxes stay empty and many posture checks
+> fail. Other distros, no VPN, no hostfw: planned for v0.2. Read-only: it changes nothing
+> on the host. No warranty (GPL-3.0, sections 15-16).
+
+## Screenshots
+
+Public IPs masked (key m), the way the screens start.
+
+| | |
+|---|---|
+| 1 firewall | ![firewall screen](docs/img/screen-1-firewall.png) |
+| 2 security | ![security screen](docs/img/screen-2-security.png) |
+| 3 processes | ![processes screen](docs/img/screen-3-processes.png) |
+
+## Requirements
+
+- Linux with systemd + journald, `systemd-journald-audit.socket` enabled (audit records
+  are read from the journal only)
+- Python >= 3.11 (tomllib); tested 3.13, 3.14
+- auditd + the audit rules of silverblue-cis-hardening (`audit-rules` section: keys
+  root_cmds, user_emulation, kernel_modules, logins, identity, ...). Without them the
+  security screen is mostly empty
+- firewall screen: nftables (`nft`), iproute2 (`ss`, `ip`), hostfw from
+  silverblue-cis-hardening (firewall/), WireGuard tunnel (`wg`, kernel or userspace)
+- posture checks call, if present: `firewall-cmd`, `nmcli`, `resolvectl`, `hostnamectl`,
+  `rpm-ostree`, `systemctl`; the policy (deploy/posture.toml) is my baseline
+- install: git, sudo, systemd-sysusers; `restorecon` if SELinux is on
+- a 256-color terminal (8 basic colors work)
+
+## Security model
+
+- Three services, none as root: `sectop-net` (CAP_NET_ADMIN only, no network: `nft`,
+  `wg`), `sectop` collector (group systemd-journal, no capabilities, no network),
+  `sectop-whois@` (dynamic user, network only, one RDAP lookup per connection)
+- The UI runs as my user, no sudo, reads only /run/sectop (group sectop) and validates
+  every field before drawing it
+- Code installed root-owned from git HEAD into /usr/local/lib/sectop; tests and
+  fixtures stay in the repo
+- Read-only: no blocking, no killing, no unit stops (planned last, behind polkit)
+- Secrets in command lines masked; public IPs masked until key m
+- Details: docs/architecture.md (Privilege split), docs/install.md
 
 ## Design
 
@@ -33,8 +78,11 @@ Status: in progress (phase 3: privilege split, docs/architecture.md).
   box: journal errors / warnings and audit file watches grouped, noise rows dim
 - posture: is my hardening baseline still true, checked every 5 min against
   `/etc/sectop/posture.toml` (SELinux, audit, firewalld, accounts, sysctls, LUKS,
-  system image, listeners, ...): pass / fail / accepted / unknown
+  system image, listeners, kernel args, ...): pass / fail / accepted / unknown
   (docs/modules/posture.md)
+- system (screen 3): cpu, load, memory, swap, pressure, disk io, /var + /boot space,
+  temperatures; programs box (one row per program: cpu, memory, peaks), zombies and
+  processes stuck in D state (docs/architecture.md, Processes screen)
 
 ## Screen legend
 
@@ -81,8 +129,12 @@ terminal, else the 8 basic colors.
 
 ## Install
 
+    git clone https://github.com/ghaith-bl/sectop.git && cd sectop
+    sudo ./install.sh --check    # requirements only, changes nothing
     sudo ./install.sh            # git HEAD -> /usr/local/lib/sectop, users, units
     sudo ./install.sh --remove
+
+First install: log out and in once (your user joins group sectop).
 
 Parts: sectop-net.service (nft / wg, CAP_NET_ADMIN only), sectop.service (collector),
 sectop-whois.socket (RDAP), UI as my user. See docs/install.md.
@@ -105,3 +157,15 @@ No sudo: collector, net unit and UI refuse to run as root.
   Check the result before commit.
 - Hand-written test lines use fake or documentation values only (MACs 02:00:00:...,
   IPs 192.0.2.x / 198.51.100.x / 203.0.113.x), never values copied from my host.
+
+## Credits
+
+- btop: ideas for the layout (boxes, screens, process view). No code taken; sectop has
+  its own keys
+- silverblue-cis-hardening: the baseline sectop watches (same author)
+- Design, code drafting, tests and documentation done with help from Claude. Every
+  change was reviewed, run and verified on my own machine.
+
+## License
+
+GPL-3.0-or-later, see [LICENSE](LICENSE).
