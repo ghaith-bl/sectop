@@ -81,7 +81,9 @@ install_code() {   # $1 = repo, $2 = login user
   install -d -m 0755 "$(dirname "$DEST")"
   TMP=$(mktemp -d "$(dirname "$DEST")/.sectop.XXXXXX")     # same filesystem: mv = rename
   trap 'rm -rf "$TMP"' EXIT
-  # git runs as my user: root refuses a repo owned by someone else (safe.directory)
+  # git runs as my user: root refuses a repo owned by someone else (safe.directory).
+  # The redirect stays root on purpose: $TMP is root's, my user must not write there.
+  # shellcheck disable=SC2024
   sudo -u "$user" git -C "$repo" archive --format=tar HEAD > "$TMP/head.tar" \
     || die "git archive HEAD failed"
   if [[ -n $(sudo -u "$user" git -C "$repo" status --porcelain --untracked-files=no) ]]; then
