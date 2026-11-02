@@ -113,8 +113,9 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
           no failed units; core dumps off; journal persistent; GNOME locks; wifi IPv6
           off; booted system <= 14 days; random MAC config; dhcp-send-hostname 0 on
           every Wi-Fi / cable profile; LLMNR + mDNS off; fallback hostname kernel arg;
-          DNS servers only on the tunnel; no DNS in Wi-Fi / cable profiles; chronyd
-          running; chrony NTS only (authselectmode require, minsources 2)
+          DNS servers only on the tunnel; no DNS in Wi-Fi / cable profiles; Mullvad
+          socket only for group mullvad; chronyd running; chrony NTS only
+          (authselectmode require, minsources 2)
     info  update staged, waiting for a reboot
 
 - hostfw mode / boot mode: not here, the firewall screen checks them (alerts there).
@@ -175,3 +176,8 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
   rd.emergency=halt`), both cmdline, warn: missing = less hardening, not a hole. The
   GRUB password that makes `initrd-no-shell` worth it is not checked: /boot/grub2 is not
   readable for user sectop (not verified on the host). 56 checks.
+- Mullvad socket 2026-11-02 (silverblue-cis-hardening `mullvad`): `mullvad-socket`, perms
+  of /run/mullvad-vpn, want 760 root:mullvad (host after the change). Without the
+  drop-in the daemon makes it 766 root:root (host before): any local user can
+  disconnect, turn lockdown off or change settings. stat only, the socket is never
+  opened. warn: the tunnel and lockdown are still on. 57 checks.

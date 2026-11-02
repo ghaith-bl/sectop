@@ -202,7 +202,10 @@ class FakeHost(kinds.Host):
         return {0: "root", 1000: "null"}.get(uid, str(uid))
 
     def group(self, gid):
-        return {0: "root", 1000: "null"}.get(gid, str(gid))
+        return {v: k for k, v in GIDS.items()}.get(gid, str(gid))
+
+
+GIDS = {"root": 0, "null": 1000, "mullvad": 975}
 
 
 def chk(**kw):
@@ -339,6 +342,11 @@ class TestKinds(unittest.TestCase):
                          ("fail", "640 root:null"))
         self.assertEqual(res(chk(kind="perms", path="/etc/nope", mode=0, owner="root:root")),
                          ("fail", "missing"))
+        sock = chk(kind="perms", path="/run/mullvad-vpn", mode=0o760, owner="root:mullvad")
+        h.stats["/run/mullvad-vpn"] = (0o140760, 0, GIDS["mullvad"])     # host 2026-11-02
+        self.assertEqual(res(sock, h), ("pass", "760 root:mullvad"))
+        h.stats["/run/mullvad-vpn"] = (0o140766, 0, 0)                   # Mullvad's default
+        self.assertEqual(res(sock, h), ("fail", "766 root:root"))
 
     def test_ostree(self):
         self.assertEqual(res(chk(kind="ostree-unlocked")), ("pass", "locked"))
@@ -712,7 +720,7 @@ class TestModule(unittest.TestCase):
             if c.kind == "lines" and c.path not in h.files:
                 h.files[c.path] = "\n".join(c.want) + "\n"
             if c.kind == "perms":
-                h.stats[c.path] = (0o100000 | c.mode, 0, 0)
+                h.stats[c.path] = (0o100000 | c.mode, 0, GIDS[c.owner.split(":")[1]])
             if c.kind == "listeners":
                 allow = c.allow
         h.files.update({"/etc/systemd/coredump.conf.d/90-cis.conf": "[Coredump]\nStorage=none\n"

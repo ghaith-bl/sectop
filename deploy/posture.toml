@@ -463,6 +463,19 @@ why = "no DNS servers in Wi-Fi / cable profiles, none taken from DHCP"
 types = ["802-11-wireless", "802-3-ethernet"]
 props = { "ipv4.dns" = "", "ipv6.dns" = "", "ipv4.ignore-auto-dns" = "yes", "ipv6.ignore-auto-dns" = "yes" }
 
+# ---- Mullvad (silverblue-cis-hardening mullvad, 2026-11-02) ----
+# MULLVAD_MANAGEMENT_SOCKET_GROUP drop-in: the daemon makes its socket 760 root:mullvad.
+# Without it: 766 root:root, any local user can disconnect or change settings.
+
+[[check]]
+id = "mullvad-socket"
+kind = "perms"
+sev = "warn"
+why = "Mullvad daemon socket only for group mullvad"
+path = "/run/mullvad-vpn"
+mode = "760"
+owner = "root:mullvad"
+
 # ---- time (silverblue-cis-hardening time, 2026-10-31) ----
 # chrony with NTS only (Netnod + PTB). authselectmode require: a source without NTS
 # (pool, DHCP servers) is never selected, even if added later. Live NTS state needs
