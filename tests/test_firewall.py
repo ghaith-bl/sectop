@@ -262,6 +262,7 @@ class TestCgroup(unittest.TestCase):
         cases = {
             app + "app-flatpak-com.brave.Browser-2324164128.scope": "com.brave.Browser",
             app + "app-gnome-org.gnome.Ptyxis-4711.scope": "org.gnome.Ptyxis",
+            app + "app-gnome-brave\\x2dbrowser-8609.scope": "brave-browser",  # rpm Brave (host 2026-11-02)
             app + "app-firefox-12.scope": "firefox",                         # no launcher
             app + "app-gnome-foo\\x2dbar@autostart.service": "foo-bar",       # escaped dash
             app + "app-org.example.Tool.service": "org.example.Tool",

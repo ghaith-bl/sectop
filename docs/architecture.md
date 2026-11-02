@@ -63,7 +63,7 @@ Who talks to what, both ways, on the firewall screen.
 - Program name: netfilter logs only the UID.
   - now: matched with `ss -p` (same 5-tuple) while the flow is still open
   - after the split: `ss --cgroup`, no CAP_SYS_PTRACE (works as my user, 2026-10-20).
-    Socket -> cgroup -> app id / unit: `app-flatpak-com.brave.Browser-<n>.scope`,
+    Socket -> cgroup -> app id / unit: `app-gnome-brave\x2dbrowser-<n>.scope`,
     `NetworkManager.service`. systemd.io DESKTOP_ENVIRONMENTS:
     `app[-<launcher>]-<ApplicationID>-<RANDOM>.scope`. One word: also fixes `x` for
     "Web Content".

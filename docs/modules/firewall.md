@@ -190,7 +190,8 @@ NetworkManager, systemd-resolved, libvirtd, chronyd, Brave). Program = innermost
 unit of the socket's cgroup (`conns.program()`):
 - desktop app: `app[-<launcher>]-<ApplicationID>-<RANDOM>.scope` or
   `...[@<RANDOM>].service` (systemd.io DESKTOP_ENVIRONMENTS) -> the ApplicationID, e.g.
-  `com.brave.Browser`. One word: `x` works for every program.
+  `brave-browser` (rpm, `app-gnome-brave\x2dbrowser-<n>.scope`, host 2026-11-02) or
+  `com.valvesoftware.Steam` (Flatpak). One word: `x` works for every program.
 - other units: name without `.service` / `.scope`, template instance and random part
   (`NetworkManager`, `chronyd`, `getty`, `session`). `\xNN` escapes decoded.
 - terminal commands: the tab's scope, `vte-spawn` (not `curl`): the price of no ptrace.
