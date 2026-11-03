@@ -1,5 +1,6 @@
 """Parse `nft -j` output (hostfw table, VPN kill switch table). Pure functions, no I/O."""
 
+import ipaddress
 import json
 
 
@@ -73,6 +74,54 @@ def set_elems(text: str) -> list:
             raise ValueError("nft: set elements must be integers")
         return elems
     raise ValueError("nft: no set in output")
+
+
+def addr_elems(text: str) -> list:
+    """`list set inet hostfw <ipv4_addr set>` -> list of addresses (str). Empty set: []."""
+    for it in _items(text):
+        s = it.get("set")
+        if not isinstance(s, dict):
+            continue
+        elems = s.get("elem", [])
+        if not isinstance(elems, list) or not all(_ipv4(e) for e in elems):
+            raise ValueError("nft: set elements must be IPv4 addresses")
+        return elems
+    raise ValueError("nft: no set in output")
+
+
+def _ipv4(x) -> bool:
+    try:
+        return isinstance(x, str) and ipaddress.IPv4Address(x).compressed == x
+    except ValueError:
+        return False
+
+
+_API = [({"payload": {"protocol": "tcp", "field": "dport"}}, 443),
+        ({"meta": {"key": "skuid"}}, 0)]
+_DADDR = {"payload": {"protocol": "ip", "field": "daddr"}}
+
+
+def api_addrs(text: str) -> list:
+    """`-t list table inet mullvad` -> sorted addresses of Mullvad's API rule in chain
+    output: exactly `ip daddr <addr> tcp dport 443 meta skuid 0 accept` (any order).
+    Mullvad has it only while not connected; the relay rule has a mark, not skuid.
+    Same match as `hostfw api-update` (silverblue-cis-hardening firewall/hostfw.sh)."""
+    out = set()
+    for it in _items(text):
+        r = it.get("rule")
+        if not isinstance(r, dict) or r.get("chain") != "output" or \
+                not isinstance(r.get("expr"), list):
+            continue
+        expr = [e for e in r["expr"] if isinstance(e, dict)]
+        m = [e["match"] for e in expr if isinstance(e.get("match"), dict)]
+        if len(expr) != 4 or len(m) != 3 or expr[-1] != {"accept": None} or \
+                any(x.get("op") != "==" for x in m):
+            continue
+        got = [(x.get("left"), x.get("right")) for x in m]
+        ip = [v for k, v in got if k == _DADDR]
+        if len(ip) == 1 and _ipv4(ip[0]) and all(w in got for w in _API):
+            out.add(ip[0])
+    return sorted(out)
 
 
 def policies(text: str) -> dict:

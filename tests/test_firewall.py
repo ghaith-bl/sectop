@@ -116,6 +116,42 @@ class TestNft(unittest.TestCase):
         with self.assertRaises(ValueError):
             nft.set_elems('{"nftables": []}')
 
+    def test_addr_set(self):
+        # `nft -j list set inet hostfw vpn_api4` of firewall/hostfw.nft, nft 1.0.9, one
+        # element added (RFC 5737)
+        self.assertEqual(nft.addr_elems(fix("nft-vpn-api4.json")), ["192.0.2.10"])
+        self.assertEqual(nft.addr_elems('{"nftables": [{"set": {"name": "s"}}]}'), [])
+        for bad in ('{"nftables": []}', fix("nft-wg-fwmark.json"),
+                    '{"nftables": [{"set": {"elem": ["192.0.2.0/24"]}}]}',
+                    '{"nftables": [{"set": {"elem": ["192.0.2.010"]}}]}',
+                    '{"nftables": [{"set": {"elem": [{"prefix": {}}]}}]}'):
+            with self.assertRaises(ValueError, msg=bad):
+                nft.addr_elems(bad)
+
+    def test_api_addrs(self):
+        # output chain: my host's `nft list chain inet mullvad output` while not connected
+        # (2026-11-03, API address masked), other chains from nft-mullvad-terse.json
+        # without the tunnel rules; loaded with nft 1.0.9
+        self.assertEqual(nft.api_addrs(fix("nft-mullvad-disconnected.json")), ["192.0.2.10"])
+        self.assertEqual(nft.api_addrs(fix("nft-mullvad-terse.json")), [])      # connected
+        doc = json.loads(fix("nft-mullvad-disconnected.json"))
+        rule = next(it for it in doc["nftables"] if "192.0.2.10" in json.dumps(it))
+        expr = rule["rule"]["expr"]
+
+        def with_expr(e, chain="output"):
+            r = dict(rule["rule"], expr=e, chain=chain)
+            return json.dumps({"nftables": [{"rule": r}]})
+        self.assertEqual(nft.api_addrs(with_expr(expr[2:3] + expr[:2] + expr[3:])),
+                         ["192.0.2.10"])                               # any order
+        mark = {"match": {"op": "==", "left": {"meta": {"key": "mark"}}, "right": 1}}
+        for e, chain in ((expr, "input"),                              # other chain
+                         (expr[:2] + [mark] + expr[3:], "output"),     # relay: mark
+                         (expr[:3] + [{"counter": None}] + expr[3:], "output"),
+                         (expr[:3] + [{"drop": None}], "output"),
+                         ([dict(expr[0], match=dict(expr[0]["match"], op="!="))]
+                          + expr[1:], "output")):
+            self.assertEqual(nft.api_addrs(with_expr(e, chain)), [], (e, chain))
+
     def test_policies(self):
         # `nft -j -t list table inet mullvad`: my host's listing 2026-10-26 (relay address
         # masked) loaded with nft 1.0.9. route (mangle) and nat chains do not filter.
@@ -352,6 +388,7 @@ class Host:
         self.answers = {}
         self.set("nft list table", ok(table()))
         self.set("nft list set", ok(fix("nft-wg-fwmark.json")))
+        self.set("nft list set vpn_api4", ok(fix("nft-vpn-api4.json")))
         self.set("journalctl", ok(""))
         self.set("ss", ok(fix("ss.txt")))
         self.set("wg latest-handshakes", ok(fix("wg-handshakes.txt")))
@@ -1056,6 +1093,53 @@ class TestCollect(Base):
                          ("inet mullvad: no drop policy on output, forward", "warn"))
         self.assertEqual(self.check(s, "killswitch")["title"], "kill switch open")
 
+    def test_vpn_api_not_seen(self):
+        s = self.collect()                                          # connected: no rule
+        self.assertEqual(self.items(s, "vpn")["vpn api"],
+                         ("vpn_api4 192.0.2.10 (Mullvad's not seen yet: shown only while "
+                          "not connected)", "ok"))
+        self.assertIsNone(self.st.api_seen)
+
+    def test_vpn_api_same(self):
+        self.host.set("nft list table mullvad", ok(fix("nft-mullvad-disconnected.json")))
+        s = self.collect()
+        self.assertEqual(self.items(s, "vpn")["vpn api"], ("192.0.2.10 (in vpn_api4)", "ok"))
+        self.assertEqual(s["status"], "ok")
+
+    def test_vpn_api_changed(self):
+        """Mullvad's address seen while not connected, kept after the reconnect."""
+        doc = fix("nft-mullvad-disconnected.json").replace("192.0.2.10", "192.0.2.77")
+        self.host.set("nft list table mullvad", ok(doc))
+        s = self.collect()
+        want = (f"Mullvad 192.0.2.77 (seen {self.st.hms(self.wall)}), vpn_api4 192.0.2.10",
+                "warn")
+        self.assertEqual(self.items(s, "vpn")["vpn api"], want)
+        c = self.check(s, "vpn_api")
+        self.assertEqual((c["sev"], c["title"]), ("warn", "VPN API address changed"))
+        self.assertIn("sudo hostfw api-update", c["detail"])
+        self.host.set("nft list table mullvad", ok(fix("nft-mullvad-terse.json")))
+        self.st.slow_at = None
+        self.tick()
+        s = self.collect()                                          # connected again
+        self.assertEqual(self.items(s, "vpn")["vpn api"], want)    # still warned
+        self.host.set("nft list set vpn_api4", ok(fix("nft-vpn-api4.json")
+                                                  .replace("192.0.2.10", "192.0.2.77")))
+        self.st.slow_at = None
+        s = self.collect()                                          # after api-update
+        self.assertEqual(self.items(s, "vpn")["vpn api"], ("192.0.2.77 (in vpn_api4)", "ok"))
+
+    def test_vpn_api_set_problems(self):
+        self.host.set("nft list table mullvad", ok(fix("nft-mullvad-disconnected.json")))
+        self.host.set("nft list set vpn_api4", ok('{"nftables": [{"set": {"name": "x"}}]}'))
+        s = self.collect()
+        self.assertEqual(self.items(s, "vpn")["vpn api"][1], "warn")
+        self.assertIn("vpn_api4 empty", self.items(s, "vpn")["vpn api"][0])
+        self.host.set("nft list set vpn_api4", fail("Error: No such file or directory\n"))
+        self.st.slow_at = None
+        s = self.collect()
+        self.assertEqual(self.items(s, "vpn")["vpn api"],
+                         ("vpn_api4: Error: No such file or directory", "warn"))
+
     def test_parse_error_isolated(self):
         self.host.set("wg latest-handshakes", ok("garbage"))
         self.host.set("nft list table mullvad", ok("{not json"))
@@ -1182,6 +1266,7 @@ class TestCollect(Base):
             "wg show wg0-mullvad fwmark",
             "nft -j list set inet hostfw wg_fwmark",
             "nft -j -t list table inet mullvad",
+            "nft -j list set inet hostfw vpn_api4",
             "ss -tunaH --cgroup state established",
         ])
         self.assertFalse(any("dump" in a for a in argvs))           # never prints private key
@@ -1191,14 +1276,14 @@ class TestCollect(Base):
         words = lambda: [a.split()[0] if a.split()[0] != "wg" else "wg " + a.split()[3]
                          for a in self.argvs()]
         self.collect()
-        self.assertEqual(len(words()), 8)                           # first tick: all sources
+        self.assertEqual(len(words()), 9)                           # first tick: all sources
         for _ in range(int(fw.SLOW // 2) - 1):
             self.tick()
             self.collect()
             self.assertEqual(words(), fast)                         # 4 commands per tick
         self.tick()
         self.collect()
-        self.assertEqual(len(words()), 8)                           # SLOW s later: all again
+        self.assertEqual(len(words()), 9)                           # SLOW s later: all again
 
     def test_slow_refresh_on_tunnel_change(self):
         self.collect()
@@ -1209,7 +1294,8 @@ class TestCollect(Base):
         s = self.collect()                                          # up -> down: refresh now
         self.assertEqual([a for a in self.argvs() if not a.startswith(("journalctl", "ss"))], [
             "nft -j -t list table inet hostfw", "wg show wg0-mullvad latest-handshakes",
-            "nft -j list set inet hostfw wg_fwmark", "nft -j -t list table inet mullvad"])
+            "nft -j list set inet hostfw wg_fwmark", "nft -j -t list table inet mullvad",
+            "nft -j list set inet hostfw vpn_api4"])
         v = self.items(s, "vpn")
         self.assertNotIn("endpoint", v)
         self.assertEqual(v["fwmark"], ("set 0x6d6f6c65", "ok"))
@@ -1445,7 +1531,8 @@ class TestNetSource(Base):
         self.assertEqual(set(self.net) - known, set())
         self.assertEqual({os.path.basename(a[0]) + " " + a[-1] for a in self.net},
                          {"nft hostfw", "wg latest-handshakes", "wg transfer",
-                          "wg endpoints", "wg fwmark", "nft wg_fwmark", "nft mullvad"})
+                          "wg endpoints", "wg fwmark", "nft wg_fwmark", "nft mullvad",
+                          "nft vpn_api4"})
 
     def test_net_error_shown(self):
         self.host.set("nft list table", fail("/run/sectop-net/table.json missing: "

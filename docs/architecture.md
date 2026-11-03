@@ -589,9 +589,9 @@ Design (least privilege: NIST SP 800-53 / 800-171 AC-6, systemd.exec(5), capabil
   only firewall code it imports), takes no input. Raw result per command:
   `/run/sectop-net/<name>.json` (argv, rc, out, err, ts), group `sectop`. Every half
   firewall interval: nft table, wg handshakes + transfer + listen-port (posture
-  listeners, 2026-10-26). Every half SLOW: wg endpoints +
-  fwmark, nft set wg_fwmark. Not in the collector: ambient capabilities pass to every
-  child (capabilities(7)).
+  listeners, 2026-10-26). Every half SLOW: wg endpoints + fwmark, nft sets wg_fwmark +
+  vpn_api4, nft table inet mullvad. Not in the collector: ambient capabilities pass to
+  every child (capabilities(7)).
 - Program names: `ss -p` needs CAP_SYS_PTRACE (capabilities(7): /proc/pid/fd of other
   users). Too strong for a monitor -> `ss --cgroup` (see Firewall audit).
 - No network in collector and net unit: `IPAddressDeny=any`,

@@ -1,0 +1,1 @@
+{"nftables": [{"metainfo": {"version": "1.0.9", "release_name": "Old Doc Yak #3", "json_schema_version": 1}}, {"set": {"family": "inet", "name": "vpn_api4", "table": "hostfw", "type": "ipv4_addr", "handle": 41, "comment": "Mullvad API, tcp/443 from root outside the tunnel; filled from /etc/hostfw/local.conf by: hostfw sync", "elem": ["192.0.2.10"]}}]}

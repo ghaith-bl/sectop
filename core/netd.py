@@ -74,6 +74,7 @@ def commands(tunnel: str, binary=bin_path) -> dict:
         "endpoints": ((wg, "show", tunnel, "endpoints"), SLOW),
         "fwmark": ((wg, "show", tunnel, "fwmark"), SLOW),
         "fwmark_set": ((nft, "-j", "list", "set", *TABLE, "wg_fwmark"), SLOW),
+        "api_set": ((nft, "-j", "list", "set", *TABLE, "vpn_api4"), SLOW),
         "killswitch": ((nft, "-j", "-t", "list", "table", *KS_TABLE), SLOW),
     }
 

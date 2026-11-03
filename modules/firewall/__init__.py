@@ -204,6 +204,7 @@ class State:
         self.slow_at = None            # mono time the slow sources are due again
         self.slow_up = None            # (up, userspace) at the last slow refresh
         self.slow = (None, [], [])     # last slow result: endpoint item, items, checks
+        self.api_seen = None           # (addresses, epoch): Mullvad's API rule, last seen
 
     def cmd(self, *argv, timeout=TIMEOUT):
         """nft / wg: last result from the net unit (CAP_NET_ADMIN). Others: run here."""
@@ -760,8 +761,11 @@ def _slow(st: State, up: bool) -> tuple:
                    lambda e: _item("fwmark", e, "warn"))
         if fm:
             items.append(fm)
-    items.append(_safe(lambda: _killswitch(st, checks), "killswitch", checks,
+    ks = st.cmd("nft", "-j", "-t", "list", "table", *KS_TABLE)
+    items.append(_safe(lambda: _killswitch(st, checks, ks), "killswitch", checks,
                        lambda e: _item("kill switch", e, "warn")))
+    items.append(_safe(lambda: _vpn_api(st, checks, ks), "vpn_api", checks,
+                       lambda e: _item("vpn api", e, "warn")))
     return ep, items, checks
 
 
@@ -783,12 +787,11 @@ def _fwmark(st: State, mark, tunnel_up: bool, checks: list) -> dict | None:
     return _item("fwmark", text, "crit")
 
 
-def _killswitch(st: State, checks: list) -> dict:
+def _killswitch(st: State, checks: list, res) -> dict:
     """VPN kill switch = its nftables table (Mullvad: inet mullvad, kept while
     disconnected by lockdown mode). Drop policy on input, output, forward = on.
     Missing or open: warn (hostfw still rejects leaks in enforce)."""
     name = " ".join(KS_TABLE)
-    res = st.cmd("nft", "-j", "-t", "list", "table", *KS_TABLE)
     if res.rc != 0:
         why = "missing" if nft.missing(res.err) else _fail(res)
         _chk(checks, "killswitch", "warn", f"kill switch {why}",
@@ -802,6 +805,35 @@ def _killswitch(st: State, checks: list) -> dict:
         _chk(checks, "killswitch", "warn", "kill switch open", text)
         return _item("kill switch", text, "warn")
     return _item("kill switch", f"{name} (drop)", tone="green")
+
+
+def _vpn_api(st: State, checks: list, ks) -> dict:
+    """Mullvad's API address (its kill switch rule, only there while not connected,
+    kept from the last time seen) in hostfw's vpn_api4? Not: warn, the daemon's API
+    calls outside the tunnel are blocked (out_leak) until `sudo hostfw api-update`."""
+    if ks.rc == 0:
+        try:
+            seen = nft.api_addrs(ks.out)
+        except ValueError:
+            seen = []                  # the kill switch row reports it
+        if seen:
+            st.api_seen = (tuple(seen), st.wall())
+    res = st.cmd("nft", "-j", "list", "set", *TABLE, "vpn_api4")
+    if res.rc != 0:
+        return _item("vpn api", f"vpn_api4: {_fail(res)}", "warn")    # table: hostfw box
+    have = nft.addr_elems(res.out)
+    if st.api_seen is None:
+        return _item("vpn api", f"vpn_api4 {', '.join(have) or 'empty'} (Mullvad's not "
+                     "seen yet: shown only while not connected)")
+    want, ts = st.api_seen
+    if all(a in have for a in want):
+        return _item("vpn api", f"{', '.join(want)} (in vpn_api4)", tone="green",
+                     ip=want[0])
+    text = (f"Mullvad {', '.join(want)} (seen {st.hms(ts)}), "
+            f"vpn_api4 {', '.join(have) or 'empty'}")
+    _chk(checks, "vpn_api", "warn", "VPN API address changed",
+         f"{text}. Not connected: sudo hostfw api-update")
+    return _item("vpn api", text, "warn", ip=want[0])
 
 
 def _uptime(st: State) -> float | None:

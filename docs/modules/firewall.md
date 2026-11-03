@@ -32,6 +32,7 @@ Slow (every 30 s, and at once when the tunnel goes up / down):
 | endpoint, live fwmark | `wg show wg0-mullvad endpoints`, `fwmark` (tunnel up only) |
 | fwmark set | `nft -j list set inet hostfw wg_fwmark` |
 | kill switch | `nft -j -t list table inet mullvad` (filter chain policies) |
+| vpn api | the same table (Mullvad's API rule), `nft -j list set inet hostfw vpn_api4` |
 
 Userspace tunnel (2026-10-30): Mullvad with DAITA runs WireGuard in the daemon (GotaTun)
 on a tun device, so `wg show` has no device. `wg show` fails + `/sys/class/net/<tunnel>/tun_flags`
@@ -44,7 +45,7 @@ Change between kernel and userspace = slow sources run again at once.
   (rule `root_cmds`, ~7 journal entries each). Was 11 commands per tick. See
   docs/architecture.md, Privilege split.
 - Net unit timing: fast (table, handshakes, transfer) every half module interval, slow
-  (endpoints, fwmark, fwmark set, kill switch table) every 15 s: each tick reads a fresh
+  (endpoints, fwmark, fwmark set, kill switch table, vpn_api4 set) every 15 s: each tick reads a fresh
   sample. Counters are cumulative: a sample read twice gives delta 0 now and the full
   delta next tick.
 - `-t` (nft(8): "Omit contents of sets"): counters and the enforce chain without the
@@ -56,6 +57,14 @@ Change between kernel and userspace = slow sources run again at once.
   disconnected by lockdown mode). On = a filter chain with policy drop on input, output
   and forward (route / nat chains ignored). Rules not read. Missing or open: warn, hostfw
   still rejects leaks in enforce.
+- vpn api (2026-11-03): Mullvad allows its API outside the tunnel with one rule in
+  `inet mullvad` chain output, only while not connected: exactly `ip daddr <addr> tcp
+  dport 443 meta skuid 0 accept` (the relay rule has a mark, not skuid; same match as
+  `hostfw api-update`). The address is kept from the last time seen (memory, until
+  sectop restarts): connected, the rule is gone. In `vpn_api4` -> ok; not seen yet ->
+  ok, set shown; not in the set -> warn: the daemon's API calls outside the tunnel are
+  blocked (out_leak) until `mullvad disconnect; sudo hostfw api-update; mullvad
+  connect`. No automatic update: hostfw opens nothing on its own.
 
 Once in `init()` (boot scan, timeout 5 s each, see out_leak box):
 
@@ -124,6 +133,7 @@ Checks (Snapshot v2, key = rule + subject, `t` = tunnel name):
 | `mode` | mode observe / unknown | warn |
 | `tunnel_down:t` | tunnel down | warn |
 | `killswitch` | VPN kill switch table missing / nft error, or no drop policy on input / output / forward | warn |
+| `vpn_api` | Mullvad's API address (last seen while not connected) not in `vpn_api4` | warn |
 | `log_reader`, `ss`, `boot_mode`, `rollback_file` | source error, file unreadable | warn |
 | `parse:<source>` | parse error (nft, journal, counters, wg, fwmark, killswitch, ...) | warn |
 | `rollback` | rollback armed (deadline in the future) | info |
@@ -146,7 +156,7 @@ own at the bottom, it has the most columns and gets the leftover lines).
 - Colors (`tone`): audit, out_leak and counter rows by verdict: allow blue, block yellow,
   zone / pass / deny plain. Healthy kv values green (table loaded, mode enforce, boot
   mode = live, log reader ok, tunnel up, handshake fresh, fwmark in set, kill switch
-  drop). Problems keep their severity color.
+  drop, vpn api in set). Problems keep their severity color.
 - hostfw `log reader` = state of core's journal follower for this module (ok / note /
   down), not a log view.
 - Column types (right-aligned, docs/module-interface.md): counters pkts / new / bytes;
@@ -340,6 +350,11 @@ Mullvad 2026-10-26.
   2026-10-19 host capture.
 - nft-mullvad-terse.json: my host's `nft list table inet mullvad` (2026-10-26, relay
   address masked) loaded the same way.
+- nft-mullvad-disconnected.json: chain output = my host's `nft list chain inet mullvad
+  output` while not connected (2026-11-03, API address 192.0.2.10), other chains from
+  nft-mullvad-terse.json without the tunnel rules; loaded the same way.
+- nft-vpn-api4.json: `nft -j list set inet hostfw vpn_api4` of firewall/hostfw.nft with
+  one element 192.0.2.10, same way.
 - journal.json: real IN-NOISE lines, 3 fields kept, cursors rewritten. OUT-LAN (MLDv1
   report), OUT-LEAK, OUT-DNS, IN-VPN and the non-HFW line are synthetic (format from
   real logs).

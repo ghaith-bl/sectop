@@ -21,7 +21,9 @@ class TestCommands(unittest.TestCase):
         self.assertEqual(c["handshakes"][0], ("/usr/bin/wg", "show", "wg0-mullvad",
                                                "latest-handshakes"))
         self.assertEqual({k for k, (_a, kind) in c.items() if kind == netd.SLOW},
-                         {"endpoints", "fwmark", "fwmark_set", "killswitch"})
+                         {"endpoints", "fwmark", "fwmark_set", "killswitch", "api_set"})
+        self.assertEqual(c["api_set"][0], ("/usr/bin/nft", "-j", "list", "set", "inet",
+                                           "hostfw", "vpn_api4"))    # VPN API address
         self.assertEqual(c["killswitch"][0], ("/usr/bin/nft", "-j", "-t", "list", "table",
                                               "inet", "mullvad"))     # VPN kill switch
         self.assertEqual(c["listen_port"], (("/usr/bin/wg", "show", "wg0-mullvad", "listen-port"),
