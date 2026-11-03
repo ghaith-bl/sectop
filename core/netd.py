@@ -175,18 +175,25 @@ def _fail(msg: str) -> Result:
 class Reader:
     """run()-like: argv of an nft / wg command -> its last result from the net
     unit's file. Missing, old, unsafe or wrong file -> a failed Result that says
-    why, so the module shows it like any command error."""
+    why, so the module shows it like any command error. stamp(argv): time of the
+    sample last returned for argv (None after a failed read): the firewall waits for
+    slow samples newer than a tunnel change (2026-11-03)."""
 
     def __init__(self, tunnel: str, base: str = NET_DIR, owner=owner_uid, wall=time.time,
                  binary=bin_path):
         self.names = {tuple(argv): (name, kind)
                       for name, (argv, kind) in commands(tunnel, binary).items()}
         self.base, self._owner, self.wall = base, owner, wall
+        self._ts = {}
+
+    def stamp(self, argv) -> float | None:
+        return self._ts.get(tuple(argv))
 
     def __call__(self, argv, timeout: float = TIMEOUT) -> Result:
         hit = self.names.get(tuple(argv))
         if hit is None:
             raise ValueError(f"not a net unit command: {argv!r}")      # bug in the module
+        self._ts[tuple(argv)] = None
         name, kind = hit
         uid = self._owner()
         if uid is None:
@@ -205,6 +212,7 @@ class Reader:
         age = self.wall() - ts
         if age > (FAST_MAX_AGE if kind == FAST else SLOW_MAX_AGE):
             return _fail(f"{p}: {int(age)} s old: is sectop-net.service stuck?")
+        self._ts[tuple(argv)] = ts
         return res
 
 

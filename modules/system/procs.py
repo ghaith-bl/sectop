@@ -18,6 +18,13 @@ when it stays STUCK s (60) in that state (counted from the first scan that saw i
 A zombie row names its parent (pid, comm, program); c = the parent's card (the parent
 is the one that must reap it). More than MAX_STUCK_CHECKS: one check for the rest.
 
+Shared cgroup (2026-11-03, my ask: no app may hide in GNOME Shell's cgroup): a process in
+org.gnome.Shell@<x>.service that is not GNOME Shell's own (core/proc.py SHELL_OWN:
+gnome-shell, Xwayland, bwrap, glycin-*) is a stray: an app whose launcher forked before
+GNOME moved it into its scope (host: Brave rpm). The org.gnome.Shell row names them
+(detail lines, yellow); after STRAY s one warn check per cgroup, `shared_cgroup:<unit>`.
+Its network shows as org.gnome.Shell on the firewall screen.
+
 cpu % = ticks of the program since the last scan / ticks of the whole machine in the
 same time (all cores = 100 %, as the cpu row). mem = sum of rss (shared pages count in
 each process, as top). peak = highest of the last 60 scans (5 min).
@@ -37,6 +44,9 @@ STUCK = 60.0                     # s in Z / D before warn + check
 STUCK_STATES = {"Z": "zombie", "D": "D, uninterruptible"}
 MAX_STUCK_ROWS = 20
 MAX_STUCK_CHECKS = 10
+STRAY = 10.0                     # s in GNOME Shell's cgroup before warn + check (a launch
+                                 # moves in milliseconds: one scan may catch it there)
+MAX_STRAY_LINES = 10
 COLUMNS = ["program", "procs", "cpu", "peak", "mem", "peak", "user"]
 TYPES = ["text", "num", "num", "num", "num", "num", "text"]
 ROLES = ["name", "note", "value", "peak", "value", "peak", "note"]
@@ -44,12 +54,14 @@ ROLES = ["name", "note", "value", "peak", "value", "peak", "note"]
 
 class Procs:
     def __init__(self):
-        self.seen = {}                   # (pid, start) -> (ticks, program, card name)
+        self.seen = {}                   # (pid, start) -> (ticks, program, card, shared unit)
         self.hist = {}                   # program -> (cpu deque, mem deque, last scan n)
         self.n = 0                       # scans
         self.rows = []                   # last result, sorted: [Prog]
         self.since = {}                  # (pid, start, state) -> mono first seen so
         self.stuck = []                  # last result: [Stuck], oldest first
+        self.stray_since = {}            # (pid, start) -> mono first seen in a shared cgroup
+        self.strays = []                 # last result: [(Proc, uid, unit, since)]
 
 
 class Stuck:
@@ -67,6 +79,7 @@ class Prog:
         self.mem = 0
         self.uids = set()
         self.peak_cpu = self.peak_mem = 0.0
+        self.strays = []                 # (Proc, unit, since): not GNOME Shell's own
 
 
 def _user(uid: int) -> str:
@@ -84,6 +97,7 @@ def scan(ps: Procs, host, dtotal: int | None, now: float = 0.0) -> list:
     procs = host.procs()
     kernel = {p.pid for p, _ in procs if p.pid == KTHREADD or p.ppid == KTHREADD}
     seen, progs, stuck, since = {}, {}, [], {}
+    strays, stray_since = [], {}
     for p, uid in procs:
         if p.pid in kernel:
             continue
@@ -95,9 +109,13 @@ def scan(ps: Procs, host, dtotal: int | None, now: float = 0.0) -> list:
             unit = procmod.program(cg) or ""
             name = card or (f"{p.comm} (session)" if procmod.SESSION_RE.fullmatch(unit)
                             else p.comm)
+            shared = procmod.shared(cg)
         else:
-            _, name, card = old
-        seen[key] = (p.ticks, name, card)
+            _, name, card, shared = old
+        seen[key] = (p.ticks, name, card, shared)
+        if shared and not procmod.own(p.comm):
+            stray_since[key] = ps.stray_since.get(key, now)
+            strays.append((p, uid, shared, stray_since[key]))
         if p.state in STUCK_STATES:
             k = (p.pid, p.start, p.state)
             since[k] = ps.since.get(k, now)
@@ -114,15 +132,18 @@ def scan(ps: Procs, host, dtotal: int | None, now: float = 0.0) -> list:
         g.cpu += cpu
         g.mem += p.rss * page
         g.uids.add(uid)
+        if key in stray_since:
+            g.strays.append((p, shared, stray_since[key]))
     ps.seen = seen
     ps.since = since
+    ps.stray_since, ps.strays = stray_since, strays
     by_pid = {p.pid: p for p, _ in procs}
     ps.stuck = []
     for p, uid, t, name, card in sorted(stuck, key=lambda x: (x[2], x[0].pid)):
         par = by_pid.get(p.ppid)
         parent = None
         if par is not None:
-            _, pname, pcard = seen.get((par.pid, par.start), (0, par.comm, None))
+            _, pname, pcard, _sh = seen.get((par.pid, par.start), (0, par.comm, None, None))
             parent = (par, pname, pcard)
         ps.stuck.append(Stuck(p, uid, t, parent, name, card))
     for name, g in progs.items():
@@ -205,14 +226,55 @@ def stuck_checks(ps: Procs, now: float) -> list:
     return out
 
 
+def stray_checks(ps: Procs, now: float) -> list:
+    """One warn check per shared cgroup holding strays for STRAY s and more."""
+    by_unit = {}
+    for p, _uid, unit, since in ps.strays:
+        if now - since >= STRAY:
+            by_unit.setdefault(unit, collections.Counter())[p.comm] += 1
+    out = []
+    for unit, comms in sorted(by_unit.items()):
+        n = sum(comms.values())
+        key = "shared_cgroup:" + "".join(ch if ch.isalnum() or ch in "_.:@-" else "_"
+                                         for ch in unit)
+        out.append({"key": key[:128], "sev": "warn",
+                    "title": f"{n} process{'es' if n != 1 else ''} in {unit}: "
+                             f"{procmod.label(comms)}",
+                    "detail": "not GNOME Shell's own: started from GNOME without a scope of "
+                              "their own, their network shows as org.gnome.Shell. Fix: "
+                              "app-unit (silverblue-cis-hardening appunit)",
+                    "n": n})
+    return out
+
+
+def _stray_lines(g: Prog, now: float) -> tuple:
+    """-> (detail lines, row sev) for the strays of a program row (GNOME Shell's)."""
+    if not g.strays:
+        return [], "ok"
+    old = any(now - t >= STRAY for _p, _u, t in g.strays)
+    sev = "warn" if old else "info"
+    comms = collections.Counter(p.comm for p, _u, _t in g.strays)
+    units = sorted({u for _p, u, _t in g.strays})
+    lines = [{"k": "not GNOME's own", "v": f"{procmod.label(comms)} in {', '.join(units)}",
+              "sev": sev},
+             {"k": "why", "v": "an app whose launcher forked before GNOME moved it into its "
+                               "scope; fix: app-unit (silverblue-cis-hardening appunit)"}]
+    for p, _u, t in sorted(g.strays, key=lambda x: (x[2], x[0].pid))[:MAX_STRAY_LINES]:
+        lines.append({"k": f"pid {p.pid}", "v": f"{p.comm}  here {now - t:.0f} s",
+                      "sev": sev})
+    return lines, sev
+
+
 def rows(ps: Procs, size, page: int, cpu_known: bool, user=_user, now: float = 0.0) -> list:
     """Table rows of the programs box: stuck processes (zombie, D) first, then the top
     TOP programs by memory."""
     out = [_stuck_row(s, now, size, page, user) for s in ps.stuck[:MAX_STUCK_ROWS]]
-    for g in ps.rows[:TOP]:
+    shown = ps.rows[:TOP] + [g for g in ps.rows[TOP:] if g.strays]    # strays always shown
+    for g in shown:
         cpu = _pct(g.cpu) if cpu_known else "-"
         top = sorted(g.procs, key=lambda x: (-x[0].rss, -x[2], x[0].pid))[:TOP_DETAIL]
-        detail = [{"k": "processes", "v": f"{len(g.procs)}, top {len(top)} by memory"}]
+        stray, sev = _stray_lines(g, now)
+        detail = stray + [{"k": "processes", "v": f"{len(g.procs)}, top {len(top)} by memory"}]
         for p, uid, c in top:
             detail.append({"k": f"pid {p.pid}",
                            "v": f"{p.comm}  {size(p.rss * page)}  "
@@ -221,7 +283,7 @@ def rows(ps: Procs, size, page: int, cpu_known: bool, user=_user, now: float = 0
         row = {"id": f"prog:{g.name}",
                "cells": [g.name, str(len(g.procs)), cpu, _pct(g.peak_cpu),
                          size(g.mem), size(g.peak_mem), _users(g, user)],
-               "sev": "ok", "detail": detail[:40]}
+               "sev": sev, "detail": detail[:40]}
         if g.card:
             row["progs"] = [g.card]
             if len(g.card) <= 60:

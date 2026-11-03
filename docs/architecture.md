@@ -367,6 +367,13 @@ Host checks 2026-10-27 (sandbox: nsenter into sectop.service as user sectop):
   that state (from the first scan that saw it so; a D process that wakes up starts
   over). A zombie is not in its program's sums; c = its parent's card (the parent must
   reap it). Box title counts both. Max 20 rows, 10 checks + one `stuck:more`.
+  Strays (2026-11-03, my ask: no app may hide in GNOME Shell's cgroup): a process in
+  `org.gnome.Shell@<x>.service` that is not GNOME Shell's own (gnome-shell, Xwayland,
+  bwrap, glycin-*; core/proc.py SHELL_OWN). The org.gnome.Shell row lists them first
+  (`not GNOME's own: brave x10, cat x2`, pids), info while new, warn + one check per
+  cgroup `shared_cgroup:<unit>` after 10 s (a launch moves in ms: one scan may catch
+  it). Always shown, even outside the top 30. Fix: silverblue-cis-hardening appunit.
+  Enforcement: hostfw rejects network from that cgroup (hardening repo, planned).
 - Program card (`c`): rows here carry `progs`, so the card shows a program's processes,
   units and the other screens' rows together.
 
@@ -388,6 +395,7 @@ warn (yellow, row; alert only when it lasts):
 - temperature >= warn limit for 60 s: config `temp_warn` (coretemp 75, spd5118 70), else
   `temp*_max` when max < crit
 - zombie or `D` process older than 60 s
+- process in GNOME Shell's cgroup that is not GNOME's own, for 10 s (`shared_cgroup`)
 - unit restarted 3 times in 10 min
 - pressure avg60 over the limit for 2 min. Limits set from my host's numbers (step 1),
   not invented.
@@ -562,6 +570,7 @@ Design (least privilege: NIST SP 800-53 / 800-171 AC-6, systemd.exec(5), capabil
     sectop-net.service   user sectop-net, CAP_NET_ADMIN only -> /run/sectop-net/
     sectop.service       user sectop, journal group, no caps -> /run/sectop/state.json
     sectop-whois.socket  one sectop-whois@.service per lookup, DynamicUser, RDAP only
+    sectop-user@<me>     my user, no caps, no network -> /run/sectop-user/<me>/
     sectop (UI)          my user, no sudo, reads /run/sectop/state.json
 
 - Collector = system service started by systemd, not from my login. loginuid stays
@@ -594,6 +603,18 @@ Design (least privilege: NIST SP 800-53 / 800-171 AC-6, systemd.exec(5), capabil
   every child (capabilities(7)).
 - Program names: `ss -p` needs CAP_SYS_PTRACE (capabilities(7): /proc/pid/fd of other
   users). Too strong for a monitor -> `ss --cgroup` (see Firewall audit).
+- User helper (2026-11-03): the cgroup names no program for processes in GNOME Shell's
+  shared cgroup (org.gnome.Shell@<x>.service: an app whose launcher forked before GNOME
+  moved it). `sectop-user@<me>.service` (system template unit, `User=%i`) runs as my
+  user: same uid = may read the fds of my own processes, no capability. Reads only my
+  shared cgroups' processes: comm + socket inodes (`socket:[<ino>]`) ->
+  `/run/sectop-user/<me>/socks.json` (dir 0750, file 0640, group sectop set by the
+  helper; it refuses to run if my user is not in group sectop). Collector: socket inode
+  (`ss -e`) -> process, display only (my user can write anything there, a process sets
+  its own comm): never a check. No root service, no CAP_SYS_PTRACE (decided 2026-11-03).
+  `PrivateNetwork=yes`, `IPAddressDeny=any`, `AF_UNIX` only, `ProtectProc=default` (my
+  own processes), no `RemoveIPC=` (would remove my desktop's IPC objects on stop).
+  Not dumpable processes (fd unreadable): `denied`, no name.
 - No network in collector and net unit: `IPAddressDeny=any`,
   `RestrictAddressFamilies=AF_UNIX AF_NETLINK`.
 - whois (2026-10-20): `sectop-whois.socket` (`/run/sectop-whois.sock`, root:sectop 0660,

@@ -12,11 +12,17 @@ core.run.run as user sectop. Files:
 (userspace tunnel). At start: one boot journal scan (leak lines, first tunnel flow).
 Audit box: every HFW line (allowed + blocked, in + out), program from ss.
 Programs box: the same lines + open sockets, one row per program.
+Program of a line (2026-11-03): its established socket; else, UDP, an unconnected socket
+on its local port (one more ss, only then); else a guess `<name>?` from the peer (one
+program had sockets to it). Sockets of GNOME Shell's shared cgroup: named by inode from
+the user helper (core/userd.py) as org.gnome.Shell/<comm>, org.gnome.Shell/? while the
+cgroup holds other processes and the helper has no answer.
 Snapshot v2: problems are checks with keys (core/alerts.py keeps the alerts).
 See docs/modules/firewall.md.
 """
 
 import collections
+import dataclasses
 import ipaddress
 import os
 import re
@@ -24,6 +30,8 @@ import stat
 import time
 
 from core import netd
+from core import proc as procmod
+from core import userd
 from core.module import MAX_PROGS as ROW_PROGS, PROG_RE, SEV_RANK, worst
 from core.run import run as _run
 from modules.firewall import conns, journal, nft, track, vpn
@@ -173,7 +181,8 @@ class State:
     def __init__(self, tunnel=DEFAULT_TUNNEL, hold=HOLD, run=_run, net=None,
                  mono=time.monotonic, wall=time.time, owner=0,
                  mode_file=MODE_FILE, rollback_file=ROLLBACK_FILE, hms=_hms, stamp=_stamp,
-                 uptime_file=UPTIME_FILE, sysnet=SYSNET):
+                 uptime_file=UPTIME_FILE, sysnet=SYSNET, users=None,
+                 cgroup_root=procmod.CGROUP_ROOT, proc_root="/proc"):
         self.tunnel, self.hold = tunnel, hold
         self.run, self.mono, self.wall, self.owner = run, mono, wall, owner
         self.mode_file, self.rollback_file = mode_file, rollback_file
@@ -205,12 +214,27 @@ class State:
         self.slow_up = None            # (up, userspace) at the last slow refresh
         self.slow = (None, [], [])     # last slow result: endpoint item, items, checks
         self.api_seen = None           # (addresses, epoch): Mullvad's API rule, last seen
+        self.seen_ts = {}              # net argv -> time of the sample last read (or None)
+        self.changed = None            # epoch of the sample that showed the last up / down
+        self.slow_wait = False         # slow samples older than that change: run again
+        self.users = users if users is not None else userd.Reader()   # user helpers
+        self.cgroup_root, self.proc_root = cgroup_root, proc_root
+        self.shared = {}               # this tick: shared cgroup -> stray Counter / None
+        self.helper = None             # this tick: socket inode -> userd.Owner (lazy)
+        self.helper_notes = []         # this tick: user helper problems
+
+    def users_seen(self) -> bool:
+        """A user helper file was fresh this tick (helper on)."""
+        return bool(getattr(self.users, "users", ()))
 
     def cmd(self, *argv, timeout=TIMEOUT):
         """nft / wg: last result from the net unit (CAP_NET_ADMIN). Others: run here."""
         full = [self.bins[argv[0]], *argv[1:]]
         if argv[0] in netd.NET_BINS:
-            return self.net(full, timeout=timeout)
+            res = self.net(full, timeout=timeout)
+            stamp = getattr(self.net, "stamp", None)
+            self.seen_ts[argv] = stamp(full) if stamp else None
+            return res
         return self.run(full, timeout=timeout)
 
 
@@ -604,15 +628,74 @@ class Flow:
         self.entry, self.verdict = e, ""
 
 
-def _prog(e, idx: dict) -> tuple:
-    """-> (program or '?' / 'vm' / '-', iface) of one log line."""
+class Names:
+    """Program of a log line, one per tick (docs/modules/firewall.md, Program name):
+    1. established socket with the same 5-tuple (ss)
+    2. UDP: unconnected socket on the line's local port (`ss ... state closed`, run once
+       per tick, only when a UDP line needs it: QUIC)
+    3. guess `<name>?`: exactly one program had sockets to the line's peer (now, or
+       earlier in the peers box). Shown as a guess, never on a card.
+    One answer per line and tick (memo): every box shows the same name."""
+
+    def __init__(self, st: State, cs: list):
+        self.st, self.idx = st, conns.index(cs)
+        self.to = collections.defaultdict(set)        # peer host -> programs (sockets now)
+        for c in cs:
+            self.to[conns.split(c.peer)[0]].update(n for n in c.procs if _real(n))
+        self.udp = None                               # (proto, port) -> sockets, lazy
+        self.udp_err = ""
+        self.memo = {}
+
+    def _ports(self) -> dict:
+        if self.udp is None:
+            res = self.st.cmd("ss", "-uaneH", "--cgroup", "state", "closed")
+            if res.rc != 0:
+                self.udp, self.udp_err = {}, _fail(res)
+            else:
+                self.udp = conns.ports(_name_shared(self.st, conns.parse(res.out)))
+        return self.udp
+
+    def __call__(self, e) -> str:
+        key = id(e)                    # the tick's entries live as long as this object
+        if key not in self.memo:
+            self.memo[key] = (e, self._name(e))
+        return self.memo[key][1]
+
+    def _name(self, e) -> str:
+        f = e.fields
+        proto = f.get("PROTO", "-").lower()
+        if proto not in ("tcp", "udp"):
+            return "?"
+        src, dst = conns.split(journal.src(e)), conns.split(journal.dst(e))
+        names = self.idx.get((proto, *src, *dst), ())
+        if not names and proto == "udp" and src[1]:
+            names = conns.by_port(self._ports(), "udp", *src)
+        if names:
+            return ",".join(names)
+        guess = set(self.to.get(dst[0], ()))
+        p = self.st.peers.get(dst[0])
+        if p is not None:
+            guess.update(n for n in p.progs if _real(n))
+        guess = {n for n in guess if "/" not in n}    # never guess a shared-cgroup process
+        return f"{next(iter(guess))}?" if len(guess) == 1 else "?"
+
+
+def _real(name: str) -> bool:
+    """A program name from a socket: not a guess (x?), not unknown (?, org.gnome.Shell/?)."""
+    return bool(name) and not name.endswith("?") and name not in ("-", "vm")
+
+
+def _prog(e, names) -> tuple:
+    """-> (program or '?' / 'vm' / '-', iface) of one log line. names: Names (a dict
+    5-tuple -> programs works too: no port match, no guess)."""
     f = e.fields
     proto = f.get("PROTO", "-").lower()
     if e.dir == "out":
-        prog = "?"
-        if proto in ("tcp", "udp"):
+        if isinstance(names, dict):
             key = (proto, *conns.split(journal.src(e)), *conns.split(journal.dst(e)))
-            prog = ",".join(idx.get(key, ())) or "?"
+            prog = ",".join(names.get(key, ())) or "?"
+        else:
+            prog = names(e)
         return prog, f.get("OUT") or "-"
     if e.dir == "fwd":
         return ("vm" if e.kind.startswith("fwd_vm") else "-"), \
@@ -620,15 +703,14 @@ def _prog(e, idx: dict) -> tuple:
     return "-", f.get("IN") or "-"
 
 
-def _audit(st: State, entries: list, cs: list, live: str) -> dict:
+def _audit(st: State, entries: list, names, live: str) -> dict:
     """Group HFW lines (hidden kinds skipped) by flow, newest flow first."""
-    idx = conns.index(cs)
     for e in entries:
         if e.kind in SEV and SEV[e.kind] is None:
             continue
         f = e.fields
         src, dst, side, port = journal.flow(e)
-        prog, iface = _prog(e, idx)
+        prog, iface = _prog(e, names)
         key = (e.kind, e.dir, f.get("PROTO", "-").lower(), f.get("UID") or "-", src, dst, iface)
         fl = st.flows.pop(key, None) or Flow(e, src, dst, side)
         st.flows[key] = fl                                     # newest at the end
@@ -648,10 +730,14 @@ def _audit(st: State, entries: list, cs: list, live: str) -> dict:
 
 
 def _progs(names) -> list:
-    """Row `progs` (c = program card, core/ui.py): real program names only."""
+    """Row `progs` (c = program card, core/ui.py): real program names only; a process
+    in a shared cgroup (org.gnome.Shell/<comm>): the cgroup's program."""
     out = []
     for n in names:
-        if PROG_RE.fullmatch(n) and n not in out and len(out) < ROW_PROGS:
+        n = n.partition("/")[0]
+        if n.endswith("?") or not PROG_RE.fullmatch(n):
+            continue
+        if n not in out and len(out) < ROW_PROGS:
             out.append(n)
     return out
 
@@ -736,31 +822,67 @@ def _endpoint(st: State) -> dict:
     return _item("endpoint", ep, ip=_ip(conns.split(ep)[0]))
 
 
-def _live_mark(st: State):
+def _live_mark(st: State, bad: list):
+    """Live fwmark; unreadable (rc != 0) -> None + the reason in bad: no mismatch claim."""
     res = st.cmd("wg", "show", st.tunnel, "fwmark")
-    return vpn.fwmark(res.out) if res.rc == 0 else None
+    if res.rc != 0:
+        bad.append(_fail(res))
+        return None
+    return vpn.fwmark(res.out)
+
+
+def _stale(st: State) -> bool:
+    """A tunnel-dependent slow sample (endpoint, live fwmark, wg_fwmark set) is older
+    than the sample that showed the last up / down (2026-11-03, host: after a reconnect
+    the slow sources read the net unit's 'tunnel down' sample and kept it 30 s ->
+    false fwmark crit)."""
+    if st.changed is None:
+        return False
+    for argv in _tunnel_argvs(st):
+        ts = st.seen_ts.get(argv)
+        if ts is not None and ts < st.changed:
+            return True
+    return False
+
+
+def _tunnel_argvs(st: State) -> tuple:
+    t = st.tunnel
+    return (("wg", "show", t, "endpoints"), ("wg", "show", t, "fwmark"),
+            ("nft", "-j", "list", "set", *TABLE, "wg_fwmark"))
 
 
 def _slow(st: State, up: bool) -> tuple:
     """Rarely changing sources: endpoint, fwmark (live + set), kill switch table.
 
     Run every SLOW s and when the tunnel goes up / down (collect). Their items
-    and checks are kept and shown every tick until the next run.
+    and checks are kept and shown every tick until the next run. Samples of the
+    tunnel-dependent ones older than the change (_stale): no claim, run again next tick.
     -> (endpoint item or None, items, checks).
     """
-    checks, items, ep, mark, bad = [], [], None, None, []
+    checks, items, ep, mark, bad, unread = [], [], None, None, [], []
     kernel = up and not st.userspace   # userspace tunnel: no endpoint / live mark from wg
+    for argv in _tunnel_argvs(st):
+        st.seen_ts.pop(argv, None)     # _stale: only what this run read
     if kernel:
         ep = _safe(lambda: _endpoint(st), "wg", checks,
                    lambda e: _item("endpoint", e, "warn"))
-        mark = _safe(lambda: _live_mark(st), "wg", checks, bad.append)
-    if bad:                            # live fwmark unreadable: no mismatch claim
-        items.append(_item("fwmark", f"live: {bad[0]}", "warn"))
+        mark = _safe(lambda: _live_mark(st, unread), "wg", checks, bad.append)
+    fw_checks = []
+    if bad:                            # live fwmark parse error: no mismatch claim
+        fm = _item("fwmark", f"live: {bad[0]}", "warn")
+    elif unread:                       # live fwmark unreadable: no mismatch claim
+        fm = _item("fwmark", f"live: {unread[0]}", "info")
     else:
-        fm = _safe(lambda: _fwmark(st, mark, kernel, checks), "fwmark", checks,
+        fm = _safe(lambda: _fwmark(st, mark, kernel, fw_checks), "fwmark", fw_checks,
                    lambda e: _item("fwmark", e, "warn"))
-        if fm:
-            items.append(fm)
+    st.slow_wait = kernel and _stale(st)
+    if st.slow_wait:                   # from before the change: wait, claim nothing
+        checks, ep = [], None
+        fm = _item("fwmark", "waiting for a net unit sample newer than the tunnel change")
+    else:
+        checks += fw_checks
+    if fm:
+        items.append(fm)
     ks = st.cmd("nft", "-j", "-t", "list", "table", *KS_TABLE)
     items.append(_safe(lambda: _killswitch(st, checks, ks), "killswitch", checks,
                        lambda e: _item("kill switch", e, "warn")))
@@ -936,12 +1058,45 @@ def _audit_detail(st: State, e, verdict: str) -> list:
 
 
 def _conns(st: State, checks: list) -> tuple:
-    """-> (open sockets, error or '')."""
-    res = st.cmd("ss", "-tunaH", "--cgroup", "state", "established")
+    """-> (open sockets, error or ''). Sockets of a shared cgroup renamed (_name_shared)."""
+    res = st.cmd("ss", "-tunaeH", "--cgroup", "state", "established")
     if res.rc != 0:
         _chk(checks, "ss", "warn", "ss error", _fail(res))
         return [], _fail(res)
-    return conns.parse(res.out), ""
+    return _name_shared(st, conns.parse(res.out)), ""
+
+
+def _helper(st: State) -> dict:
+    """User helpers (core/userd.py), once per tick: socket inode -> Owner."""
+    if st.helper is None:
+        try:
+            st.helper, st.helper_notes = st.users()
+        except (OSError, ValueError) as e:
+            st.helper, st.helper_notes = {}, [f"{type(e).__name__}: {e}"]
+    return st.helper
+
+
+def _name_shared(st: State, cs: list) -> list:
+    """Sockets from GNOME Shell's shared cgroup (core/proc.py shared()): the cgroup's
+    program is not theirs. Owner from the user helper (inode): GNOME's own process ->
+    org.gnome.Shell, another -> org.gnome.Shell/<comm>. No owner: org.gnome.Shell/?
+    while the cgroup holds other processes (strays), else org.gnome.Shell."""
+    out = []
+    for c in cs:
+        if c.procs and c.procs != (procmod.program(c.cgroup),) or not procmod.shared(c.cgroup):
+            out.append(c)                     # ss -p name, or not a shared cgroup
+            continue
+        base = procmod.program(c.cgroup) or "?"
+        o = _helper(st).get(c.ino) if c.ino else None
+        if o is not None and o.cgroup == c.cgroup:
+            name = base if procmod.own(o.comm) else f"{base}/{o.comm}"
+        else:
+            if c.cgroup not in st.shared:
+                st.shared[c.cgroup] = procmod.strays(c.cgroup, st.cgroup_root, st.proc_root)
+            strays = st.shared[c.cgroup]
+            name = base if strays is not None and not strays else f"{base}/?"
+        out.append(dataclasses.replace(c, procs=(name,)))
+    return out
 
 
 class Peer:
@@ -989,9 +1144,10 @@ def _peer(st: State, ip: str, ts: float) -> Peer:
     return p
 
 
-def _peers(st: State, entries: list, cs: list, err: str, live: str, wall: float) -> dict:
+def _peers(st: State, entries: list, cs: list, err: str, live: str, wall: float,
+           names=None) -> dict:
     """peers box: one row per remote address, from log lines and open sockets."""
-    idx = conns.index(cs)
+    names = names if names is not None else conns.index(cs)
     for e in entries:
         if e.kind in SEV and SEV[e.kind] is None:
             continue
@@ -1007,9 +1163,9 @@ def _peers(st: State, entries: list, cs: list, err: str, live: str, wall: float)
             p.new += 1
         else:
             p.drop += 1
-        prog, iface = _prog(e, idx)
+        prog, iface = _prog(e, names)
         for name in prog.split(","):
-            if name not in ("?", "-", ""):
+            if _real(name):                                 # no guesses: they feed Names
                 _add(p.progs, name)
         _add(p.uids, f.get("UID", ""))
         _add(p.ports, f.get("SPT" if inbound else "DPT", ""))
@@ -1023,7 +1179,8 @@ def _peers(st: State, entries: list, cs: list, err: str, live: str, wall: float)
         socks[str(a)].append(c)
         p = _peer(st, str(a), wall)
         for name in c.procs:
-            _add(p.progs, name)
+            if _real(name):
+                _add(p.progs, name)
         _add(p.ports, port)
     while len(st.peers) > MAX_PEERS:
         del st.peers[next(iter(st.peers))]                  # least recently seen out
@@ -1089,13 +1246,14 @@ def _app(st: State, key: str, ts: float) -> App:
     return a
 
 
-def _apps(st: State, entries: list, cs: list, live: str, wall: float) -> dict:
+def _apps(st: State, entries: list, cs: list, live: str, wall: float,
+          names=None) -> dict:
     """programs box: one row per program, from log lines and open sockets."""
-    idx = conns.index(cs)
+    names = names if names is not None else conns.index(cs)
     for e in entries:
         if e.kind in SEV and SEV[e.kind] is None:
             continue
-        prog, _iface = _prog(e, idx)
+        prog, _iface = _prog(e, names)
         remote = _remote(e)
         verdict = _verdict(e.kind, live)
         for key in _app_keys(e, prog):
@@ -1136,8 +1294,13 @@ def _app_row(st: State, key: str, a: App, socks: list) -> dict:
         uid = key[len("? uid "):]
         prog, pick = "?", ("?" if uid == "-" else f"? {uid}")
         note = "program unknown: the flow closed before the next ss poll"
+    elif key.endswith("?") and "/" not in key:
+        prog, pick = key, key
+        note = (f"guess: the flow closed before the next ss poll; {key[:-1]} was the only "
+                "program with sockets to its peer")
     else:
         prog, pick, note = key, key, ""
+    shared = _shared_note(st, key, "warn" if socks else "ok")
     if a.block and not (a.out or a.inb or socks):
         tone = "red"                                        # only dropped / blocked
     else:
@@ -1146,6 +1309,7 @@ def _app_row(st: State, key: str, a: App, socks: list) -> dict:
     detail = []
     if note:
         detail.append(("note", note))
+    detail += shared
     detail.append(("open now", f"{len(socks)} socket{'s' if len(socks) != 1 else ''}"))
     for c in socks[:MAX_SOCKS]:
         detail.append(("socket", f"{c.proto} {c.local} -> {c.peer}"))
@@ -1158,12 +1322,39 @@ def _app_row(st: State, key: str, a: App, socks: list) -> dict:
     uids = ",".join(a.uids[:MAX_PROGS]) + ("+" if len(a.uids) > MAX_PROGS else "")
     row = {"cells": [prog, uids or "-", str(len(socks)), str(a.out), str(a.block), str(a.inb),
                      str(len(a.peers)), _when(a.last)],
-           "tone": tone, "id": key, "detail": [{"k": k, "v": v} for k, v in detail]}
+           "tone": tone, "id": key,
+           "detail": [dict(zip(("k", "v", "sev"), d)) for d in detail]}
+    if shared and socks:
+        row["sev"] = "warn"            # yellow while open: system check shared_cgroup
     if PICK_RE.fullmatch(pick) and pick.strip():
         row["filter"] = pick                                # f follow / x hide (core/ui.py)
     if not other and not key.startswith("? uid ") and _progs([key]):
         row["progs"] = _progs([key])                        # c = program card
     return row
+
+
+def _shared_note(st: State, key: str, sev: str) -> list:
+    """Detail lines (k, v, sev) of a programs row from GNOME Shell's shared cgroup.
+    sev: warn while the row has open sockets, else ok (the row is history)."""
+    base, _sep, comm = key.partition("/")
+    if not comm:
+        return []
+    if comm != "?":
+        return [("shared cgroup", f"process {comm} runs in {base}'s cgroup, not in a scope "
+                                  "of its own (name from the user helper)", sev),
+                ("fix", "start it from its own unit (silverblue-cis-hardening appunit); "
+                        "system screen: check shared_cgroup")]
+    strays = [procmod.label(c) for cg, c in st.shared.items()
+              if c and procmod.program(cg) == base]
+    out = [("shared cgroup", f"{base}'s cgroup also holds "
+                             f"{'; '.join(strays) or 'processes not its own'}: the program "
+                             "of this socket is unknown", sev)]
+    if st.helper_notes:
+        out.append(("user helper", "; ".join(st.helper_notes)[:200]))
+    elif not st.users_seen():
+        out.append(("user helper", "no data: sectop-user@<user>.service not running "
+                                   "(docs/install.md)"))
+    return out
 
 
 def _note(items: list, key: str, err: str, value):
@@ -1201,6 +1392,7 @@ def init(cfg: dict) -> State:
 def collect(st: State, ctx) -> dict:
     now, wall = st.mono(), st.wall()
     checks, panels = [], []
+    st.shared, st.helper, st.helper_notes = {}, None, []
 
     fw_items, counters, live = _safe(lambda: _hostfw(st, checks), "nft", checks,
                                      lambda e: ([_item("table", e, "warn")], None, "?"))
@@ -1213,7 +1405,11 @@ def collect(st: State, ctx) -> dict:
     vpn_items, vpn_text, up = _safe(
         lambda: _vpn(st, checks, wall), "wg", checks,
         lambda e: ([_item("tunnel", e, "warn")], f"{st.tunnel} ?", False))
-    if st.slow_at is None or now >= st.slow_at or (up, st.userspace) != st.slow_up:
+    if st.slow_up is not None and (up, st.userspace) != st.slow_up:
+        hs = st.seen_ts.get(("wg", "show", st.tunnel, "latest-handshakes"))
+        st.changed = hs if hs is not None else wall     # the sample that showed it
+    if (st.slow_at is None or now >= st.slow_at or (up, st.userspace) != st.slow_up
+            or st.slow_wait):
         st.slow = _slow(st, up)
         st.slow_at, st.slow_up = now + SLOW, (up, st.userspace)
     ep, slow_items, slow_checks = st.slow
@@ -1231,6 +1427,7 @@ def collect(st: State, ctx) -> dict:
                  lambda e: {"id": "leak", "title": f"out_leak: {e}", "type": "table",
                             "columns": list(LEAK_COLUMNS), "types": list(LEAK_TYPES), "rows": [], "sev": "warn"})
     cs, ss_err = _safe(lambda: _conns(st, checks), "ss", checks, lambda e: ([], e))
+    names = Names(st, cs)
     vpn_in = _safe(lambda: _in_vpn(st, entries, cs), "in_vpn", checks,
                    lambda e: ("warn", e))
     spark_sev = _new_checks(st, deltas, up, vpn_in, now, checks)
@@ -1246,14 +1443,15 @@ def collect(st: State, ctx) -> dict:
     panels.append(leak)
     panels.append({"id": "blocked", "title": "blocked / tick", "type": "spark",
                    "values": list(st.blocked), "unit": "pkt", "sev": spark_sev})
-    panels.append(_safe(lambda: _apps(st, entries, cs, live, wall), "programs", checks,
+    panels.append(_safe(lambda: _apps(st, entries, cs, live, wall, names), "programs", checks,
                         lambda e: {"id": "programs", "title": f"programs: {e}",
                                    "type": "table", "columns": list(APP_COLUMNS), "types": list(APP_TYPES), "rows": [],
                                    "sev": "warn"}))
-    panels.append(_safe(lambda: _peers(st, entries, cs, ss_err, live, wall), "peers", checks,
+    panels.append(_safe(lambda: _peers(st, entries, cs, ss_err, live, wall, names), "peers",
+                        checks,
                         lambda e: {"id": "peers", "title": f"peers: {e}", "type": "table",
                                    "columns": list(PEER_COLUMNS), "types": list(PEER_TYPES), "rows": [], "sev": "warn"}))
-    audit = _safe(lambda: _audit(st, entries, cs, live), "audit", checks,
+    audit = _safe(lambda: _audit(st, entries, names, live), "audit", checks,
                   lambda e: {"id": "audit", "title": f"audit: {e}", "type": "table",
                              "columns": list(AUDIT_COLUMNS), "types": list(AUDIT_TYPES), "rows": [], "sev": "warn"})
     audit["width"] = "full"                  # most columns: a row of its own, at the bottom

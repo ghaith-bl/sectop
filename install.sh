@@ -15,7 +15,7 @@ set -euo pipefail
 DEST=/usr/local/lib/sectop
 BIN=/usr/local/bin/sectop
 UNIT_DIR=/etc/systemd/system
-UNITS=(sectop-net.service sectop.service sectop-whois.socket sectop-whois@.service)
+UNITS=(sectop-net.service sectop.service sectop-whois.socket sectop-whois@.service sectop-user@.service)
 SYSUSERS=/etc/sysusers.d/sectop.conf
 CONF=/etc/sectop
 TMP=""
@@ -29,6 +29,12 @@ relabel() { if command -v restorecon >/dev/null; then restorecon -R "$@"; fi; }
 remove() {
   systemctl disable --now sectop.service sectop-net.service sectop-whois.socket \
     >/dev/null 2>&1 || true
+  local inst
+  for inst in $(systemctl list-units --all --plain --no-legend 'sectop-user@*.service' \
+                  | awk '{print $1}'); do
+    systemctl disable --now "$inst" >/dev/null 2>&1 || true
+  done
+  rm -f "$UNIT_DIR"/multi-user.target.wants/sectop-user@*.service
   local u
   for u in "${UNITS[@]}"; do rm -f "$UNIT_DIR/$u"; done
   systemctl daemon-reload
@@ -148,16 +154,16 @@ check_conf() {     # collector and net unit read the config as non-root users
   log "config: $CONF 0755, *.toml 0644 root:root (read by sectop users, no secrets)"
 }
 
-install_units() {
-  local u
+install_units() {  # $1 = login user: its user helper (sectop-user@<user>.service)
+  local u helper=sectop-user@$1.service
   for u in "${UNITS[@]}"; do
     install -m 0644 -o root -g root "$DEST/deploy/$u" "$UNIT_DIR/$u"
   done
   relabel "$UNIT_DIR"/sectop*
   systemctl daemon-reload
-  systemctl enable sectop-net.service sectop.service sectop-whois.socket >/dev/null
-  systemctl restart sectop-net.service sectop.service sectop-whois.socket
-  for u in sectop-net.service sectop.service sectop-whois.socket; do
+  systemctl enable sectop-net.service sectop.service sectop-whois.socket "$helper" >/dev/null
+  systemctl restart sectop-net.service sectop.service sectop-whois.socket "$helper"
+  for u in sectop-net.service sectop.service sectop-whois.socket "$helper"; do
     if systemctl is-active --quiet "$u"; then
       log "$u active"
     else
@@ -181,13 +187,14 @@ main() {
   install_code "$repo" "$user"
   install_users "$user"
   check_conf
-  install_units
+  install_units "$user"
   if [[ $member == yes ]]; then
     log "UI: sectop   (as $user, no sudo)"
   else
     log "UI: $user is new in group sectop: log out and in once, then: sectop"
   fi
   log "check: systemd-analyze security sectop.service sectop-net.service sectop-whois@x.service"
+  log "       systemd-analyze security sectop-user@$user.service"
 }
 
 main "$@"

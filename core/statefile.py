@@ -2,6 +2,7 @@
 
 - /run/sectop/state.json: collector -> UI (module view, feed, alerts)
 - /run/sectop-net/<name>.json: net unit -> collector (core/netd.py)
+- /run/sectop-user/<user>/socks.json: user helper -> collector (core/userd.py)
 
 One JSON file, replaced whole: written to a temp file in the same directory,
 then renamed over the old one (rename(2) is atomic), so a reader sees the old
@@ -50,8 +51,9 @@ def encode(obj) -> bytes:
         raise StateError(f"not JSON-serializable: {e}") from None
 
 
-def write(path: str, obj, mode: int = 0o640) -> None:
-    """Replace path with obj as JSON. mode is set with fchmod: umask does not matter."""
+def write(path: str, obj, mode: int = 0o640, gid: int | None = None) -> None:
+    """Replace path with obj as JSON. mode is set with fchmod: umask does not matter.
+    gid: group of the file (fchown; the user helper: group sectop, no setgid dir)."""
     data = encode(obj)
     d, name = os.path.split(os.path.abspath(path))
     tmp = os.path.join(d, f".{name}.tmp")
@@ -62,6 +64,8 @@ def write(path: str, obj, mode: int = 0o640) -> None:
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
                  mode)
     try:
+        if gid is not None:
+            os.fchown(fd, -1, gid)
         os.fchmod(fd, mode)
         view = memoryview(data)
         while view:

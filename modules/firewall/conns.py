@@ -11,13 +11,15 @@ name without suffix and random part. `ss -p` output (users:(...)) is read too.
 
 import ipaddress
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from core.proc import _RANDOM_RE, _UNIT_SUFFIXES, _unescape, program  # noqa: F401 (moved)
 
 # users:(("brave",pid=8100,fd=27),("other",pid=1,fd=3))
 _PROC_RE = re.compile(r'\("((?:[^"\\]|\\.)*)",pid=(\d+)')
 _CGROUP_RE = re.compile(r"(?:^|\s)cgroup:(\S+)")
+_INO_RE = re.compile(r"(?:^|\s)ino:(\d{1,20})(?:\s|$)")
+WILDCARD = ("0.0.0.0", "::", "*")
 
 
 @dataclass(frozen=True)
@@ -26,6 +28,8 @@ class Conn:
     local: str
     peer: str
     procs: tuple       # process names, unique, in ss order
+    cgroup: str = field(default="", compare=False)    # cgroup path, "" if none
+    ino: int = field(default=0, compare=False)        # socket inode (ss -e), 0 if none
 
 
 def _procs(text: str) -> tuple:
@@ -49,8 +53,10 @@ def parse(text: str) -> list:
         parts = line.split(None, 5)
         if len(parts) < 5 or parts[0] not in ("tcp", "udp"):
             continue
-        out.append(Conn(parts[0], parts[3], parts[4],
-                        _procs(parts[5]) if len(parts) == 6 else ()))
+        rest = parts[5] if len(parts) == 6 else ""
+        cg, ino = _CGROUP_RE.search(rest), _INO_RE.search(rest)
+        out.append(Conn(parts[0], parts[3], parts[4], _procs(rest) if rest else (),
+                        cg.group(1) if cg else "", int(ino.group(1)) if ino else 0))
     return out
 
 
@@ -77,3 +83,22 @@ def split(addr: str) -> tuple:
 def index(conns: list) -> dict:
     """(proto, local host, local port, peer host, peer port) -> process names."""
     return {(c.proto, *split(c.local), *split(c.peer)): c.procs for c in conns}
+
+
+def ports(conns: list) -> dict:
+    """(proto, local port) -> [(local host, process names)] of unbound-peer sockets."""
+    out = {}
+    for c in conns:
+        host, port = split(c.local)
+        if port.isdigit():
+            out.setdefault((c.proto, port), []).append((host, c.procs))
+    return out
+
+
+def by_port(table: dict, proto: str, host: str, port: str) -> tuple:
+    """Names of the sockets on local port (exact host or a wildcard), ss order."""
+    names = []
+    for h, procs in table.get((proto, port), ()):
+        if h == host or h in WILDCARD:
+            names += [n for n in procs if n not in names]
+    return tuple(names)

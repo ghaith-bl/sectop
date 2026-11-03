@@ -1,0 +1,54 @@
+# sectop user helper: names the processes in GNOME Shell's shared cgroup for the
+# firewall screen (socket inode -> pid, comm). Runs as the login user %i, reads only
+# that user's own processes' fds. No capabilities, no network.
+# docs/architecture.md (Privilege split), docs/install.md
+[Unit]
+Description=sectop user helper for %i (socket owners in GNOME Shell's cgroup)
+Documentation=file:/usr/local/lib/sectop/docs/install.md
+
+[Service]
+Type=exec
+User=%i
+ExecStart=/usr/bin/python3 -I -B /usr/local/lib/sectop/bin/sectop-user
+Restart=on-failure
+RestartSec=5s
+# /run/sectop-user/%i: the helper sets group sectop on it (it must be a member)
+RuntimeDirectory=sectop-user/%i
+RuntimeDirectoryMode=0750
+UMask=0027
+
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+DevicePolicy=closed
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+# default, not invisible: the helper reads /proc/<pid>/fd of its own user's processes
+ProtectProc=default
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+# no RemoveIPC=: it would remove the login user's own IPC objects on stop
+KeyringMode=private
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+MemoryMax=32M
+TasksMax=4
+
+[Install]
+WantedBy=multi-user.target

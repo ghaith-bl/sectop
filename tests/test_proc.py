@@ -95,6 +95,47 @@ class TestReader(unittest.TestCase):
         self.assertEqual(proc.card_name("/system.slice/caf\\xc3\\xa9.service"), None)
 
 
+class TestShared(unittest.TestCase):
+    """GNOME Shell's shared cgroup (2026-11-03): its unit, own processes, strays."""
+
+    SHELL = ("/user.slice/user-1000.slice/user@1000.service/session.slice/"
+             "org.gnome.Shell@user.service")
+
+    def test_shared(self):
+        self.assertEqual(proc.shared(self.SHELL), "org.gnome.Shell@user.service")
+        self.assertEqual(proc.shared(self.SHELL.replace("@user", "@wayland")),
+                         "org.gnome.Shell@wayland.service")
+        for cg in (APP, "/system.slice/gdm.service", "", "/",
+                   "/user.slice/user-1000.slice/session-2.scope",
+                   self.SHELL + "/../x.scope", self.SHELL.replace("Shell@user", "Shell")):
+            self.assertIsNone(proc.shared(cg), cg)
+        self.assertEqual(proc.program(self.SHELL), "org.gnome.Shell")
+
+    def test_own(self):
+        for comm in ("gnome-shell", "Xwayland", "bwrap", "glycin-image-rs", "glycin-svg"):
+            self.assertTrue(proc.own(comm), comm)
+        for comm in ("brave", "cat", "gnome-shellx", "xwayland", "glycin", ""):
+            self.assertFalse(proc.own(comm), comm)
+
+    def test_strays(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cg, pr = os.path.join(tmp, "cg"), os.path.join(tmp, "proc")
+            self.assertIsNone(proc.strays(self.SHELL, cg, pr))        # unreadable
+            os.makedirs(cg + self.SHELL)
+            with open(cg + self.SHELL + "/cgroup.procs", "w") as f:
+                f.write("11\n12\n13\n14\n99\nx\n")                     # 99: gone
+            for pid, comm in ((11, "gnome-shell"), (12, "brave"), (13, "brave"),
+                              (14, "caf\u00e9")):
+                os.makedirs(f"{pr}/{pid}")
+                with open(f"{pr}/{pid}/comm", "w") as f:
+                    f.write(comm + "\n")
+            got = proc.strays(self.SHELL, cg, pr)
+            self.assertEqual(dict(got), {"brave": 2, "?": 1})
+            self.assertEqual(proc.label(got), "brave x2, ?")
+            self.assertIsNone(proc.strays("relative/path", cg, pr))
+            self.assertIsNone(proc.strays("/a/../../etc", cg, pr))
+
+
 class TestRowProgs(unittest.TestCase):
     def snap(self, progs):
         row = {"cells": ["x"], "progs": progs}

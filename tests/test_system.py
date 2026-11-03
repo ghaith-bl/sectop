@@ -8,6 +8,7 @@ from core import registry
 from core.module import Context, check_module, validate
 from core.screens import SCREENS, find
 from modules.system import host
+from modules.system import procs
 
 FIX = os.path.join(os.path.dirname(__file__), "fixtures", "system", "host")
 MIB = 1024 * 1024
@@ -398,6 +399,38 @@ class TestPrograms(Base):
                                                                   ["backup"]))
         self.assertEqual(self.programs(snap)["prog:backup"]["cells"][1], "1")   # still summed
         self.assertEqual(keys(self.collect(1120.0))["stuck:960:100"]["sev"], "warn")
+
+    def test_strays_in_gnome_shell_cgroup(self):
+        """2026-11-03 host: 10 Brave processes in GNOME Shell's cgroup (launcher forked
+        before GNOME moved it): named, yellow, one check after STRAY s."""
+        shell = ("/user.slice/user-1000.slice/user@1000.service/session.slice/"
+                 "org.gnome.Shell@user.service")
+        self.proc(1500, "gnome-shell", 1, 10, 30000, shell)
+        self.proc(1501, "Xwayland", 1500, 1, 1000, shell)
+        self.proc(1502, "glycin-image-rs", 1500, 1, 100, shell)
+        for pid in (1600, 1601):
+            self.proc(pid, "brave", 1500, 1, 20000, shell)
+        self.proc(1602, "cat", 1600, 1, 10, shell)
+        snap = self.collect(1000.0)
+        r = self.programs(snap)["prog:org.gnome.Shell"]
+        self.assertEqual(r["sev"], "info")                          # new: no check yet
+        self.assertFalse([k for k in keys(snap) if k.startswith("shared_cgroup:")])
+        d = r["detail"]
+        self.assertEqual((d[0]["k"], d[0]["v"]),
+                         ("not GNOME's own", "brave x2, cat in org.gnome.Shell@user.service"))
+        self.assertEqual(r["cells"][1], "6")                        # all still in its sums
+        snap = self.collect(1000.0 + procs.STRAY)
+        r = self.programs(snap)["prog:org.gnome.Shell"]
+        self.assertEqual((r["sev"], r["detail"][0]["sev"]), ("warn", "warn"))
+        c = keys(snap)["shared_cgroup:org.gnome.Shell@user.service"]
+        self.assertEqual((c["sev"], c["n"]), ("warn", 3))
+        self.assertEqual(c["title"], "3 processes in org.gnome.Shell@user.service: brave x2, "
+                                     "cat")
+        for pid in (1600, 1601, 1602):                              # started via app-unit
+            shutil.rmtree(os.path.join(self.root, "proc", str(pid)))
+        snap = self.collect(1020.0)
+        self.assertEqual(self.programs(snap)["prog:org.gnome.Shell"]["sev"], "ok")
+        self.assertFalse([k for k in keys(snap) if k.startswith("shared_cgroup:")])
 
     def test_many_stuck_one_more_check(self):
         for pid in range(3000, 3015):

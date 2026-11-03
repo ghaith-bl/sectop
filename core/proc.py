@@ -12,6 +12,14 @@ started before the record (/proc/<pid>/stat starttime + /proc/stat btime), else 
 never a wrong one. Needs /proc of other users (sectop.service ProtectProc=default,
 2026-10-26). Login and sudo session scopes (session-2.scope, session-c5.scope) are not
 programs: no name.
+
+Shared cgroup (2026-11-03): GNOME Shell's own unit (org.gnome.Shell@<x>.service) is not
+an app. An app GNOME starts lands there when its launcher forks before GNOME moves the
+pid into the app scope (host: Brave rpm, 10 processes). Their program would be
+org.gnome.Shell: shared() finds the unit, own() tells GNOME's own processes (SHELL_OWN)
+from strays, strays() lists the others by comm (cgroup.procs + /proc/<pid>/comm, both
+readable by every user). Used by the system module (check shared_cgroup) and the
+firewall (sockets from there: org.gnome.Shell/<comm> or org.gnome.Shell/?).
 """
 
 import collections
@@ -27,6 +35,10 @@ _RANDOM_RE = re.compile(
 _ESC_RE = re.compile(r"\\x([0-9a-fA-F]{2})")
 NAME_RE = re.compile(r"[\x21-\x7e]{1,64}")        # row "progs" (core/module.py)
 SESSION_RE = re.compile(r"session(-c?\d+)?")
+SHELL_UNIT_RE = re.compile(r"org\.gnome\.Shell@[A-Za-z0-9_.:-]{1,64}\.service")
+SHELL_OWN = ("gnome-shell", "Xwayland", "bwrap", "glycin-*")   # comm, * = prefix
+CGROUP_ROOT = "/sys/fs/cgroup"
+MAX_PIDS = 1024          # cgroup.procs entries read per shared cgroup
 MAX_HOPS = 8             # parents walked up out of a session scope
 SLACK = 1.0              # btime has whole seconds; journald time is after the record
 MAX_READ = 64 * 1024
@@ -60,6 +72,52 @@ def card_name(cgroup: str) -> str | None:
     if not name or SESSION_RE.fullmatch(name) or not NAME_RE.fullmatch(name):
         return None
     return name
+
+
+def shared(cgroup: str) -> str | None:
+    """Innermost unit of cgroup when it is GNOME Shell's own (shared) unit, else None."""
+    units = [p for p in (cgroup or "").split("/") if p.endswith(_UNIT_SUFFIXES)]
+    if units and SHELL_UNIT_RE.fullmatch(units[-1]):
+        return units[-1]
+    return None
+
+
+def own(comm: str) -> bool:
+    """comm is one of GNOME Shell's own processes (SHELL_OWN)."""
+    for name in SHELL_OWN:
+        if comm == name or (name.endswith("*") and comm.startswith(name[:-1])):
+            return True
+    return False
+
+
+def label(counts) -> str:
+    """Counter comm -> n: 'brave x10, cat x2' (most first, then by name)."""
+    items = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return ", ".join(f"{c} x{n}" if n > 1 else c for c, n in items)
+
+
+def strays(cgroup: str, root: str = CGROUP_ROOT, proc_root: str = "/proc"):
+    """Processes of a shared cgroup that are not GNOME Shell's own -> Counter comm -> n.
+    None if cgroup.procs cannot be read. A pid gone between the two reads is skipped."""
+    if not cgroup.startswith("/") or "/.." in cgroup or "\0" in cgroup:
+        return None
+    try:
+        with open(f"{root}{cgroup}/cgroup.procs", "rb") as f:
+            pids = f.read(MAX_READ).decode("ascii", errors="replace").split()[:MAX_PIDS]
+    except OSError:
+        return None
+    out = collections.Counter()
+    for pid in pids:
+        if not pid.isdigit():
+            continue
+        try:
+            with open(f"{proc_root}/{pid}/comm", "rb") as f:
+                comm = f.read(64).decode("utf-8", errors="replace").strip()
+        except OSError:
+            continue
+        if not own(comm):
+            out[comm if NAME_RE.fullmatch(comm) else "?"] += 1
+    return out
 
 
 def names() -> collections.deque:

@@ -39,9 +39,11 @@ Public IPs masked (key m), the way the screens start.
 
 ## Security model
 
-- Three services, none as root: `sectop-net` (CAP_NET_ADMIN only, no network: `nft`,
+- Four services, none as root: `sectop-net` (CAP_NET_ADMIN only, no network: `nft`,
   `wg`), `sectop` collector (group systemd-journal, no capabilities, no network),
-  `sectop-whois@` (dynamic user, network only, one RDAP lookup per connection)
+  `sectop-whois@` (dynamic user, network only, one RDAP lookup per connection),
+  `sectop-user@<me>` (my user, no capabilities, no network: names the processes in
+  GNOME Shell's shared cgroup, display only)
 - The UI runs as my user, no sudo, reads only /run/sectop (group sectop) and validates
   every field before drawing it
 - Code installed root-owned from git HEAD into /usr/local/lib/sectop; tests and

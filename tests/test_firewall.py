@@ -9,6 +9,7 @@ from core import journal as corejournal
 from core import netd
 from core.module import Context, check_module, validate
 from core.run import Result
+from core import userd
 from modules.firewall import conns, journal, nft, vpn
 
 FIX = os.path.join(os.path.dirname(__file__), "fixtures", "firewall")
@@ -391,6 +392,7 @@ class Host:
         self.set("nft list set vpn_api4", ok(fix("nft-vpn-api4.json")))
         self.set("journalctl", ok(""))
         self.set("ss", ok(fix("ss.txt")))
+        self.set("ss closed", ok(""))                  # unconnected UDP (asked lazily)
         self.set("wg latest-handshakes", ok(fix("wg-handshakes.txt")))
         self.set("wg transfer", ok(fix("wg-transfer.txt")))
         self.set("wg endpoints", ok(fix("wg-endpoints.txt")))
@@ -412,6 +414,16 @@ class Host:
         raise AssertionError(f"unexpected argv {argv}")
 
 
+class Users:
+    """Fake user helper reader (core/userd.py Reader): inode -> Owner."""
+
+    def __init__(self):
+        self.owners, self.notes, self.users = {}, [], []
+
+    def __call__(self):
+        return dict(self.owners), list(self.notes)
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -425,10 +437,14 @@ class Base(unittest.TestCase):
         self.wall = 1792410745.0                      # 20 s after the fixture handshake
         self.sysnet = os.path.join(self.tmp.name, "net")     # not the host's /sys/class/net
         os.mkdir(self.sysnet)
+        self.users = Users()
+        self.cg = os.path.join(self.tmp.name, "cgroup")         # not the host's cgroups
+        self.proc = os.path.join(self.tmp.name, "proc")
         self.st = fw.State(run=self.host, net=self.host, mono=lambda: self.mono,
                            wall=lambda: self.wall,
                            owner=os.getuid(), mode_file=self.mode_file,
-                           rollback_file=self.rb_file, sysnet=self.sysnet)
+                           rollback_file=self.rb_file, sysnet=self.sysnet, users=self.users,
+                           cgroup_root=self.cg, proc_root=self.proc)
 
     def tun(self, flags="0x1091", tun_flags=True):
         """The tunnel as a tun device in the fake sysfs (userspace WireGuard)."""
@@ -476,6 +492,11 @@ class Base(unittest.TestCase):
 
     def panel(self, snap, pid):
         return next(p for p in snap["panels"] if p["id"] == pid)
+
+    def argvs(self):
+        out = [" ".join([os.path.basename(c[0])] + c[1:]) for c in self.host.calls]
+        self.host.calls.clear()
+        return out
 
 
 class TestCollect(Base):
@@ -1250,11 +1271,6 @@ class TestCollect(Base):
         for bad in ("127.0.0.53", "::1", "ff02::1", "255.255.255.255", "0.0.0.0", "x"):
             self.assertIsNone(fw._addr(bad), bad)
 
-    def argvs(self):
-        out = [" ".join([os.path.basename(c[0])] + c[1:]) for c in self.host.calls]
-        self.host.calls.clear()
-        return out
-
     def test_commands(self):
         self.collect()
         argvs = self.argvs()
@@ -1267,7 +1283,7 @@ class TestCollect(Base):
             "nft -j list set inet hostfw wg_fwmark",
             "nft -j -t list table inet mullvad",
             "nft -j list set inet hostfw vpn_api4",
-            "ss -tunaH --cgroup state established",
+            "ss -tunaeH --cgroup state established",
         ])
         self.assertFalse(any("dump" in a for a in argvs))           # never prints private key
 
@@ -1496,6 +1512,172 @@ class TestLeakBox(Base):
     def test_since(self):
         self.assertEqual([fw._since(x) for x in (-1, 0, 119, 120, 3599, 3600, 90061)],
                          ["?", "0s", "119s", "2m 00s", "59m 59s", "1h 00m", "25h 01m"])
+
+
+SHELL = "/user.slice/user-1000.slice/user@1000.service/session.slice/org.gnome.Shell@user.service"
+UDP_NEW = ("HFW-OUT-NEW: IN= OUT=wg0-mullvad SRC=10.2.0.2 DST=203.0.113.50 LEN=1278 PROTO=UDP "
+           "SPT={spt} DPT=443 LEN=1258 UID=1000 GID=1000 ")
+TCP_NEW = ("HFW-OUT-NEW: IN= OUT=wg0-mullvad SRC=10.2.0.2 DST={dst} LEN=60 PROTO=TCP "
+           "SPT={spt} DPT=443 SYN UID=1000 GID=1000 ")
+
+
+class TestProgramNames(Base):
+    """2026-11-03: every program named (no unexplained ?)."""
+
+    def rows(self, snap, pid="programs"):
+        return {r["id"]: r for r in self.panel(snap, pid)["rows"]}
+
+    def detail(self, row):
+        return {it["k"]: (it["v"], it.get("sev", "ok")) for it in row["detail"]}
+
+    def lines(self, *msgs):
+        self.host.set("journalctl", ok("".join(jline(f"n{i}", 1792410740 + i, m)
+                                                for i, m in enumerate(msgs))))
+
+    def shell(self, *comms):
+        """Fake GNOME Shell cgroup with these processes (pids 11, 12, ...)."""
+        d = self.cg + SHELL
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "cgroup.procs"), "w") as f:
+            f.write("".join(f"{11 + i}\n" for i in range(len(comms))))
+        for i, comm in enumerate(comms):
+            os.makedirs(os.path.join(self.proc, str(11 + i)), exist_ok=True)
+            with open(os.path.join(self.proc, str(11 + i), "comm"), "w") as f:
+                f.write(comm + "\n")
+
+    def shell_socket(self):
+        self.host.set("ss", ok("tcp 0 0 10.2.0.2:40000 203.0.113.60:443 uid:1000 ino:777 "
+                               f"sk:1 cgroup:{SHELL} <->\n"))
+
+    def test_udp_by_local_port(self):
+        app = ("/user.slice/user-1000.slice/user@1000.service/app.slice/"
+               "app-brave\\x2dbrowser@43041.service")
+        self.host.set("ss closed", ok(f"udp 0 0 0.0.0.0:50000 0.0.0.0:* uid:1000 ino:5 "
+                                      f"cgroup:{app}\n"
+                                      f"udp 0 0 0.0.0.0:50001 0.0.0.0:* cgroup:{app}\n"))
+        self.lines(UDP_NEW.format(spt=50000), UDP_NEW.format(spt=50001),
+                   UDP_NEW.format(spt=50002))
+        snap = self.collect()
+        self.assertEqual(self.argvs().count("ss -uaneH --cgroup state closed"), 1)   # once
+        rows = self.rows(snap)
+        self.assertEqual(rows["brave-browser"]["cells"][3], "2")        # 2 allowed lines
+        self.assertEqual(rows["brave-browser"]["progs"], ["brave-browser"])
+        self.assertIn("? uid 1000", rows)                               # port 50002: none
+        audit = [r["cells"][6] for r in self.panel(snap, "audit")["rows"]]
+        self.assertEqual(audit, ["brave-browser"])          # one flow (ports vary), named
+
+    def test_udp_lookup_only_when_needed(self):
+        self.lines(TCP_NEW.format(dst="198.51.100.20", spt=33146))     # established match
+        self.collect()
+        self.assertNotIn("ss -uaneH --cgroup state closed", self.argvs())
+
+    def test_guess_from_peer(self):
+        self.lines(TCP_NEW.format(dst="203.0.113.10", spt=40001))      # closed: no socket
+        snap = self.collect()
+        rows = self.rows(snap)
+        g = rows["brave?"]
+        self.assertEqual(g["cells"][:4], ["brave?", "1000", "0", "1"])
+        self.assertNotIn("progs", g)                                    # never on a card
+        self.assertIn("guess", self.detail(g)["note"][0])
+        peer = self.rows(snap, "peers")["203.0.113.10"]
+        self.assertEqual(peer["cells"][4], "brave")                     # guess not fed back
+        flow = self.panel(snap, "audit")["rows"][0]
+        self.assertEqual((flow["cells"][6], "progs" in flow), ("brave?", False))
+
+    def test_no_guess_when_two_programs(self):
+        self.host.set("ss", ok(fix("ss.txt") + "tcp 0 0 10.2.0.2:1 203.0.113.10:443 "
+                               'users:(("curl",pid=9,fd=3))\n'))
+        self.lines(TCP_NEW.format(dst="203.0.113.10", spt=40001))
+        self.assertIn("? uid 1000", self.rows(self.collect()))
+
+    def test_shared_cgroup_from_helper(self):
+        self.shell("gnome-shell", "brave", "brave")
+        self.shell_socket()
+        self.users.owners = {777: userd.Owner(12, "brave", "null", SHELL)}
+        self.users.users = ["null"]
+        rows = self.rows(self.collect())
+        r = rows["org.gnome.Shell/brave"]
+        self.assertEqual((r["sev"], r["progs"], r["filter"]),
+                         ("warn", ["org.gnome.Shell"], "org.gnome.Shell/brave"))
+        d = self.detail(r)
+        self.assertEqual(d["shared cgroup"][1], "warn")
+        self.assertIn("appunit", d["fix"][0])
+        self.host.set("ss", ok(""))                                 # closed: history only
+        self.tick()
+        r = self.rows(self.collect())["org.gnome.Shell/brave"]
+        self.assertEqual((r["sev"], self.detail(r)["shared cgroup"][1]), ("ok", "ok"))
+        self.lines(TCP_NEW.format(dst="203.0.113.60", spt=40009))   # its peer again
+        self.tick()
+        self.assertIn("? uid 1000", self.rows(self.collect()))      # no shared guess
+
+    def test_shared_cgroup_without_helper(self):
+        self.shell("gnome-shell", "brave", "brave", "cat")
+        self.shell_socket()
+        r = self.rows(self.collect())["org.gnome.Shell/?"]
+        d = self.detail(r)
+        self.assertIn("brave x2, cat", d["shared cgroup"][0])
+        self.assertIn("sectop-user@<user>.service not running", d["user helper"][0])
+        self.assertEqual(r["progs"], ["org.gnome.Shell"])
+
+    def test_shared_cgroup_own_only(self):
+        self.shell("gnome-shell", "Xwayland", "glycin-image-rs")
+        self.shell_socket()
+        r = self.rows(self.collect())["org.gnome.Shell"]
+        self.assertEqual(r["sev"], "ok")
+        self.users.owners = {777: userd.Owner(11, "gnome-shell", "null", SHELL)}
+        self.shell("gnome-shell", "brave")
+        self.tick()
+        self.assertIn("org.gnome.Shell", self.rows(self.collect()))     # its own socket
+
+    def test_shared_owner_other_cgroup_ignored(self):
+        self.shell("gnome-shell", "brave")
+        self.shell_socket()
+        self.users.owners = {777: userd.Owner(12, "brave", "null", SHELL + "x")}
+        self.assertIn("org.gnome.Shell/?", self.rows(self.collect()))
+
+    def test_reconnect_waits_for_fresh_slow_samples(self):
+        """2026-11-03 host: false fwmark crit after a reconnect (stale 'down' sample)."""
+        stamps = {"fast": self.wall, "slow": self.wall}
+        slow = ("endpoints", "fwmark", "wg_fwmark")
+        self.host.stamp = lambda argv: stamps["slow" if argv[-1] in slow else "fast"]
+        self.collect()
+        self.tick()
+        for key in ("wg latest-handshakes", "wg transfer"):
+            self.host.set(key, NO_DEV)
+        stamps["fast"] = self.wall
+        self.collect()                                              # down
+        self.tick()
+        self.host.set("wg latest-handshakes", ok(fix("wg-handshakes.txt")))
+        self.host.set("wg transfer", ok(fix("wg-transfer.txt")))
+        self.host.set("wg fwmark", NO_DEV)                          # the old 'down' sample
+        self.host.set("wg endpoints", NO_DEV)
+        stamps["fast"] = self.wall                                  # up, seen now
+        s = self.collect()
+        self.assertNotEqual(s["status"], "crit")
+        v = self.items(s, "vpn")
+        self.assertEqual(v["fwmark"], ("waiting for a net unit sample newer than the tunnel "
+                                       "change", "ok"))
+        self.assertNotIn("endpoint", v)
+        self.tick()
+        self.argvs()
+        self.host.set("wg fwmark", ok(fix("wg-fwmark.txt")))
+        self.host.set("wg endpoints", ok(fix("wg-endpoints.txt")))
+        stamps["slow"] = self.wall                                  # fresh samples
+        s = self.collect()
+        self.assertIn("wg show wg0-mullvad endpoints", self.argvs())  # ran again at once
+        v = self.items(s, "vpn")
+        self.assertEqual(v["fwmark"], ("0x6d6f6c65 (in set)", "ok"))
+        self.assertIn("endpoint", v)
+        self.tick()
+        self.collect()
+        self.assertNotIn("wg show wg0-mullvad endpoints", self.argvs())  # back to SLOW
+
+    def test_fwmark_live_unreadable_no_claim(self):
+        self.host.set("wg fwmark", NO_DEV)
+        s = self.collect()
+        self.assertEqual(s["status"], "ok")
+        self.assertEqual(self.items(s, "vpn")["fwmark"],
+                         ("live: Unable to access interface: No such device", "info"))
 
 
 class TestNetSource(Base):

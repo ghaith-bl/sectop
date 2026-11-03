@@ -141,6 +141,16 @@ class TestReader(unittest.TestCase):
         os.chmod(netd.path("table", self.tmp.name), 0o666)
         self.assertIn("net file:", self.ask("table").err)
 
+    def test_stamp(self):
+        argv = list(self.cmds["fwmark"][0])
+        self.assertIsNone(self.reader.stamp(argv))                  # never read
+        self.put("fwmark", ts=990.5)
+        self.ask("fwmark")
+        self.assertEqual(self.reader.stamp(argv), 990.5)            # the sample's time
+        self.put("fwmark", ts=1000.0 - netd.SLOW_MAX_AGE - 1)
+        self.assertEqual(self.ask("fwmark").rc, 1)
+        self.assertIsNone(self.reader.stamp(argv))                  # failed read: unknown
+
     def test_user_missing_and_bug(self):
         r = netd.Reader("wg0-mullvad", base=self.tmp.name, owner=lambda: None, binary=fake_bin)
         self.assertIn("user sectop-net missing", r(list(self.cmds["table"][0])).err)

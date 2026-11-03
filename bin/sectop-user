@@ -1,0 +1,14 @@
+#!/usr/bin/python3 -IB
+"""sectop user helper, sectop-user@<user>.service.
+
+-I: no PYTHON* environment, no user site, no current directory on sys.path.
+So the package path is set here: the directory above bin/ (symlinks resolved).
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+
+from core.userd import main  # noqa: E402
+
+sys.exit(main())

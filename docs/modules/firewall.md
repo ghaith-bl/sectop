@@ -19,7 +19,10 @@ Every tick (4 commands):
 |---|---|
 | counters + live mode | `nft -j -t list table inet hostfw` |
 | tunnel | `wg show wg0-mullvad latest-handshakes`, `transfer` |
-| open sockets (peers, prog) | `ss -tunaH --cgroup state established` |
+| open sockets (peers, prog) | `ss -tunaeH --cgroup state established` |
+
+Only when a UDP line matches no established socket (QUIC), once per tick:
+`ss -uaneH --cgroup state closed` (unconnected UDP sockets, matched by local port).
 
 Log lines: core's journal follower (`core/journal.py`, docs/module-interface.md,
 Journal). `JOURNAL = {"groups": [["_TRANSPORT=kernel"]], "fields": ["MESSAGE"]}`: every
@@ -53,6 +56,15 @@ Change between kernel and userspace = slow sources run again at once.
 - Mode from the table: only rules of chain `enforce` count; no chain `enforce` = unknown.
 - Slow items and their checks are kept and shown every tick until the next slow run.
   A changed endpoint, fwmark or kill switch table shows within 30 s (a reconnect at once).
+- Reconnect (2026-11-03, host: false `fwmark mismatch` crit for 30 s after a reconnect):
+  the slow run at the change read the net unit's samples from before it (tunnel down,
+  "Unable to access interface"). Now: the time of the fast sample that showed the change
+  is kept; while the endpoint, live fwmark or wg_fwmark sample is older
+  (`netd.Reader.stamp()`), item `fwmark: waiting for a net unit sample newer than the
+  tunnel change`, no endpoint, no fwmark check, slow sources again next tick (at most
+  ~15 s, the net unit's slow period).
+- Live fwmark unreadable (wg rc != 0): `fwmark live: <why>` info, no mismatch claim.
+  Parse error: warn + check `parse:wg` (as before).
 - Kill switch: the VPN app's own nftables table (Mullvad: `inet mullvad`, kept while
   disconnected by lockdown mode). On = a filter chain with policy drop on input, output
   and forward (route / nat chains ignored). Rules not read. Missing or open: warn, hostfw
@@ -192,7 +204,33 @@ Title: `programs <rows>  <n> with open sockets`.
   unknown programs (`?` when no uid); `zone` for (inbound), `vm`, `fwd_in` for (forward).
   Only when it is printable ASCII (the filter prompt's chars): else no filter.
 - Same limit as the audit `prog` column: a flow that closes before the next `ss` poll
-  (6 s) has no program. Blocked flows: mostly `?`. No audit `connect` rule (volume).
+  has no program. Blocked flows: mostly `?` (a rejected SYN never has a socket). No
+  audit `connect` rule (volume).
+
+Program of a log line (2026-11-03, my ask: no unexplained `?`), first match wins, one
+answer per line and tick (every box shows the same):
+1. established socket, same proto + both addresses + ports (`ss`)
+2. UDP: unconnected socket on the line's local port (exact local address or wildcard),
+   from the lazy `ss ... state closed` call (QUIC often sends unconnected)
+3. guess `<name>?`: exactly one program had sockets to the line's peer (now, or earlier
+   in the peers box). Own row (`brave?`, note `guess: ...`), never on a card (`progs`),
+   not fed back into the peers box. Two or more programs: `?`.
+4. `?` (row `? uid N`)
+
+Shared cgroup (2026-11-03): an app GNOME starts can land in GNOME Shell's own unit
+(`org.gnome.Shell@<x>.service`) when its launcher forks before GNOME moves it into its
+scope (host: Brave rpm, fixed by silverblue-cis-hardening appunit). Its sockets' cgroup
+says `org.gnome.Shell`. Socket name then (`core/proc.py` shared / own / strays):
+- user helper (`core/userd.py`, sectop-user@<user>.service) knows the socket inode:
+  GNOME's own process (gnome-shell, Xwayland, bwrap, glycin-*) -> `org.gnome.Shell`,
+  another -> `org.gnome.Shell/<comm>` (e.g. `org.gnome.Shell/brave`)
+- no helper answer: `org.gnome.Shell/?` while the cgroup holds other processes
+  (`cgroup.procs` + `/proc/<pid>/comm`, readable by every user), else `org.gnome.Shell`
+- such rows: yellow (`sev` warn) while a socket is open, detail `shared cgroup` (what
+  else is in there; red line while open), `fix` / `user helper` (why no name). Never a
+  guess (`<name>?`) for them. Card (`c`) = org.gnome.Shell. The alert
+  is the system module's check `shared_cgroup:<unit>` (screen 3): the firewall rows
+  only show it. Names from the helper are display only (a process sets its own comm).
 
 Program name (2026-10-20, privilege split): the collector runs as user sectop, `ss -p`
 would need CAP_SYS_PTRACE. `ss --cgroup` works without privilege (tested as my user:
@@ -206,6 +244,8 @@ unit of the socket's cgroup (`conns.program()`):
   (`NetworkManager`, `chronyd`, `getty`, `session`). `\xNN` escapes decoded.
 - terminal commands: the tab's scope, `vte-spawn` (not `curl`): the price of no ptrace.
 - `cgroup:unreachable:<id>` or no unit -> no program (`?` row).
+- `-e`: `ino:<n>` (socket inode) kept with the cgroup: the user helper names sockets of
+  the shared cgroup by inode.
 
 ## Row addresses (`ip`, key `w` = whois)
 

@@ -15,6 +15,8 @@ Checks (Severity, red rule 2026-10-25):
   Defaults 2026-10-27: coretemp 75 (max = crit = 100 on host; idle 37-43, a game
   50-70), spd5118 70 (sensor max 55 is reached while gaming), nvme: sensor max 80.85.
 - warn: a source that cannot be read (row shows why).
+- warn: processes in GNOME Shell's cgroup that are not GNOME's own, for 10 s
+  (modules/system/procs.py, check shared_cgroup:<unit>).
 Pressure: shown only, no limit yet (limits from a week of my host's numbers).
 /boot: row only.
 """
@@ -379,6 +381,7 @@ def _programs(st: State, rows, checks) -> dict:
     now = st.mono()
     panel["rows"] = procsmod.rows(st.procs, size, st.host.page, known, now=now)
     checks.extend(procsmod.stuck_checks(st.procs, now))
+    checks.extend(procsmod.stray_checks(st.procs, now))
     n = sum(len(g.procs) for g in progs)
     z = sum(1 for s in st.procs.stuck if s.p.state == "Z")
     d = len(st.procs.stuck) - z

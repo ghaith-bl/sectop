@@ -6,12 +6,13 @@ import subprocess
 import sys
 import unittest
 
-from core import app, collector, lookup, netd
+from core import app, collector, lookup, netd, userd
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEPLOY = os.path.join(ROOT, "deploy")
 PREFIX = "/usr/local/lib/sectop/"
-SERVICES = ("sectop.service", "sectop-net.service", "sectop-whois@.service")
+SERVICES = ("sectop.service", "sectop-net.service", "sectop-whois@.service",
+            "sectop-user@.service")
 
 
 def unit(name: str) -> dict:
@@ -72,7 +73,7 @@ class TestUnits(unittest.TestCase):
         n = svc("sectop-net.service")
         self.assertEqual((n["AmbientCapabilities"], n["CapabilityBoundingSet"]),
                          ("CAP_NET_ADMIN", "CAP_NET_ADMIN"))
-        for name in ("sectop.service", "sectop-whois@.service"):
+        for name in ("sectop.service", "sectop-whois@.service", "sectop-user@.service"):
             s = svc(name)
             self.assertEqual((s["AmbientCapabilities"], s["CapabilityBoundingSet"]), ("", ""),
                              name)
@@ -91,8 +92,10 @@ class TestUnits(unittest.TestCase):
             self.assertEqual(unit(name)["Service"]["SystemCallFilter"][0], "@system-service")
 
     def test_proc_view(self):
-        """Only the collector sees other users' processes (program card, 2026-10-26)."""
+        """Only the collector sees other users' processes (program card, 2026-10-26); the
+        user helper sees its own user's (fd of the shared cgroup, 2026-11-03)."""
         self.assertEqual(svc("sectop.service")["ProtectProc"], "default")
+        self.assertEqual(svc("sectop-user@.service")["ProtectProc"], "default")
         for name in ("sectop-net.service", "sectop-whois@.service"):
             self.assertEqual(svc(name)["ProtectProc"], "invisible", name)
         self.assertNotIn("CAP_SYS_PTRACE", svc("sectop.service").get("CapabilityBoundingSet",
@@ -105,10 +108,26 @@ class TestUnits(unittest.TestCase):
                              ("any", "AF_UNIX AF_NETLINK"), name)
             self.assertNotIn("DynamicUser", s)
             self.assertNotIn("PrivateNetwork", s)           # ss / nft need the host netns
+        h = svc("sectop-user@.service")
+        self.assertEqual((h["IPAddressDeny"], h["RestrictAddressFamilies"], h["PrivateNetwork"]),
+                         ("any", "AF_UNIX", "yes"))           # reads /proc only
         w = svc("sectop-whois@.service")
         self.assertNotIn("IPAddressDeny", w)
         self.assertEqual(w["RestrictAddressFamilies"], "AF_UNIX AF_INET AF_INET6")
         self.assertEqual((w["StandardInput"], w["StandardOutput"]), ("socket", "socket"))
+
+
+    def test_user_helper(self):
+        """sectop-user@<user>.service: runs as that user, its own runtime dir, and never
+        RemoveIPC= (it would remove the login user's IPC objects on stop)."""
+        h = svc("sectop-user@.service")
+        self.assertEqual((h["User"], h["RuntimeDirectory"], h["RuntimeDirectoryMode"],
+                          h["UMask"]), ("%i", "sectop-user/%i", "0750", "0027"))
+        self.assertEqual(userd.USER_DIR, "/run/sectop-user")
+        self.assertNotIn("RemoveIPC", h)
+        self.assertNotIn("Group", h)                         # no group sectop handed out
+        self.assertNotIn("SupplementaryGroups", h)
+        self.assertEqual(svc("sectop.service")["RemoveIPC"], "yes")
 
 
 class TestLaunchers(unittest.TestCase):
@@ -121,13 +140,13 @@ class TestLaunchers(unittest.TestCase):
         r = self.run_bin("sectop", "--help")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("usage: sectop [SCREEN]", r.stdout)
-        for name in ("sectop-collector", "sectop-net"):
+        for name in ("sectop-collector", "sectop-net", "sectop-user"):
             r = self.run_bin(name, "x")                         # args refused before anything
             self.assertEqual(r.returncode, 2, r.stderr)
             self.assertIn(f"usage: {name}", r.stderr)
 
     def test_executable_and_shebang(self):
-        for name in ("sectop", "sectop-collector", "sectop-net"):
+        for name in ("sectop", "sectop-collector", "sectop-net", "sectop-user"):
             p = os.path.join(ROOT, "bin", name)
             self.assertTrue(os.access(p, os.X_OK), name)
             with open(p, encoding="ascii") as f:
