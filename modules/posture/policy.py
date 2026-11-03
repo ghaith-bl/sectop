@@ -44,6 +44,7 @@ KINDS = {
     "lockdown": ({"want"}, set()),
     "audit-rules": ({"want"}, set()),
     "audit-enabled": (set(), set()),
+    "audit-locked": (set(), set()),
     "uid0": ({"want"}, set()),
     "group": ({"group", "want"}, set()),
     "perms": ({"path", "mode", "owner"}, set()),

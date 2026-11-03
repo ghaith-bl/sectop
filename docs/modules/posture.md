@@ -78,6 +78,7 @@ Summary `pass <n> | fail <n> | unknown <n> | accepted <n>`.
 | lockdown | want | `/sys/kernel/security/lockdown` `[mode]` in want |
 | audit-rules | want (number) | add_rule - remove_rule this boot >= want |
 | audit-enabled | - | no `audit_enabled=0` this boot |
+| audit-locked | - | last `audit_enabled` set this boot is `2` (`-e 2`) |
 | uid0 | want (list) | the accounts with UID 0 (`/etc/passwd`) = want |
 | group | group, want (list) | every member is in want (`[]` = must be empty) |
 | perms | path, mode, owner | stat: no mode bit beyond mode, owner = `user:group` |
@@ -105,7 +106,7 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
           off; auditd, firewalld running; firewalld zone drop; only root UID 0; wheel =
           me; /var on LUKS; system image not unlocked; ostree remotes verify; listeners;
           Secure Boot on; no hardware MAC on a link that is up; hostname localhost
-    warn  SELinux config enforcing + targeted; audit rules >= 70; journald audit
+    warn  SELinux config enforcing + targeted; audit rules >= 70; audit locked (-e 2); journald audit
           socket; su closed (sugroup empty, pam_wheel); faillock 5 / 900 s; pwquality 14
           / 4 classes; shadow, gshadow, passwd, group perms; sysctls of
           90-hardening.conf (kernel, IPv4, IPv6); no taint; CIS module blocks;
@@ -181,3 +182,7 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
   drop-in the daemon makes it 766 root:root (host before): any local user can
   disconnect, turn lockdown off or change settings. stat only, the socket is never
   opened. warn: the tunnel and lockdown are still on. 57 checks.
+- Audit lock 2026-11-03 (silverblue-cis-hardening `audit-rules`, `-e 2` in
+  99-finalize.rules, DISA STIG RHEL 9 V-258229): `audit-locked`, from the same journal
+  CONFIG_CHANGE records as `audit-enabled`. A refused change while locked has res=0 and
+  is not counted. warn: rules are loaded, only the lock is missing. 58 checks.

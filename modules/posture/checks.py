@@ -846,11 +846,24 @@ def k_audit_enabled(c, cx: Cx) -> Res:
     return Res("fail" if a.enabled == "0" else "pass", f"audit_enabled={a.enabled}", source=src)
 
 
+def k_audit_locked(c, cx: Cx) -> Res:
+    """-e 2 at boot (99-finalize.rules) leaves audit_enabled=2; the kernel then refuses
+    every later change (logged with res=0, not counted)."""
+    a = cx.audit
+    src = "journal CONFIG_CHANGE op=set audit_enabled this boot"
+    if a is None or a.err:
+        return Res("unknown", (a.err if a else "no journal scan") or "?", source=src)
+    if a.enabled is None:
+        return Res("fail", "not locked this boot", source=src)
+    return Res("pass" if a.enabled == "2" else "fail", f"audit_enabled={a.enabled}", source=src)
+
+
 KINDS = {
     "file": k_file, "lines": k_lines, "sysctl": k_sysctl, "cmdline": k_cmdline,
     "failed-units": k_failed_units, "listeners": k_listeners, "taint": k_taint,
     "luks": k_luks, "secureboot": k_secureboot, "lockdown": k_lockdown,
-    "audit-rules": k_audit_rules, "audit-enabled": k_audit_enabled, "uid0": k_uid0,
+    "audit-rules": k_audit_rules, "audit-enabled": k_audit_enabled,
+    "audit-locked": k_audit_locked, "uid0": k_uid0,
     "group": k_group, "perms": k_perms, "ostree-unlocked": k_ostree_unlocked,
     "ostree-staged": k_ostree_staged, "ostree-age": k_ostree_age, "ostree-gpg": k_ostree_gpg,
     "firewalld-zone": k_firewalld_zone, "wifi-ipv6": k_wifi_ipv6, "nm-props": k_nm_props,
@@ -893,6 +906,7 @@ def want_text(c) -> str:
     if k == "dns-servers":
         return "only " + " ".join(c.allow) if c.allow else "none"
     return {"luks": "CRYPT-LUKS", "secureboot": "on", "audit-enabled": "not 0",
+            "audit-locked": "audit_enabled=2",
             "ostree-unlocked": "locked", "ostree-staged": "none",
             "ostree-gpg": "all verify", "mac-local": "local MAC"}.get(k, "-")
 

@@ -49,6 +49,12 @@ sev = "crit"
 why = "audit not switched off (auditctl -e 0)"
 
 [[check]]
+id = "audit-locked"
+kind = "audit-locked"
+sev = "warn"
+why = "audit rules locked until reboot (-e 2)"
+
+[[check]]
 id = "auditd-active"
 kind = "units"
 sev = "crit"

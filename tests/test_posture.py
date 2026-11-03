@@ -638,6 +638,17 @@ class TestKinds(unittest.TestCase):
         a.err = "journal scan: x"
         self.assertEqual(res(chk(kind="audit-enabled"), audit=a), ("unknown", "journal scan: x"))
 
+    def test_audit_locked(self):
+        a = pos.Audit()
+        self.assertEqual(res(chk(kind="audit-locked"), audit=a), ("fail", "not locked this boot"))
+        a.enabled = "1"
+        self.assertEqual(res(chk(kind="audit-locked"), audit=a), ("fail", "audit_enabled=1"))
+        a.enabled = "2"
+        self.assertEqual(res(chk(kind="audit-locked"), audit=a), ("pass", "audit_enabled=2"))
+        self.assertEqual(res(chk(kind="audit-enabled"), audit=a), ("pass", "audit_enabled=2"))
+        a.err = "journal scan: x"
+        self.assertEqual(res(chk(kind="audit-locked"), audit=a), ("unknown", "journal scan: x"))
+
 
 def change(cursor, msg):
     return {"__CURSOR": cursor, "_TRANSPORT": "audit", "_AUDIT_TYPE": "1305", "MESSAGE": msg}
@@ -648,6 +659,9 @@ ADD = ('CONFIG_CHANGE auid=4294967295 ses=4294967295 subj=system_u:system_r:audi
 REMOVE = 'CONFIG_CHANGE auid=1000 ses=3 op=remove_rule key="identity" list=4 res=1'
 FAILED = 'CONFIG_CHANGE auid=1000 ses=3 op=add_rule key="x" list=4 res=0'
 OFF = "CONFIG_CHANGE op=set audit_enabled=0 old=1 auid=1000 ses=3 res=1"
+LOCK = ("CONFIG_CHANGE op=set audit_enabled=2 old=1 auid=4294967295 ses=4294967295 "
+        "subj=system_u:system_r:unconfined_service_t:s0 res=1")
+OFF_REFUSED = "CONFIG_CHANGE op=set audit_enabled=0 old=2 auid=1000 ses=3 res=0"
 
 
 class TestAuditJournal(unittest.TestCase):
@@ -668,6 +682,13 @@ class TestAuditJournal(unittest.TestCase):
         self.assertEqual((st.audit.added, st.audit.removed, st.audit.enabled), (3, 1, "0"))
         pos.follow(st, [], NOW + pos.SCAN_KEEP + 1)
         self.assertEqual(st.audit.cursors, set())                       # overlap over
+
+    def test_lock_then_refused_off(self):
+        """-e 2 at boot, then `auditctl -e 0`: refused (res=0), still locked."""
+        st = pos.State(checks=(), wall=lambda: NOW)
+        pos.boot_scan(st, lambda argv, timeout: Result(0, json.dumps(change("c1", LOCK)), ""))
+        pos.follow(st, [change("c2", OFF_REFUSED)], NOW + 1)
+        self.assertEqual(st.audit.enabled, "2")
 
     def test_scan_failed(self):
         st = pos.State(checks=(), wall=lambda: NOW)
@@ -731,6 +752,7 @@ class TestModule(unittest.TestCase):
         self.assertTrue(allow)
         st = pos.State(checks=checks, host=h, wall=lambda: NOW, stamp=lambda ts: "12:00:00")
         st.audit.added = 73   # 70 CIS + 2 af-alg + mullvad-exclude
+        st.audit.enabled = "2"   # -e 2 at boot
         snap = validate(pos.collect(st, Context((), True, "")))
         got = {r["cells"][0]: r["cells"][1] for r in snap["panels"][0]["rows"]}
         self.assertEqual({k: v for k, v in got.items() if v != "pass"}, {})
