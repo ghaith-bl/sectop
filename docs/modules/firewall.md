@@ -22,7 +22,8 @@ Every tick (4 commands):
 | open sockets (peers, prog) | `ss -tunaeH --cgroup state established` |
 
 Only when a UDP line matches no established socket (QUIC), once per tick:
-`ss -uaneH --cgroup state closed` (unconnected UDP sockets, matched by local port).
+`ss -tuaneH --cgroup state closed` (unconnected UDP sockets, matched by local port).
+`-t` too: with one protocol ss leaves out the Netid column (host 2026-11-03).
 
 Log lines: core's journal follower (`core/journal.py`, docs/module-interface.md,
 Journal). `JOURNAL = {"groups": [["_TRANSPORT=kernel"]], "fields": ["MESSAGE"]}`: every

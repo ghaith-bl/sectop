@@ -1558,7 +1558,7 @@ class TestProgramNames(Base):
         self.lines(UDP_NEW.format(spt=50000), UDP_NEW.format(spt=50001),
                    UDP_NEW.format(spt=50002))
         snap = self.collect()
-        self.assertEqual(self.argvs().count("ss -uaneH --cgroup state closed"), 1)   # once
+        self.assertEqual(self.argvs().count("ss -tuaneH --cgroup state closed"), 1)   # once
         rows = self.rows(snap)
         self.assertEqual(rows["brave-browser"]["cells"][3], "2")        # 2 allowed lines
         self.assertEqual(rows["brave-browser"]["progs"], ["brave-browser"])
@@ -1566,10 +1566,15 @@ class TestProgramNames(Base):
         audit = [r["cells"][6] for r in self.panel(snap, "audit")["rows"]]
         self.assertEqual(audit, ["brave-browser"])          # one flow (ports vary), named
 
+    def test_no_netid_lines_skipped(self):
+        """`ss -uanH state closed` on my host 2026-11-03: one protocol = no Netid column.
+        Such lines are not parsed (why the call asks -t too)."""
+        self.assertEqual(conns.parse("0      0            0.0.0.0:41096 0.0.0.0:*\n"), [])
+
     def test_udp_lookup_only_when_needed(self):
         self.lines(TCP_NEW.format(dst="198.51.100.20", spt=33146))     # established match
         self.collect()
-        self.assertNotIn("ss -uaneH --cgroup state closed", self.argvs())
+        self.assertNotIn("ss -tuaneH --cgroup state closed", self.argvs())
 
     def test_guess_from_peer(self):
         self.lines(TCP_NEW.format(dst="203.0.113.10", spt=40001))      # closed: no socket

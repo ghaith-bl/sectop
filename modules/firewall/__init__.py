@@ -648,7 +648,9 @@ class Names:
 
     def _ports(self) -> dict:
         if self.udp is None:
-            res = self.st.cmd("ss", "-uaneH", "--cgroup", "state", "closed")
+            # -t too: with one protocol ss drops the Netid column (host 2026-11-03), and
+            # conns.parse() needs it. TCP sockets in state closed: rare, other key.
+            res = self.st.cmd("ss", "-tuaneH", "--cgroup", "state", "closed")
             if res.rc != 0:
                 self.udp, self.udp_err = {}, _fail(res)
             else:
