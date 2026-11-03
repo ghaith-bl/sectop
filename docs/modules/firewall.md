@@ -111,7 +111,7 @@ Log kind = counter name: `HFW-OUT-LEAK` -> `out_leak`, `HFW-FWD-VM-LAN` -> `fwd_
 | sev | kinds |
 |---|---|
 | crit | out_leak |
-| warn | out_dns, in_lan, in_vpn, fwd_vm_lan, fwd_in |
+| warn | out_dns, in_lan, in_vpn, fwd_vm_lan, fwd_in, out_noscope |
 | info | out_disco, out_share, out_lan, unknown kinds |
 | hidden | in_noise (counter only, no event, no audit row) |
 | ok | out_dns_vpn, out_wg, out_vpn_api, out_router_admin, out_lan_allow, out_new, fwd_vm_new (allowed) |
@@ -131,6 +131,12 @@ Log kind = counter name: `HFW-OUT-LEAK` -> `out_leak`, `HFW-FWD-VM-LAN` -> `fwd_
     to (an allowed flow logged, or a socket open now): late replies after a flow closed.
     No line this tick (rate limit, lag) -> warn, source unknown.
 - Counter lower than last tick (table reloaded) -> its new value counts as new.
+- out_noscope (hostfw 2026-11-03): new flows from GNOME Shell's cgroup (an app without
+  its own scope). Own switch in hostfw, chain `enforce_noscope` (`hostfw noscope observe
+  | enforce`), read from the same table (`nft.mode(text, "enforce_noscope")`): verdict
+  pass / block from it, not from the global mode. hostfw box item `noscope`: observe /
+  enforce, `-` for a ruleset without it (no claim). Program of its lines: the socket's
+  (sockets of that cgroup: org.gnome.Shell/<comm>, Programs box).
 
 Checks (Snapshot v2, key = rule + subject, `t` = tunnel name):
 

@@ -41,19 +41,20 @@ def comments(text: str) -> dict:
     return out
 
 
-def mode(text: str) -> str:
+def mode(text: str, chain: str = "enforce") -> str:
     """`list chain inet hostfw enforce` or `-t list table inet hostfw`
     -> observe | enforce | unknown.
 
     hostfw contract: chain `enforce` empty = observe, one reject rule = enforce.
     Only rules of chain `enforce` count. No chain `enforce` in the output = unknown.
+    chain="enforce_noscope": the own switch of rule out_noscope (2026-11-03).
     """
     items = _items(text)
     chains = {c.get("name") for c in (it.get("chain") for it in items) if isinstance(c, dict)}
-    if "enforce" not in chains:
+    if chain not in chains:
         return "unknown"
     rules = [it["rule"] for it in items
-             if isinstance(it.get("rule"), dict) and it["rule"].get("chain") == "enforce"]
+             if isinstance(it.get("rule"), dict) and it["rule"].get("chain") == chain]
     if not rules:
         return "observe"
     expr = rules[0].get("expr")

@@ -74,7 +74,7 @@ IFACE_RE = netd.IFACE_RE
 # hostfw counter / log kind -> severity. None = hidden (counter only, no event).
 SEV = {
     "out_leak": "crit",
-    "out_dns": "warn", "in_lan": "warn", "in_vpn": "warn",
+    "out_dns": "warn", "in_lan": "warn", "in_vpn": "warn", "out_noscope": "warn",
     "fwd_vm_lan": "warn", "fwd_in": "warn",
     "out_disco": "info", "out_share": "info", "out_lan": "info",
     "in_noise": None,
@@ -134,6 +134,8 @@ MATCH = {
     "out_share": "tcp 21 111 139 445 548 2049, udp 69 111 2049 (not via virbr0)",
     "out_lan": "to private / link-local / CGNAT / multicast / broadcast, not router / exception",
     "out_leak": "anything else leaving on the uplink (not tunnel transport, DHCP, router)",
+    "out_noscope": "new flows from GNOME Shell's cgroup (set noscope_cg): an app without "
+                   "its own scope; own switch (hostfw noscope)",
     "fwd_vm_lan": "VM traffic to LAN / uplink (not via the tunnel)",
     "fwd_in": "new forwarded traffic not from a VM",
     "in_noise": "LAN broadcast / multicast to the host (not via the tunnel)",
@@ -214,6 +216,7 @@ class State:
         self.slow_up = None            # (up, userspace) at the last slow refresh
         self.slow = (None, [], [])     # last slow result: endpoint item, items, checks
         self.api_seen = None           # (addresses, epoch): Mullvad's API rule, last seen
+        self.noscope = "unknown"       # out_noscope's own mode (chain enforce_noscope)
         self.seen_ts = {}              # net argv -> time of the sample last read (or None)
         self.changed = None            # epoch of the sample that showed the last up / down
         self.slow_wait = False         # slow samples older than that change: run again
@@ -393,6 +396,11 @@ def _hostfw(st: State, checks: list) -> tuple:
     if sev != "ok":
         _chk(checks, "mode", sev, f"mode {live}")
     items.append(_item("mode", live, sev, "green"))
+    # out_noscope (GNOME Shell's cgroup): own switch, observe first (2026-11-03); an
+    # older ruleset without it: "-", no claim
+    st.noscope = nft.mode(res.out, "enforce_noscope")
+    items.append(_item("noscope", {"unknown": "-"}.get(st.noscope, st.noscope),
+                       tone="green" if st.noscope == "enforce" else ""))
 
     try:
         boot = _read(st.mode_file, st.owner)
@@ -451,7 +459,7 @@ def _log_note(name: str) -> str:
 
 def _counter_detail(st: State, name: str, nbytes: int, live: str) -> list:
     """Shown on enter: what the counter means, what hostfw does, last log lines."""
-    verdict = _verdict(name, live)
+    verdict = _verdict(name, live, st.noscope)
     sev = kind_sev(name)
     if name in SEV and SEV[name] is None:
         new = "no alert (noise)"
@@ -505,7 +513,7 @@ def _counter_panel(st: State, counters: dict | None, deltas: dict, now: float,
         sev = sev if until > now else None
         rows.append({"cells": [name, str(pkts), f"+{deltas[name]}" if deltas[name] else "",
                                _human(nbytes)], "sev": sev or "ok",
-                     "tone": _tone(_verdict(name, live)),
+                     "tone": _tone(_verdict(name, live, st.noscope)),
                      "detail": _counter_detail(st, name, nbytes, live)})
     zero = len(counters) - len(rows)
     title = "hostfw counters" + (f"  ({zero} zero hidden)" if zero else "")
@@ -607,11 +615,14 @@ def _events(st: State, checks: list, items: list, ctx) -> tuple:
     return out[-MAX_EVENTS:], entries
 
 
-def _verdict(kind: str, live: str) -> str:
+def _verdict(kind: str, live: str, noscope: str = "unknown") -> str:
+    """noscope: the mode of out_noscope's own switch (chain enforce_noscope)."""
     if kind in ALLOWED:
         return "allow"
     if kind in LOG_ONLY:
         return "zone"
+    if kind == "out_noscope":
+        live = noscope
     return {"enforce": "block", "observe": "pass"}.get(live, "deny")
 
 
@@ -717,7 +728,7 @@ def _audit(st: State, entries: list, names, live: str) -> dict:
         fl = st.flows.pop(key, None) or Flow(e, src, dst, side)
         st.flows[key] = fl                                     # newest at the end
         fl.n += 1
-        fl.last, fl.entry, fl.verdict = e.ts, e, _verdict(e.kind, live)
+        fl.last, fl.entry, fl.verdict = e.ts, e, _verdict(e.kind, live, st.noscope)
         for name in prog.split(","):
             if name not in ("?", "-", "vm", "") and name not in fl.progs:
                 fl.progs.append(name)
@@ -1030,7 +1041,7 @@ def _leak_box(st: State, entries: list, up: bool, total, live: str, wall: float)
         detail = [("meaning", CONTEXT_NOTE[ctx])]
         if st.boot is not None:
             detail.append(("after boot", _since(e.ts - st.boot)))
-        verdict = _verdict(e.kind, live)
+        verdict = _verdict(e.kind, live, st.noscope)
         rows.append({
             "cells": [_when(e.ts), f.get("UID") or "-", f.get("PROTO", "-").lower(),
                       journal.dst(e), f.get("OUT") or "-", ctx],
@@ -1159,7 +1170,7 @@ def _peers(st: State, entries: list, cs: list, err: str, live: str, wall: float,
         if a is None:
             continue
         p = _peer(st, str(a), e.ts)
-        verdict = _verdict(e.kind, live)
+        verdict = _verdict(e.kind, live, st.noscope)
         p.verdicts[verdict] += 1
         if verdict == "allow":
             p.new += 1
@@ -1257,7 +1268,7 @@ def _apps(st: State, entries: list, cs: list, live: str, wall: float,
             continue
         prog, _iface = _prog(e, names)
         remote = _remote(e)
-        verdict = _verdict(e.kind, live)
+        verdict = _verdict(e.kind, live, st.noscope)
         for key in _app_keys(e, prog):
             a = _app(st, key, e.ts)
             if e.dir == "in":

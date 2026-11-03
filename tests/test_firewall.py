@@ -509,6 +509,7 @@ class TestCollect(Base):
         self.assertEqual(s["summary"], "enforce | wg0-mullvad up | hs 20s | leak 4")
         self.assertEqual(self.items(s, "hostfw"),
                          {"table": ("loaded", "ok"), "mode": ("enforce", "ok"),
+                          "noscope": ("-", "ok"),            # older ruleset: no switch
                           "boot mode": ("enforce", "ok"), "rollback": ("-", "ok"),
                           "log reader": ("ok", "ok")})
         v = self.items(s, "vpn")
@@ -646,6 +647,45 @@ class TestCollect(Base):
         self.tick()
         self.assertEqual(next(p for p in self.collect()["panels"]
                               if p["id"] == "blocked")["sev"], "ok")
+
+    def noscope(self, enforce=False):
+        """Table with out_noscope (hostfw 2026-11-03): counter + chain enforce_noscope."""
+        self.add_counters("out_noscope")
+        doc = json.loads(self.host.answers["nft list table"].out)
+        doc["nftables"].append({"chain": {"family": "inet", "table": "hostfw",
+                                          "name": "enforce_noscope", "handle": 901}})
+        if enforce:
+            doc["nftables"].append({"rule": {"family": "inet", "table": "hostfw",
+                                             "chain": "enforce_noscope", "handle": 902,
+                                             "expr": [{"reject": {"type": "icmpx",
+                                                                  "expr": "admin-prohibited"}}]}})
+        self.host.set("nft list table", ok(json.dumps(doc)))
+
+    def test_noscope_own_mode(self):
+        self.noscope()
+        s = self.collect()
+        self.assertEqual(self.items(s, "hostfw")["noscope"], ("observe", "ok"))
+        self.assertEqual(self.items(s, "hostfw")["mode"], ("enforce", "ok"))   # global
+        self.tick()
+        self.bump("out_noscope", 2)
+        self.host.set("journalctl", ok(jline(
+            "ns1", self.wall - 1, "HFW-OUT-NOSCOPE: IN= OUT=wg0-mullvad SRC=10.2.0.2 "
+            "DST=198.51.100.7 LEN=60 PROTO=TCP SPT=40100 DPT=443 SYN UID=1000 GID=1000 ")))
+        s = self.collect()
+        c = self.check(s, "new:out_noscope")
+        self.assertEqual((c["sev"], c["n"]), ("warn", 2))
+        self.assertIn("GNOME Shell's cgroup", c["detail"])
+        flow = self.panel(s, "audit")["rows"][0]
+        self.assertEqual(flow["cells"][2:4], ["out", "pass"])          # observe: not blocked
+        row = next(r for r in self.panel(s, "counters")["rows"] if r["cells"][0] == "out_noscope")
+        self.assertEqual(row["sev"], "warn")
+
+    def test_noscope_enforce(self):
+        self.noscope(enforce=True)
+        s = self.collect()
+        self.assertEqual(self.items(s, "hostfw")["noscope"], ("enforce", "ok"))
+        self.assertEqual(fw._verdict("out_noscope", "observe", "enforce"), "block")
+        self.assertEqual(fw._verdict("out_leak", "observe", "enforce"), "pass")
 
     def test_counter_reset(self):
         self.collect()
