@@ -20,7 +20,7 @@ is the one that must reap it). More than MAX_STUCK_CHECKS: one check for the res
 
 Shared cgroup (2026-11-03, my ask: no app may hide in GNOME Shell's cgroup): a process in
 org.gnome.Shell@<x>.service that is not GNOME Shell's own (core/proc.py SHELL_OWN:
-gnome-shell, Xwayland, bwrap, glycin-*) is a stray: an app whose launcher forked before
+gnome-shell, Xwayland, bwrap, glycin-*, mutter-x11-frames) is a stray: an app whose launcher forked before
 GNOME moved it into its scope (host: Brave rpm). The org.gnome.Shell row names them
 (detail lines, yellow); after STRAY s one warn check per cgroup, `shared_cgroup:<unit>`.
 Its network shows as org.gnome.Shell on the firewall screen.

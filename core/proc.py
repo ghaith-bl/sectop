@@ -16,7 +16,8 @@ programs: no name.
 Shared cgroup (2026-11-03): GNOME Shell's own unit (org.gnome.Shell@<x>.service) is not
 an app. An app GNOME starts lands there when its launcher forks before GNOME moves the
 pid into the app scope (host: Brave rpm, 10 processes). Their program would be
-org.gnome.Shell: shared() finds the unit, own() tells GNOME's own processes (SHELL_OWN)
+org.gnome.Shell: shared() finds the unit, own() tells GNOME's own processes (SHELL_OWN;
+mutter-x11-frames draws the frames of X11 windows, e.g. Steam: added 2026-11-03)
 from strays, strays() lists the others by comm (cgroup.procs + /proc/<pid>/comm, both
 readable by every user). Used by the system module (check shared_cgroup) and the
 firewall (sockets from there: org.gnome.Shell/<comm> or org.gnome.Shell/?).
@@ -36,7 +37,8 @@ _ESC_RE = re.compile(r"\\x([0-9a-fA-F]{2})")
 NAME_RE = re.compile(r"[\x21-\x7e]{1,64}")        # row "progs" (core/module.py)
 SESSION_RE = re.compile(r"session(-c?\d+)?")
 SHELL_UNIT_RE = re.compile(r"org\.gnome\.Shell@[A-Za-z0-9_.:-]{1,64}\.service")
-SHELL_OWN = ("gnome-shell", "Xwayland", "bwrap", "glycin-*")   # comm, * = prefix
+SHELL_OWN = ("gnome-shell", "Xwayland", "bwrap", "glycin-*",   # comm, * = prefix
+             "mutter-x11-fram*")   # mutter-x11-frames (comm: 15 chars), host 2026-11-03
 CGROUP_ROOT = "/sys/fs/cgroup"
 MAX_PIDS = 1024          # cgroup.procs entries read per shared cgroup
 MAX_HOPS = 8             # parents walked up out of a session scope

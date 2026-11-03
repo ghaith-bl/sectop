@@ -229,7 +229,8 @@ Shared cgroup (2026-11-03): an app GNOME starts can land in GNOME Shell's own un
 scope (host: Brave rpm, fixed by silverblue-cis-hardening appunit). Its sockets' cgroup
 says `org.gnome.Shell`. Socket name then (`core/proc.py` shared / own / strays):
 - user helper (`core/userd.py`, sectop-user@<user>.service) knows the socket inode:
-  GNOME's own process (gnome-shell, Xwayland, bwrap, glycin-*) -> `org.gnome.Shell`,
+  GNOME's own process (gnome-shell, Xwayland, bwrap, glycin-*,
+  mutter-x11-frames) -> `org.gnome.Shell`,
   another -> `org.gnome.Shell/<comm>` (e.g. `org.gnome.Shell/brave`)
 - no helper answer: `org.gnome.Shell/?` while the cgroup holds other processes
   (`cgroup.procs` + `/proc/<pid>/comm`, readable by every user), else `org.gnome.Shell`

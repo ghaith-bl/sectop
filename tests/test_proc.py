@@ -112,9 +112,10 @@ class TestShared(unittest.TestCase):
         self.assertEqual(proc.program(self.SHELL), "org.gnome.Shell")
 
     def test_own(self):
-        for comm in ("gnome-shell", "Xwayland", "bwrap", "glycin-image-rs", "glycin-svg"):
+        for comm in ("gnome-shell", "Xwayland", "bwrap", "glycin-image-rs", "glycin-svg",
+                     "mutter-x11-fram"):              # mutter-x11-frames, comm cut at 15
             self.assertTrue(proc.own(comm), comm)
-        for comm in ("brave", "cat", "gnome-shellx", "xwayland", "glycin", ""):
+        for comm in ("brave", "cat", "gnome-shellx", "xwayland", "glycin", "mutter", ""):
             self.assertFalse(proc.own(comm), comm)
 
     def test_strays(self):

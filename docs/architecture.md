@@ -369,7 +369,7 @@ Host checks 2026-10-27 (sandbox: nsenter into sectop.service as user sectop):
   reap it). Box title counts both. Max 20 rows, 10 checks + one `stuck:more`.
   Strays (2026-11-03, my ask: no app may hide in GNOME Shell's cgroup): a process in
   `org.gnome.Shell@<x>.service` that is not GNOME Shell's own (gnome-shell, Xwayland,
-  bwrap, glycin-*; core/proc.py SHELL_OWN). The org.gnome.Shell row lists them first
+  bwrap, glycin-*, mutter-x11-frames; core/proc.py SHELL_OWN). The org.gnome.Shell row lists them first
   (`not GNOME's own: brave x10, cat x2`, pids), info while new, warn + one check per
   cgroup `shared_cgroup:<unit>` after 10 s (a launch moves in ms: one scan may catch
   it). Always shown, even outside the top 30. Fix: silverblue-cis-hardening appunit.
