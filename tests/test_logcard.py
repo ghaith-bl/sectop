@@ -159,6 +159,11 @@ class TestCard(unittest.TestCase):
         fields = allowed["packets"][r["id"]]["rows"][0]["detail"]
         self.assertEqual(fields[1]["style"], "value")           # allowed: safe color
 
+    def test_leak_colors_by_verdict(self):
+        self.assertEqual(logcard.colors("out_leak", "block"), ("warn", "yellow"))   # blocked
+        self.assertEqual(logcard.colors("out_leak", "pass"), ("crit", "plain"))     # observe
+        self.assertEqual(logcard.colors("out_dns", "block"), ("warn", "yellow"))
+
     def test_icmpv6_names(self):
         e = logcard.journal.parse(jline("x", 1, "HFW-OUT-LAN: IN= OUT=wlo1 SRC=fe80::1 "
                                                 "DST=ff02::1 PROTO=ICMPv6 TYPE=135 CODE=0 "))[0]

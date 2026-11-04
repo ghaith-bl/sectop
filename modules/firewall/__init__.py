@@ -29,6 +29,7 @@ import re
 import stat
 import time
 
+from core import alerts as alertsmod
 from core import netd
 from core import proc as procmod
 from core import userd
@@ -44,7 +45,8 @@ TIMEOUT = netd.TIMEOUT   # per command, keeps a full tick below INTERVAL
 BOOT_TIMEOUT = 5.0       # boot journal scan, once in init()
 SLOW = netd.FW_SLOW      # endpoint, live fwmark, wg_fwmark set, kill switch table: rarely change
 HS_STALE = 180           # WireGuard rejects keys after 180 s
-HOLD = 60.0              # seconds the alert (and the counter row color) stays after new packets
+HOLD = None              # alert (and counter row color) after new packets: by severity
+                         # (core/alerts.py EVENT_HOLD), option `hold` = seconds for all
 SPARK = 120
 MAX_PEERS = 200          # remote addresses kept, least recently seen out first
 MAX_APPS = 100           # programs kept (programs box), least recently seen out first
@@ -117,7 +119,7 @@ CONTEXT_NOTE = {
 # worst first: the context of a counter delta with several leak lines this tick
 CONTEXT_RANK = {"tunnel up": 4, "tunnel down": 3, "after connect": 2, "unknown": 2,
                 "pre-connect": 0}
-CONTEXT_SEV = {"out_leak": "crit, info pre-connect",            # counter detail text
+CONTEXT_SEV = {"out_leak": "crit, warn when blocked, info pre-connect",   # counter detail
                "in_vpn": "warn, info for late replies from known peers"}
 # what each hostfw counter matches (silverblue-cis-hardening firewall/docs/rules.md)
 MATCH = {
@@ -153,6 +155,7 @@ VERDICT_NOTE = {
 
 
 TONE = {"allow": "blue", "block": "yellow"}   # verdict -> color, else plain
+BLOCKED_NOTE = "blocked by hostfw (enforce): an attempt, nothing left outside the tunnel"
 
 
 def _tone(verdict: str) -> str:
@@ -164,6 +167,19 @@ def kind_sev(name: str) -> str | None:
     if name in ALLOWED:
         return None
     return SEV.get(name, "info")
+
+
+def leak_sev(ctx: str | None, verdict: str) -> str:
+    """out_leak: info pre-connect, warn when hostfw blocked it (enforce: an attempt,
+    2026-11-04), else crit (observe / mode unknown: it may have left)."""
+    if ctx == "pre-connect":
+        return "info"
+    return "warn" if verdict == "block" else "crit"
+
+
+def _held_for(st, sev: str) -> float:
+    """Seconds an alert / counter row color stays after new packets."""
+    return alertsmod.event_hold(sev, st.hold)
 
 
 def _hms(ts: float) -> str:
@@ -349,11 +365,14 @@ def _remote(e) -> str | None:
 
 
 def _chk(checks: list, key: str, sev: str, title: str, detail: str = "", n: int = 0,
-         hold: float | None = None) -> None:
-    """Add a check (Snapshot v2): a problem that is true now."""
+         hold: float | None = None, at: float | None = None) -> None:
+    """Add a check (Snapshot v2): a problem that is true now (at: an event check, the
+    time of its newest occurrence)."""
     c = {"key": key, "sev": sev, "title": title, "detail": detail, "n": n}
     if hold is not None:
         c["hold"] = hold
+    if at is not None:
+        c["at"] = at
     checks.append(c)
 
 
@@ -369,6 +388,8 @@ def _merge(checks: list) -> list:
         if SEV_RANK[c["sev"]] > SEV_RANK[old["sev"]]:
             old.update(sev=c["sev"], title=c["title"], detail=c["detail"])
         old["n"] += c["n"]
+        if "at" in c:
+            old["at"] = max(old.get("at", c["at"]), c["at"])
     return list(out.values())
 
 
@@ -466,7 +487,9 @@ def _counter_detail(st: State, name: str, nbytes: int, live: str) -> list:
     elif sev is None:
         new = "no alert (allowed traffic)"
     else:
-        new = (f"alert new:{name} ({CONTEXT_SEV.get(name, sev)}), kept {st.hold:g} s "
+        kept = f"{st.hold:g} s" if st.hold is not None else (
+            "crit 10 min, warn 5 min, info 1 min")
+        new = (f"alert new:{name} ({CONTEXT_SEV.get(name, sev)}), kept {kept} "
                "after the last tick with new packets")
     out = [("meaning", st.comments.get(name, "-")), ("match", MATCH.get(name, "-")),
            ("verdict", f"{verdict}  {VERDICT_NOTE[verdict]}"), ("new packets", new),
@@ -569,9 +592,10 @@ def _in_vpn(st: State, entries: list, cs: list) -> tuple:
 
 
 def _new_checks(st: State, deltas: dict, up: bool, vpn_in: tuple, now: float,
-                checks: list) -> str:
-    """One check per deny kind with new packets this tick (n = packets, hold =
-    st.hold). Context decides out_leak / in_vpn severity. -> worst sev (spark)."""
+                checks: list, live: str = "?", wall: float | None = None) -> str:
+    """One event check per deny kind with new packets this tick (n = packets, at = wall
+    time of the tick, hold = by severity or option hold). Context and verdict decide
+    out_leak, context in_vpn severity. -> worst sev (spark)."""
     sevs = []
     for name, d in deltas.items():
         sev = kind_sev(name)
@@ -580,14 +604,16 @@ def _new_checks(st: State, deltas: dict, up: bool, vpn_in: tuple, now: float,
         title, detail = f"new {name}", f"+{d} pkt this tick; {MATCH.get(name, name)}"
         if name == "out_leak":
             ctx = _leak_ctx(st)
-            sev = "info" if ctx == "pre-connect" else "crit"
-            title += f" ({ctx})"
-            detail += f"; {CONTEXT_NOTE[ctx]}"
+            sev = leak_sev(ctx, _verdict(name, live, st.noscope))
+            blocked = sev == "warn"
+            title += f" ({ctx}, blocked)" if blocked else f" ({ctx})"
+            detail += f"; {CONTEXT_NOTE[ctx]}" + (f"; {BLOCKED_NOTE}" if blocked else "")
         elif name == "in_vpn":
             sev, note = vpn_in
             detail += f"; {note}"
-        st.held[name] = (now + st.hold, sev)
-        _chk(checks, f"new:{name}", sev, title, detail, n=d, hold=st.hold)
+        st.held[name] = (now + _held_for(st, sev), sev)
+        _chk(checks, f"new:{name}", sev, title, detail, n=d, hold=st.hold,
+             at=st.wall() if wall is None else wall)
         sevs.append(sev)
     for name, (until, _sev) in list(st.held.items()):
         if until <= now:
@@ -595,7 +621,7 @@ def _new_checks(st: State, deltas: dict, up: bool, vpn_in: tuple, now: float,
     return worst(*sevs)
 
 
-def _events(st: State, checks: list, items: list, ctx) -> tuple:
+def _events(st: State, checks: list, items: list, ctx, live: str = "?") -> tuple:
     """-> (events, HFW entries). Kernel entries from core's journal follower (ctx).
     Entries taken before the follower went down are still used."""
     entries, bad = journal.entries(ctx.journal)
@@ -614,6 +640,8 @@ def _events(st: State, checks: list, items: list, ctx) -> tuple:
         if (e.kind in SEV and SEV[e.kind] is None) or e.kind in AUDIT_ONLY:
             continue                                   # hidden kind / audit only
         sev = kind_sev(e.kind) or "info"               # allowed kinds: info
+        if e.kind == "out_leak":
+            sev = leak_sev(None, _verdict(e.kind, live, st.noscope))
         out.append({"ts": e.ts, "sev": sev, "code": e.code, "msg": journal.summary(e)})
     return out[-MAX_EVENTS:], entries
 
@@ -719,15 +747,35 @@ def _prog(e, names) -> tuple:
     return "-", f.get("IN") or "-"
 
 
+def _iface(e) -> str:
+    f = e.fields
+    if e.dir == "out":
+        return f.get("OUT") or "-"
+    if e.dir == "fwd":
+        return f"{f.get('IN') or '-'}>{f.get('OUT') or '-'}"
+    return f.get("IN") or "-"
+
+
+def _flow_key(e) -> tuple:
+    """Audit flow of a log line: kind, dir, proto, uid, src, dst (no varying port), iface."""
+    src, dst, _side, _port = journal.flow(e)
+    return (e.kind, e.dir, e.fields.get("PROTO", "-").lower(), e.fields.get("UID") or "-",
+            src, dst, _iface(e))
+
+
+def _ref(key: tuple) -> str:
+    """Row ref (alerts view): a leak line and its audit flow merge into one row."""
+    return ("fw:" + "|".join(key))[:200]
+
+
 def _audit(st: State, entries: list, names, live: str) -> dict:
     """Group HFW lines (hidden kinds skipped) by flow, newest flow first."""
     for e in entries:
         if e.kind in SEV and SEV[e.kind] is None:
             continue
-        f = e.fields
         src, dst, side, port = journal.flow(e)
-        prog, iface = _prog(e, names)
-        key = (e.kind, e.dir, f.get("PROTO", "-").lower(), f.get("UID") or "-", src, dst, iface)
+        prog = _prog(e, names)[0]
+        key = _flow_key(e)
         fl = st.flows.pop(key, None) or Flow(e, src, dst, side)
         st.flows[key] = fl                                     # newest at the end
         fl.n += 1
@@ -771,10 +819,15 @@ def _flow_row(st: State, key: tuple, fl: Flow) -> dict:
     if len(fl.progs) > 1:
         detail.append(("programs", ", ".join(fl.progs)))
     detail.append(("last line", "fields below"))
+    sev = kind_sev(kind) or "ok"
+    if kind == "out_leak":
+        sev = leak_sev(None, fl.verdict)
+        if fl.verdict == "block":
+            detail.insert(1, ("blocked", BLOCKED_NOTE))
     row = {"cells": [_when(fl.last), str(fl.n), d, fl.verdict, proto, uid, prog,
                      fl.src, fl.dst, iface],
-           "sev": kind_sev(kind) or "ok", "tone": _tone(fl.verdict),
-           "id": "|".join(key),
+           "sev": sev, "tone": _tone(fl.verdict),
+           "id": "|".join(key), "ref": _ref(key),
            "detail": [{"k": k, "v": v} for k, v in detail]
                      + _audit_detail(st, fl.entry, fl.verdict)}
     ip = _remote(fl.entry)
@@ -1042,13 +1095,17 @@ def _leak_box(st: State, entries: list, up: bool, total, live: str, wall: float)
     for e, ctx in list(st.leaks)[:LEAK_ROWS]:
         f = e.fields
         detail = [("meaning", CONTEXT_NOTE[ctx])]
+        verdict = _verdict(e.kind, live, st.noscope)
+        sev = leak_sev(ctx, verdict)
+        if sev == "warn":
+            detail.append(("blocked", BLOCKED_NOTE))
         if st.boot is not None:
             detail.append(("after boot", _since(e.ts - st.boot)))
-        verdict = _verdict(e.kind, live, st.noscope)
         rows.append({
             "cells": [_when(e.ts), f.get("UID") or "-", f.get("PROTO", "-").lower(),
-                      journal.dst(e), f.get("OUT") or "-", ctx],
-            "sev": "info" if ctx == "pre-connect" else "crit", "tone": _tone(verdict),
+                      journal.dst(e), f.get("OUT") or "-",
+                      ctx + (", blocked" if sev == "warn" else "")],
+            "sev": sev, "tone": _tone(verdict), "ref": _ref(_flow_key(e)),
             "detail": [{"k": k, "v": v} for k, v in detail] + _audit_detail(st, e, verdict)})
         if _ip(f.get("DST", "")):
             rows[-1]["ip"] = _ip(f["DST"])
@@ -1057,7 +1114,7 @@ def _leak_box(st: State, entries: list, up: bool, total, live: str, wall: float)
         title += f"  (newest {LEAK_ROWS} of {len(st.leaks)} lines)"
     if st.boot_note:
         title += f"  ({st.boot_note})"
-    sev = "crit" if any(r["sev"] == "crit" for r in rows) else "ok"
+    sev = worst(*(r["sev"] for r in rows if r["sev"] != "info")) if rows else "ok"
     return {"id": "leak", "title": title, "type": "table", "columns": list(LEAK_COLUMNS), "types": list(LEAK_TYPES),
             "rows": rows, "sev": sev}
 
@@ -1398,9 +1455,10 @@ def init(cfg: dict) -> State:
     hold = cfg.get("hold", HOLD)
     if not isinstance(tunnel, str) or not IFACE_RE.fullmatch(tunnel):
         raise ValueError("tunnel: interface name required")
-    if isinstance(hold, bool) or not isinstance(hold, (int, float)) or not 0 <= hold <= 3600:
+    if hold is not None and (isinstance(hold, bool) or not isinstance(hold, (int, float))
+                             or not 0 <= hold <= 3600):
         raise ValueError("hold: seconds 0..3600 required")
-    st = State(tunnel=tunnel, hold=float(hold))
+    st = State(tunnel=tunnel, hold=None if hold is None else float(hold))
     _boot_scan(st)
     return st
 
@@ -1412,7 +1470,7 @@ def collect(st: State, ctx) -> dict:
 
     fw_items, counters, live = _safe(lambda: _hostfw(st, checks), "nft", checks,
                                      lambda e: ([_item("table", e, "warn")], None, "?"))
-    events, entries = _safe(lambda: _events(st, checks, fw_items, ctx), "journal", checks,
+    events, entries = _safe(lambda: _events(st, checks, fw_items, ctx, live), "journal", checks,
                             lambda e: _note(fw_items, "log reader", e, ([], [])))
     _recent(st, entries)
     totals, deltas = _safe(lambda: _deltas(st, counters), "counters", checks,
@@ -1446,7 +1504,7 @@ def collect(st: State, ctx) -> dict:
     names = Names(st, cs)
     vpn_in = _safe(lambda: _in_vpn(st, entries, cs), "in_vpn", checks,
                    lambda e: ("warn", e))
-    spark_sev = _new_checks(st, deltas, up, vpn_in, now, checks)
+    spark_sev = _new_checks(st, deltas, up, vpn_in, now, checks, live, wall)
     table = _safe(lambda: _counter_panel(st, counters, deltas, now, live), "counters", checks,
                   lambda e: None)
 

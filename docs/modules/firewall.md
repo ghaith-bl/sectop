@@ -110,7 +110,7 @@ Log kind = counter name: `HFW-OUT-LEAK` -> `out_leak`, `HFW-FWD-VM-LAN` -> `fwd_
 
 | sev | kinds |
 |---|---|
-| crit | out_leak |
+| crit | out_leak (warn when blocked: enforce, 2026-11-04) |
 | warn | out_dns, in_lan, in_vpn, fwd_vm_lan, fwd_in, out_noscope |
 | info | out_disco, out_share, out_lan, unknown kinds |
 | hidden | in_noise (counter only, no event, no audit row) |
@@ -118,12 +118,18 @@ Log kind = counter name: `HFW-OUT-LEAK` -> `out_leak`, `HFW-FWD-VM-LAN` -> `fwd_
 
 - Alerts come from counter deltas, not totals: totals since boot include the
   pre-connect window. First tick never alarms.
-- New packets of a deny kind = check `new:<kind>`, n = packets this tick, hold = `hold` s
-  (default 60). The alert engine keeps the alert `hold` s after the last tick with new
-  packets (docs/module-interface.md, Alerts). Module status = this tick only. Counter rows
-  keep the kind's color for `hold` s (display).
+- New packets of a deny kind = event check `new:<kind>`, n = packets this tick, `at` =
+  the tick (wall clock). Hold by severity (core/alerts.py EVENT_HOLD: crit 10 min, warn
+  5 min, info 1 min), option `hold` = seconds for every kind. The alert engine keeps the
+  alert that long after the last tick with new packets (docs/module-interface.md,
+  Alerts). Module status = this tick only. Counter rows keep the kind's color as long
+  (display).
 - Context decides (2026-10-20):
-  - out_leak: crit, info while `pre-connect`. Context = the worst context of this tick's
+  - out_leak: crit, info while `pre-connect`, warn when hostfw blocked it (mode enforce,
+    verdict `block`): an attempt, nothing left outside the tunnel; title
+    `new out_leak (<context>, blocked)`, detail says so (2026-11-04: every wifi drop gave
+    chronyd / brave leak lines, all blocked, all red). observe / mode unknown: crit, the
+    packet may have left. Context = the worst context of this tick's
     leak lines (out_leak box, each at its own time). No line this tick (rate limit, lag):
     tunnel up at both ends of the tick window = `tunnel up`; first tunnel flow in the
     window or later = `pre-connect`; else `tunnel down`. Title `new out_leak (<context>)`.
@@ -339,10 +345,15 @@ Leak lines of this boot, newest first, last 8 shown (100 kept). Title: `out_leak
 | context | when | sev |
 |---|---|---|
 | pre-connect | line before the first tunnel flow of the boot (scan and live), tunnel not seen up around it | info (expected: programs that start before the VPN connects) |
-| tunnel up | live, tunnel up at the ticks before and after the line | crit |
-| tunnel down | live, after the first flow, tunnel down or switching around the line (reconnect window) | crit |
-| after connect | after the first flow, before sectop watched the tunnel (scan, or a live line older than the first tick) | crit |
-| unknown | first-flow query failed | crit |
+| tunnel up | live, tunnel up at the ticks before and after the line | crit, warn when blocked |
+| tunnel down | live, after the first flow, tunnel down or switching around the line (reconnect window) | crit, warn when blocked |
+| after connect | after the first flow, before sectop watched the tunnel (scan, or a live line older than the first tick) | crit, warn when blocked |
+| unknown | first-flow query failed | crit, warn when blocked |
+
+- Blocked (verdict `block`): context cell `<context>, blocked`, detail line `blocked`.
+  Box sev = worst row (info rows do not count).
+- Row `ref` = its audit flow key (`fw:` + the audit row `id`): the alerts view shows a
+  leak line and its audit flow as one row (docs/module-interface.md, Rows).
 
 - Context at line time (2026-10-27): `modules/firewall/track.py` keeps the tunnel state
   per tick; between two ticks with different states it is "switching". A line is read
@@ -360,7 +371,8 @@ Screen: firewall (`core/screens.py`), no events box: the audit box shows the sam
 ## Audit
 
 One row per flow, repeats grouped, newest flow first, last 200 flows kept (in state).
-Hidden kinds (in_noise) skipped. Row severity = kind severity, allowed = ok.
+Hidden kinds (in_noise) skipped. Row severity = kind severity, allowed = ok; out_leak
+blocked = warn (detail line `blocked`). Row `ref` = `fw:` + `id` (alerts view merge).
 out_new / fwd_vm_new (every new flow) go to the audit box only, not to events.
 Title: `audit <flows> flows  (<lines> lines)`, lines = all since sectop started.
 
@@ -400,7 +412,7 @@ Summary: `enforce | wg0-mullvad up | hs 20s | leak 4`, plus first 3 warn / crit 
 ```toml
 [modules.firewall]
 tunnel = "wg0-mullvad"
-hold = 60
+# hold = 60        # optional: seconds for every kind; default by severity
 ```
 
 Interface names `[A-Za-z0-9_.-]{1,15}`. Unknown option -> init error, module disabled.

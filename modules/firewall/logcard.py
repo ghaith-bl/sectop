@@ -215,8 +215,11 @@ def packets_panel(entries, rule_line: str, verdict_line: str, sev: str = "ok",
 
 def colors(rule: str, verdict: str) -> tuple:
     """(sev, tone) of the rule's rows, as on the counter row: a blocked kind in its
-    severity, the verdict as tone (allow blue, block yellow); noise (in_noise) dim."""
+    severity, the verdict as tone (allow blue, block yellow); noise (in_noise) dim.
+    out_leak: warn when blocked (fw.leak_sev)."""
     sev = fw.kind_sev(rule) or "ok"
+    if rule == "out_leak":
+        sev = fw.leak_sev(None, verdict)
     if rule in fw.SEV and fw.SEV[rule] is None:
         return sev, "dim"
     return sev, fw._tone(verdict)

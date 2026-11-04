@@ -468,7 +468,8 @@ Alert = state, not event.
   (Ctrl-C at a sudo prompt: pam_unix crit stayed open). Hold by severity: crit 10 min,
   warn 5 min, info 1 min, so a crit is still there when I look; ack clears the bar.
 - Context decides severity. Example: out_leak before the first tunnel flow this boot =
-  expected (pre-connect DoH fallback); after connect = crit. The out_leak box already
+  expected (pre-connect DoH fallback); after connect = crit; blocked by hostfw
+  (enforce) = warn, an attempt (2026-11-04). The out_leak box already
   shows this context (docs/modules/firewall.md); status follows in phase 2.
 - Noise list: `/etc/sectop/noise.toml` (root-owned, same file checks as config). Each entry:
   match (glob on the alert key, module part literal), reason, expires (date, required).

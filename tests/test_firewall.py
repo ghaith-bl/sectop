@@ -552,25 +552,51 @@ class TestCollect(Base):
         self.tick()
         self.bump("out_leak", 2)
         s = self.collect()
-        self.assertEqual(s["status"], "crit")
+        self.assertEqual(s["status"], "warn")                         # enforce: blocked
         self.assertIn("new out_leak", s["summary"])
         c = self.check(s, "new:out_leak")
-        self.assertEqual((c["sev"], c["title"], c["n"], c["hold"]),
-                         ("crit", "new out_leak (tunnel up)", 2, 60.0))
+        self.assertEqual((c["sev"], c["title"], c["n"], c["at"]),
+                         ("warn", "new out_leak (tunnel up, blocked)", 2, self.wall))
+        self.assertNotIn("hold", c)                                   # engine: by severity
         self.assertTrue(c["detail"].startswith("+2 pkt this tick; anything else leaving"))
-        self.assertEqual((self.leak_row(s)["cells"][2], self.leak_row(s)["sev"]), ("+2", "crit"))
+        self.assertIn(fw.BLOCKED_NOTE, c["detail"])
+        self.assertEqual((self.leak_row(s)["cells"][2], self.leak_row(s)["sev"]), ("+2", "warn"))
         self.assertEqual(self.panel(s, "leak")["title"], "out_leak 6")    # counter total
         self.tick(30)
         s = self.collect()
         self.assertEqual((s["status"], s["checks"]), ("ok", []))      # this tick only: the
-        self.assertEqual(self.leak_row(s)["sev"], "crit")             # engine holds the alert,
-        self.tick(31)                                                 # the row keeps its color
-        self.assertEqual(self.leak_row(self.collect())["sev"], "ok")
+        self.assertEqual(self.leak_row(s)["sev"], "warn")             # engine holds the alert,
+        self.tick(271)                                                # the row keeps its color
+        self.assertEqual(self.leak_row(self.collect())["sev"], "ok")  # warn: 300 s
         self.assertEqual(self.st.held, {})
+
+    def test_new_leak_check_observe(self):
+        """observe: not blocked, it may have left: crit, held 10 min."""
+        self.host.set("nft list table", ok(table("nft-observe.json")))
+        self.collect()
+        self.tick()
+        self.bump("out_leak", 1)
+        s = self.collect()
+        c = self.check(s, "new:out_leak")
+        self.assertEqual((c["sev"], c["title"]), ("crit", "new out_leak (tunnel up)"))
+        self.assertNotIn(fw.BLOCKED_NOTE, c["detail"])
+        self.tick(599)
+        self.assertEqual(self.leak_row(self.collect())["sev"], "crit")
+        self.tick(2)
+        self.assertEqual(self.leak_row(self.collect())["sev"], "ok")
+
+    def test_hold_option(self):
+        self.st.hold = 30.0
+        self.collect()
+        self.tick()
+        self.bump("out_leak", 1)
+        c = self.check(self.collect(), "new:out_leak")
+        self.assertEqual(c["hold"], 30.0)
 
     def test_leak_context(self):
         down = ("wg latest-handshakes", "wg transfer", "wg endpoints", "wg fwmark")
-        for first, sev, ctx in ((None, "info", "pre-connect"), (1.0, "crit", "tunnel down")):
+        for first, sev, ctx in ((None, "info", "pre-connect"),
+                                (1.0, "warn", "tunnel down, blocked")):
             with self.subTest(ctx=ctx):
                 self.setUp()
                 for key in down:
@@ -582,7 +608,7 @@ class TestCollect(Base):
                 s = self.collect()
                 c = self.check(s, "new:out_leak")
                 self.assertEqual((c["sev"], c["title"]), (sev, f"new out_leak ({ctx})"))
-                self.assertIn(fw.CONTEXT_NOTE[ctx], c["detail"])
+                self.assertIn(fw.CONTEXT_NOTE[ctx.partition(",")[0]], c["detail"])
                 self.assertEqual(self.leak_row(s)["sev"], sev)
                 spark = self.panel(s, "blocked")["sev"]
                 self.assertEqual(spark, sev)
@@ -704,13 +730,13 @@ class TestCollect(Base):
                 it["counter"]["packets"] = 1 if it["counter"]["name"] == "out_leak" else 0
         self.host.set("nft list table", ok(json.dumps(doc)))
         s = self.collect()                                    # 4 -> 1: reload, count 1
-        self.assertEqual(s["status"], "crit")
+        self.assertEqual(s["status"], "warn")                 # out_leak, blocked
 
     def test_events(self):
         self.host.set("journalctl", ok(fix("journal.json")))
         s = self.collect()
         self.assertEqual([(e["code"], e["sev"]) for e in s["events"]],
-                         [("HFW-OUT-LAN", "info"), ("HFW-OUT-LEAK", "crit"),
+                         [("HFW-OUT-LAN", "info"), ("HFW-OUT-LEAK", "warn"),  # blocked
                           ("HFW-OUT-DNS", "warn"), ("HFW-IN-VPN", "warn")])   # IN-NOISE hidden
         self.assertEqual(s["events"][1]["msg"],
                          "uid 1000 tcp 192.168.8.102:46866 -> 203.0.113.11:443 wlo1")
@@ -803,6 +829,17 @@ class TestCollect(Base):
         p = self.panel(self.collect(), "audit")
         return p, [lab(r["cells"]) for r in p["rows"]], [r["sev"] for r in p["rows"]]
 
+    def test_leak_line_and_audit_flow_one_ref(self):
+        """The alerts view merges a leak line with its audit flow (core/render.py)."""
+        self.host.set("nft list table", ok(table("nft-enforce.json")))
+        self.host.set("journalctl", ok(fix("journal-audit.json")))
+        s = self.collect()
+        [leak] = self.panel(s, "leak")["rows"]
+        flows = [r for r in self.panel(s, "audit")["rows"] if r["cells"][3] == "block"
+                 and r["id"].startswith("out_leak|")]
+        self.assertEqual([r["ref"] for r in flows], [leak["ref"]])
+        self.assertEqual((leak["sev"], flows[0]["sev"]), ("warn", "warn"))
+
     def test_programs(self):
         self.host.set("nft list table", ok(table("nft-enforce.json")))
         self.host.set("journalctl", ok(fix("journal-audit.json")))
@@ -886,8 +923,10 @@ class TestCollect(Base):
             ["t51", "1", "out", "allow", "tcp", "1000", "brave", "10.2.0.2", "198.51.100.20:443",
              "wg0-mullvad"],                                        # program from ss
         ])
-        self.assertEqual(sevs, ["ok", "info", "warn", "warn", "crit", "ok", "ok", "ok"])
+        self.assertEqual(sevs, ["ok", "info", "warn", "warn", "warn", "ok", "ok", "ok"])
         detail = {d["k"]: d["v"] for d in p["rows"][4]["detail"]}     # the OUT-LEAK row
+        self.assertEqual(detail["blocked"], fw.BLOCKED_NOTE)           # enforce: warn
+        self.assertEqual(p["rows"][4]["ref"], "fw:" + p["rows"][4]["id"])
         self.assertEqual(detail["count"], "1 line, first T1792410754.000")
         self.assertEqual(detail["src ports"], "46900")
         self.assertEqual(detail["rule"], "out_leak  host to internet outside the tunnel")
@@ -897,8 +936,8 @@ class TestCollect(Base):
         self.assertEqual((detail["TTL"], detail["UID"], detail["flags"]), ("64", "1000", "DF SYN"))
         self.assertNotIn("IN", detail)                               # empty field skipped
         keys = [d["k"] for d in p["rows"][4]["detail"]]
-        self.assertEqual(keys[:7], ["count", "src ports", "last line", "rule", "verdict", "time",
-                                    "prefix"])
+        self.assertEqual(keys[:8], ["count", "blocked", "src ports", "last line", "rule",
+                                    "verdict", "time", "prefix"])
         self.assertEqual(p["rows"][4]["id"],
                          "out_leak|out|tcp|1000|192.168.8.102|203.0.113.11:443|wlo1")
         self.assertEqual({d["k"]: d["v"] for d in p["rows"][3]["detail"]}["src ports"], "51544")
@@ -949,8 +988,8 @@ class TestCollect(Base):
             ("meaning", "DNS / DoT outside the VPN resolver"),
             ("match", "any other tcp/udp 53, 853 (not the VPN resolver)"),
             ("verdict", "block  rejected by hostfw (enforce mode)"),
-            ("new packets", "alert new:out_dns (warn), kept 60 s after the last tick with new "
-                            "packets"),
+            ("new packets", "alert new:out_dns (warn), kept crit 10 min, warn 5 min, info 1 "
+                            "min after the last tick with new packets"),
             ("log", "10/min burst 20: lines are samples, the counter is exact"),
             ("bytes", "32640"), ("since", "hostfw table load (a reload resets it)")])
         self.assertEqual(d[7:], [("", ""), ("last lines", "1 since sectop started"),
@@ -964,7 +1003,7 @@ class TestCollect(Base):
         self.assertEqual(wg["log"], "counted only, not logged")
         self.assertNotIn("last lines", wg)
         self.assertEqual(wg["new packets"], "no alert (allowed traffic)")
-        self.assertIn("(crit, info pre-connect)", dict(self.counter_detail(s, "out_leak"))[
+        self.assertIn("(crit, warn when blocked, info pre-connect)", dict(self.counter_detail(s, "out_leak"))[
             "new packets"])
         self.assertEqual(dict(self.counter_detail(s, "in_vpn"))["last lines"],
                          "1 since sectop started")
@@ -1428,10 +1467,11 @@ class TestLeakBox(Base):
         self.assertEqual(self.st.boot, self.BOOT)
         s = self.collect()
         self.assertEqual(self.rows(s), [
-            (["t300", "1000", "tcp", "203.0.113.11:443", "wlo1", "after connect"], "crit"),
+            (["t300", "1000", "tcp", "203.0.113.11:443", "wlo1", "after connect, blocked"],
+             "warn"),
             (["t12", "1000", "tcp", "203.0.113.11:443", "wlo1", "pre-connect"], "info")])
         p = self.panel(s, "leak")
-        self.assertEqual((p["title"], p["sev"]), ("out_leak 4", "crit"))
+        self.assertEqual((p["title"], p["sev"]), ("out_leak 4", "warn"))
         self.assertEqual(p["columns"], ["age", "uid", "proto", "dst", "iface", "context"])
         self.assertEqual(p["types"], ["age"] + ["text"] * 5)
         d = {it["k"]: it["v"] for it in p["rows"][1]["detail"]}
@@ -1462,13 +1502,14 @@ class TestLeakBox(Base):
         self.host.set("journalctl", ok(jline("b1", self.BOOT + 12, LEAK.format(spt=1)) +
                                        jline("l2", self.BOOT + 700, LEAK.format(spt=2))))
         s = self.collect()                                   # b1 again: follower from start
-        self.assertEqual([r[0][-1] for r in self.rows(s)], ["after connect", "pre-connect"])
+        self.assertEqual([r[0][-1] for r in self.rows(s)],
+                         ["after connect, blocked", "pre-connect"])
         self.tick()                                          # l2: before sectop watched
         self.host.set("journalctl", ok(jline("l3", self.wall - 1, LEAK.format(spt=3))))
         s = self.collect()
         self.assertEqual([r[0][-1] for r in self.rows(s)],
-                         ["tunnel up", "after connect", "pre-connect"])
-        self.assertEqual(self.rows(s)[0][1], "crit")
+                         ["tunnel up, blocked", "after connect, blocked", "pre-connect"])
+        self.assertEqual(self.rows(s)[0][1], "warn")
 
     def test_live_tunnel_down(self):
         for key in ("wg latest-handshakes", "wg transfer", "wg endpoints", "wg fwmark"):
@@ -1479,7 +1520,7 @@ class TestLeakBox(Base):
         self.tick()
         self.host.set("journalctl", ok(jline("n9", self.wall - 1.5, NEW) +
                                        jline("l2", self.wall - 1, LEAK.format(spt=2))))
-        self.assertEqual(self.rows(self.collect())[0][0][-1], "tunnel down")
+        self.assertEqual(self.rows(self.collect())[0][0][-1], "tunnel down, blocked")
         self.assertEqual(self.st.tunnel_first, self.wall - 1.5)
 
     def test_connect_tick_pre_connect(self):
@@ -1521,7 +1562,7 @@ class TestLeakBox(Base):
         self.host.set("journalctl", ok(""))
         self.bump("out_leak", 1)                             # up for the whole window
         c = next(c for c in self.collect()["checks"] if c["key"] == "new:out_leak")
-        self.assertEqual((c["sev"], c["title"]), ("crit", "new out_leak (tunnel up)"))
+        self.assertEqual((c["sev"], c["title"]), ("warn", "new out_leak (tunnel up, blocked)"))
 
     def test_boot_scan_error(self):
         self.host.set("journalctl --grep=^HFW-OUT-NEW:", fail("Failed to open journal"))
@@ -1530,7 +1571,7 @@ class TestLeakBox(Base):
         fw._boot_scan(self.st)
         p = self.panel(self.collect(), "leak")
         self.assertEqual(p["title"], "out_leak 4  (boot scan: first flow Failed to open journal)")
-        self.assertEqual([r["cells"][-1] for r in p["rows"]], ["unknown"])
+        self.assertEqual([r["cells"][-1] for r in p["rows"]], ["unknown, blocked"])
 
     def test_boot_scan_cut_and_bad_json(self):
         text = jline("b1", self.BOOT + 12, LEAK.format(spt=1))
@@ -1792,6 +1833,9 @@ class TestInit(unittest.TestCase):
             st = fw.init({})
         self.assertEqual([c[-1] for c in host.calls], ["+1", "--grep=^HFW-OUT-LEAK:"])
         self.assertFalse(hasattr(st, "cursor"))           # live lines: core's follower
+        self.assertIsNone(st.hold)                        # no option: hold by severity
+        with mock.patch.object(fw, "State", lambda **kw: real(run=host, net=host, **kw)):
+            self.assertEqual(fw.init({"hold": 90}).hold, 90.0)
 
 
 if __name__ == "__main__":
