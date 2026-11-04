@@ -183,9 +183,14 @@ A condition that is not true any more is left out.
 | title | str | one line |
 | detail | str | optional, default "" |
 | n | int | optional, default 0, max 10^9. New occurrences since the last collect (e.g. packets) |
-| hold | number | optional, seconds 0..3600, default 60. Alert keeps firing this long after the check is gone |
+| hold | number | optional, seconds 0..3600. Alert keeps firing this long after it was last seen. Default: state check 60, event check by severity (crit 600, warn 300, info 60) |
+| at | number | optional, epoch seconds. Makes it an event check: time of its newest occurrence (e.g. the journal line) |
 
 - Max 50 per Snapshot. More: the worst 50 kept (severity, then module order).
+- State check (no `at`): reported every collect while its condition is true.
+  Event check (`at`, 2026-11-04): reported when new occurrences come (n = how many).
+  Reporting the same `at` again is harmless (dropped), so a module that reads a journal
+  window again cannot keep an alert open.
 
 ## Alerts (`core/alerts.py`)
 
@@ -196,9 +201,13 @@ A condition that is not true any more is left out.
   A module that fails is not stepped: its alerts keep their state.
 - Alert key = `<module NAME>/<check key>`.
 - open: reported in the last step of its module. held: not reported any more, still
-  firing until `hold` s after it was last reported. closed: hold over.
+  firing until `hold` s after it was last seen. closed: hold over.
+- last seen: state check = the step it was reported; event check = its `at` (capped at
+  now), so the age and the hold count from the occurrence. Event check with `at` not
+  newer than the alert's last: dropped (not reported this step). Occurrence older than
+  its hold: record only, never open (a journal backlog read at start).
 - Reported again while held = same alert (`since` kept). After closed = new firing
-  period (`since` = now), same record (`first`, `count` kept).
+  period (`since` = now, event check: `at`), same record (`first`, `count` kept).
 - count: + max(n, 1) when the check turns true, + n while it stays true.
 - Latest sev / title / detail / hold win. A held alert keeps the last ones.
 - `active(state, now, noise)`: open and held alerts, each with `state` and `noise`

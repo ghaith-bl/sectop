@@ -838,7 +838,7 @@ def _alert_row(a: dict, acks: dict, stampfmt) -> dict:
               {"k": "first", "v": stampfmt(a["first"])},
               {"k": "since", "v": stampfmt(a["since"])},
               {"k": "last", "v": stampfmt(a["last"])},
-              {"k": "hold", "v": f"{a['hold']:g} s after the last report"}]
+              {"k": "hold", "v": f"{a['hold']:g} s after it was last seen"}]
     if a.get("noise"):
         detail.append({"k": "noise", "v": a["noise"]})
     for n, line in enumerate(str(a.get("detail") or "").splitlines()):

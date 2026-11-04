@@ -143,6 +143,75 @@ class TestStep(unittest.TestCase):
         self.assertEqual(al.empty(), {"alerts": {}})
 
 
+class TestEvent(unittest.TestCase):
+    """Event checks (`at`): last = the occurrence, re-reports dropped, hold by sev."""
+
+    def test_last_is_the_occurrence(self):
+        e = Engine()
+        at = e.now + 2.0
+        e.step("security", chk("log:x", "crit", n=1, at=at))
+        r = e.rec("security/log:x")
+        self.assertEqual((r["first"], r["since"], r["last"]), (at,) * 3)
+        self.assertEqual(r["hold"], al.EVENT_HOLD["crit"])
+        self.assertEqual(e.st("security/log:x"), "open")
+
+    def test_rereport_dropped(self):
+        e = Engine()
+        at = e.now + 1.0
+        e.step("security", chk("log:x", "crit", n=1, at=at))
+        for _ in range(3):                          # same line read again: no news
+            e.step("security", chk("log:x", "crit", n=1, at=at))
+        r = e.rec("security/log:x")
+        self.assertEqual((r["count"], r["last"], r["true"]), (1, at, False))
+        self.assertEqual(e.st("security/log:x"), "held")
+
+    def test_held_from_the_occurrence(self):
+        e = Engine()
+        at = e.now + 1.0
+        e.step("security", chk("log:x", "crit", n=1, at=at))
+        e.now = at + al.EVENT_HOLD["crit"] - 1
+        e.step("security", dt=0.0)
+        self.assertEqual(e.st("security/log:x"), "held")
+        e.step("security", dt=2.0)
+        self.assertEqual(e.st("security/log:x"), "closed")
+        self.assertEqual(e.active(), [])
+
+    def test_newer_occurrence_counts(self):
+        e = Engine()
+        at = e.now + 1.0
+        e.step("security", chk("log:x", "crit", n=1, at=at))
+        e.step("security")
+        at2 = e.now + 3.0                           # before the next step's clock
+        e.step("security", chk("log:x", "crit", n=2, at=at2))
+        r = e.rec("security/log:x")
+        self.assertEqual((r["count"], r["last"], r["since"]), (3, at2, at))
+        self.assertEqual(e.st("security/log:x"), "open")
+
+    def test_old_occurrence_opens_nothing(self):
+        e = Engine()
+        e.step("security", chk("log:x", "crit", n=1, at=e.now - 3600))
+        r = e.rec("security/log:x")
+        self.assertEqual((r["true"], r["count"]), (False, 1))
+        self.assertEqual(e.st("security/log:x"), "closed")
+        self.assertEqual(e.active(), [])
+
+    def test_future_at_clamped(self):
+        e = Engine()
+        e.step("security", chk("log:x", "warn", n=1, at=e.now + 999))
+        self.assertEqual(e.rec("security/log:x")["last"], e.now)
+
+    def test_hold_by_severity_and_own_hold(self):
+        e = Engine()
+        e.step("m", chk("c", "crit", at=e.now), chk("w", "warn", at=e.now),
+               chk("i", "info", at=e.now), chk("own", "crit", at=e.now, hold=30),
+               chk("state", "crit"))
+        holds = {k: e.rec(f"m/{k}")["hold"] for k in ("c", "w", "i", "own", "state")}
+        self.assertEqual(holds, {"c": 600.0, "w": 300.0, "i": 60.0, "own": 30.0,
+                                 "state": al.DEFAULT_HOLD})
+        self.assertEqual(al.event_hold("warn"), 300.0)
+        self.assertEqual(al.event_hold("warn", 12), 12.0)
+
+
 class TestActive(unittest.TestCase):
     def test_order(self):
         e = Engine().step("fw", chk("w1", "warn"), chk("i1", "info"), chk("c1", "crit"))

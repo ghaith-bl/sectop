@@ -324,6 +324,11 @@ def _check(c, i: int, seen: set) -> dict:
         if not _is_num(hold) or not 0 <= hold <= MAX_HOLD:
             raise InvalidSnapshot(f"{w}.hold: seconds 0..{MAX_HOLD:g} required")
         out["hold"] = float(hold)
+    if "at" in c:                    # event check: time of its newest occurrence
+        at = c["at"]
+        if not _is_num(at) or at < 0:
+            raise InvalidSnapshot(f"{w}.at: epoch seconds required")
+        out["at"] = float(at)
     return out
 
 

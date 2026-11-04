@@ -457,10 +457,16 @@ Alert = state, not event.
 
 - Open while its condition is true. No repeat every tick.
 - Key = module + rule + subject. Same key again -> count + last seen, no new alert.
-- Hold after clear (2026-10-20): an alert keeps firing `hold` s (default 60) after its
-  check was last reported. A flapping condition stays one alert, no close / reopen.
+- Hold after clear (2026-10-20): an alert keeps firing `hold` s (default: state check
+  60, event check by severity, below) after its check was last reported. A flapping condition stays one alert, no close / reopen.
   Same idea as Prometheus `keep_firing_for` (alerting rules docs: "prevent situations
   such as flapping alerts"). No delay before opening: a real problem shows at once.
+- Event alerts (2026-11-04): a journal line is an occurrence, not a condition. The
+  check carries `at` (line time): last seen = the line, not the report, and a window
+  read again adds nothing. Before: the logs check re-reported its crit line every
+  collect for an hour (window), so the alert showed `0s` and its hold never ended
+  (Ctrl-C at a sudo prompt: pam_unix crit stayed open). Hold by severity: crit 10 min,
+  warn 5 min, info 1 min, so a crit is still there when I look; ack clears the bar.
 - Context decides severity. Example: out_leak before the first tunnel flow this boot =
   expected (pre-connect DoH fallback); after connect = crit. The out_leak box already
   shows this context (docs/modules/firewall.md); status follows in phase 2.
@@ -482,7 +488,7 @@ Alert = state, not event.
   carries: closed alerts are not in it (history: later, it would change the state file).
 - Bar: warn / crit only. Info alerts (e.g. out_lan drops) and noise alerts are counted on
   the right, not listed.
-- Who decides what: modules report checks (key, sev, title, detail, n, hold) each
+- Who decides what: modules report checks (key, sev, title, detail, n, hold, at) each
   collect (docs/module-interface.md, Checks). Alert engine `core/alerts.py` does open /
   hold / close / count / noise. Pure: checks + time in, alert state (plain JSON) out.
 - Where (2026-10-20): phase 2 in the one process, phase 3 in the collector service,

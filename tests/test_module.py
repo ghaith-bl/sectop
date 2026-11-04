@@ -299,6 +299,15 @@ class TestChecks(unittest.TestCase):
         self.assertInvalid(snap(v=2, checks={}))
         self.assertInvalid(snap2(good, dict(good)))          # duplicate key
         self.assertInvalid(snap2({**good, "hold": float("inf")}))
+        for at in (-1, True, "1", None, float("nan")):
+            self.assertInvalid(snap2({**good, "at": at}))
+
+    def test_at(self):
+        out = validate(snap2({"key": "a", "sev": "crit", "title": "t", "at": 1762000000}))
+        self.assertEqual(out["checks"][0]["at"], 1762000000.0)
+        self.assertIsInstance(out["checks"][0]["at"], float)
+        self.assertNotIn("at", validate(snap2({"key": "a", "sev": "crit",
+                                                "title": "t"}))["checks"][0])
 
     def test_limits(self):
         out = validate(snap2({"key": "k" * 128, "sev": "info", "title": "t" * 1000,
