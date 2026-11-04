@@ -279,15 +279,17 @@ def noise_count(lg: Logs, now: float) -> int:
 
 
 def checks(lg: Logs, now: float, window: float, stamp) -> list:
-    """crit rows whose last one is under `window` old -> one check each (noise: the
-    alert engine marks it, the bar leaves it out)."""
+    """crit rows with new lines since the last report, last one under `window` old ->
+    one event check each, at = the newest line (noise: the alert engine marks it, the
+    bar leaves it out). No new line: not reported, the alert holds and closes."""
     hot = sorted(((k, r) for k, r in lg.rows.items()
-                  if r.sev == "crit" and now - r.last <= window),
+                  if r.sev == "crit" and r.n > r.reported and now - r.last <= window),
                  key=lambda kr: -kr[1].last)[:MAX_CHECKS]
     out = []
     for key, r in hot:
         out.append({"key": key, "sev": "crit",
                     "title": " ".join(f"{r.src} {r.label}: {r.what}".split())[:160],
-                    "detail": f"last {stamp(r.last)}, {r.why}", "n": max(0, r.n - r.reported)})
+                    "detail": f"last {stamp(r.last)}, {r.why}", "n": r.n - r.reported,
+                    "at": r.last})
         r.reported = r.n
     return out

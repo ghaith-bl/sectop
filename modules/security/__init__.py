@@ -73,7 +73,7 @@ MAX_USERCMDS = 100
 MAX_LAUNCHES = 256
 MAX_HOPS = 8                    # parent chain in the detail
 LAUNCH_KEEP = 600.0             # a launch older than this cannot be matched any more
-WINDOW = 3600.0                 # crit command: alert while its last run is this new
+WINDOW = 3600.0                 # crit rows newer than this can still be reported
 MAX_CHECKS = 50
 WATCH_PATH = watch.DEFAULT_PATH
 WATCH_OWNER = 0                 # root-owned (tests: their own uid)
@@ -416,11 +416,12 @@ def _digest(text: str) -> str:
 
 
 def _checks(st: State, now: float) -> list:
-    """crit rows whose last run is under WINDOW old -> one check per rule + who>as +
-    command from the program on (env and bash exec of one script: one alert, n = the
-    most new runs of its rows, not their sum: one run of the script = 1)."""
+    """crit rows with new runs since the last report, last run under WINDOW old -> one
+    event check per rule + who>as + command from the program on (env and bash exec of
+    one script: one alert, n = the most new runs of its rows, not their sum: one run of
+    the script = 1), at = the newest run."""
     hot = sorted((g for g in st.groups.values() if g.rule is not None
-                  and g.rule.sev == "crit" and now - g.last <= WINDOW),
+                  and g.rule.sev == "crit" and g.n > g.reported and now - g.last <= WINDOW),
                  key=lambda g: -g.last)
     out = {}
     for g in hot:
@@ -431,8 +432,9 @@ def _checks(st: State, now: float) -> list:
             out[key] = {"key": key, "sev": "crit",
                         "title": f"{g.rule.why}: {mask_secrets(g.shown)}"[:160],
                         "detail": f"{g.who}>{g.as_} via {g.via}, last {st.stamp(g.last)}, "
-                                  f"rule {g.rule.id}", "n": 0}
+                                  f"rule {g.rule.id}", "n": 0, "at": g.last}
         out[key]["n"] = max(out[key]["n"], g.n - g.reported)
+        out[key]["at"] = max(out[key]["at"], g.last)
         g.reported = g.n
     return list(out.values())
 

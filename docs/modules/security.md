@@ -125,8 +125,9 @@ service, result, tty. Full width, below the commands box. Newest first. Title:
       info  authentication ok, lock reset
 
   `sudo su` (root runs su: pam_rootok, uid 0) is ok, not the su alert.
-- Alerts: a crit row whose last one is under 1 h old (same window as the watch list) ->
-  check `auth:<service>:<result>:<login>:<user>` (chars outside the key set -> `_`,
+- Alerts: a crit row with new lines (last one under 1 h old, same window as the watch
+  list) -> event check (`at` = newest line, 2026-11-04)
+  `auth:<service>:<result>:<login>:<user>` (chars outside the key set -> `_`,
   longer than 128 -> sha256), title `account locked: <user> (<service>)`,
   `su by <login> to <user>: <result>` or `<service> refused: <user> <result>`, n = new.
   warn / info: row color only.
@@ -187,10 +188,11 @@ n, kind, from, what. Full width, below the auth box. Newest first. Title:
       info  module autoload (auid unset: udev, kernel request), blocked load, SELinux
             denial blocked (enforcing), kernel log warning (PRIORITY 4), new USB device
 
-- Alerts: a crit row whose last one is under 1 h old (same window as watch list / auth)
-  -> check `kernel:taint:<letter>` (title `kernel tainted: <letter>  <meaning>`) or
+- Alerts: a crit row with new lines (last one under 1 h old, same window as watch list /
+  auth) -> event check (`at` = newest line, a new taint bit: when read)
+  `kernel:taint:<letter>` (title `kernel tainted: <letter>  <meaning>`) or
   `kernel:log:<12 hex>` (sha256 of the normalized line; title `kernel <priority>:
-  <line>`), n = new. A taint row stays red after the hour, its alert ends.
+  <line>`), n = new. A taint row stays red, its alert ends after the hold.
 - Host fixtures 2026-10-20 (module, avc, kernel-warn, usb): `modprobe tcp_bbr` / `-r`
   warn, `modprobe sctp` blocked (info), Microsoft receiver USB (info); AVC 156 chcon
   tuned_t mac_admin (info), 44 lsblk bootupd_t connectto (allowed, warn); boot kernel
@@ -249,8 +251,11 @@ from, what. Full width, below the kernel box. Newest first. Title:
   entry whose match fits `security/log:<id>` (copy the noise key from the detail) marks
   the row dim with the reason in the detail; the row stays and counts. Expired entries
   stop matching. A crit row in noise: still a check, the engine keeps it out of the bar.
-- Alerts: a crit row whose last one is under 1 h old -> check `log:<12 hex>`, title
-  `<from> <priority>: <line>`.
+- Alerts: a crit row with new lines (last one under 1 h old) -> event check
+  `log:<12 hex>`, title `<from> <priority>: <line>`, `at` = newest line, n = new lines.
+  No new line: not reported, the alert holds (crit 10 min from the line) and closes.
+  Host 2026-11-04: before, the row was reported every collect for the hour, the alert
+  showed `0s` and stayed open (pam_unix crit after Ctrl-C at a sudo prompt).
 - Host fixture logs-2h (2026-10-26, 1.75 h, masked; LUKS uuid of one systemd-escape line
   masked by hand, the tool masks it since): 50 groups, 47 info, 3 warn
   (systemd-tmpfiles `/home` `/root` `/srv` already exist: Silverblue symlinks, noise
@@ -294,12 +299,12 @@ a change (install.sh restarts it too). Missing: no rules, every row ok, summary
 - Highest sev wins, then the first rule. The rule id is part of the row group:
   `setenforce 0` (crit) and `setenforce 1` (ok) are two rows, though both normalize to
   `setenforce #`. Launch rows are rated too (tone dim keeps them dim, crit stays red).
-- Alerts (decided 2026-10-25: red only): a crit row whose last run is under 1 h old ->
-  check `watch:<id>:<12 hex>` (sha256 of who, as and the command from the program on),
+- Alerts (decided 2026-10-25: red only): a crit row with new runs (last run under 1 h
+  old) -> event check (`at` = newest run, 2026-11-04) `watch:<id>:<12 hex>` (sha256 of who, as and the command from the program on),
   title `<why>: <command>`, n = new runs. The env and the bash exec of one script: one
-  alert, n = the most new runs of its rows (one run of the script = 1). 1 h without a
-  new run: gone (hold 60 s). Same idea as a Prometheus alert on `increase(...[1h]) > 0`:
-  an event fires for a window. warn / info: row color only.
+  alert, n = the most new runs of its rows (one run of the script = 1). No new run: held
+  10 min from the run (crit event hold), then gone; ack clears the bar before that
+  (2026-11-04, was: open for 1 h). warn / info: row color only.
   Noise entry: match `security/watch:<id>:*`. Restart of sectop.service: rows and
   alerts start empty (state in memory). A crit row pushed out of the 200 groups: its
   alert ends.

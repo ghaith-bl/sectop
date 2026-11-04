@@ -5,6 +5,7 @@ import tempfile
 import unittest
 
 import modules.security as sec
+from core import alerts
 from core import journal as corejournal
 from core.config import ConfigError
 from core.module import Context, check_module, validate
@@ -388,8 +389,9 @@ class TestAuth(unittest.TestCase):
         r = Run()
         snap = r.collect(entries, end(entries) + 10)
         self.assertEqual([c["n"] for c in snap["checks"]], [1])
+        self.assertLessEqual(snap["checks"][0]["at"], end(entries))      # the line's time
         snap = r.collect([], end(entries) + 60)
-        self.assertEqual([c["n"] for c in snap["checks"]], [0])          # open, nothing new
+        self.assertEqual(snap["checks"], [])            # nothing new: not reported again
         snap = r.collect([], end(entries) + sec.WINDOW + 1)
         self.assertEqual(snap["checks"], [])
 
@@ -620,10 +622,9 @@ class TestKernel(unittest.TestCase):
                          [("kernel crit: BUG: soft lockup - CPU#5 stuck for 41s! [y:456]", 2),
                           ("kernel emerg: Kernel panic - not syncing: x", 1)])
         self.assertTrue(all(c["key"].startswith("kernel:log:") for c in snap["checks"]))
+        self.assertTrue(all(c["at"] <= 410.0 for c in snap["checks"]))  # line times
         snap = r.collect([], 410.0 + 60)
-        self.assertEqual([c["n"] for c in snap["checks"]], [0, 0])     # open, nothing new
-        snap = r.collect([], 405.0 + sec.WINDOW)                        # last at 402 s
-        self.assertEqual([c["title"][:12] for c in snap["checks"]], [])
+        self.assertEqual(snap["checks"], [])                            # nothing new
 
     def test_taint(self):
         value = [12288]
@@ -645,7 +646,7 @@ class TestKernel(unittest.TestCase):
         snap = r.collect([], 106.0)                                     # stays one row each
         self.assertEqual([k[2] for k in kernel_rows(snap)],
                          ["D  kernel died (oops or BUG)", "L  soft lockup", "W  kernel warning"])
-        self.assertEqual([c["n"] for c in snap["checks"]], [0, 0])
+        self.assertEqual(snap["checks"], [])                            # reported once
         d = kernel_rows(snap)[("taint", "kernel", "D  kernel died (oops or BUG)")][2]
         self.assertEqual((d["bit"], d["at start"]), ("7", "12288"))
         snap = r.collect([], 104.0 + sec.WINDOW + 1)
@@ -870,8 +871,33 @@ class TestLogs(unittest.TestCase):
         self.assertIn("own", got[("sectop-collector (own)", "security: collect failed")][2])
         [c] = [c for c in snap["checks"] if c["key"].startswith("log:")]
         self.assertEqual((c["title"], c["n"]), ("systemd crit: Freezing execution.", 1))
+        self.assertLessEqual(c["at"], 710.0)                          # the line's time
+        snap = r.collect([], 715.0)
+        self.assertEqual([c for c in snap["checks"] if c["key"].startswith("log:")], [])
         snap = r.collect([], 700.0 + sec.WINDOW + 1)
         self.assertEqual([c for c in snap["checks"] if c["key"].startswith("log:")], [])
+
+    def test_crit_line_alert_closes(self):
+        """pam_unix crit after Ctrl-C at a sudo prompt (host 2026-11-04): before, the
+        check came back every collect for an hour and the alert never closed."""
+        r, state = Run(), alerts.empty()
+        line = ("2", "sudo", "pam_unix(sudo:auth): auth could not identify password for "
+                "[null]", "session-c3.scope")
+        snap = r.collect(_jlines(line), 710.0)
+        state = alerts.step(state, "security", snap["checks"], 710.0)
+        [a] = [a for a in alerts.active(state, 710.0) if a["key"].startswith("security/log:")]
+        self.assertEqual((a["state"], a["count"]), ("open", 1))
+        self.assertLessEqual(a["last"], 710.0)
+        for now in (715.0, 720.0, 900.0):
+            snap = r.collect([], now)
+            state = alerts.step(state, "security", snap["checks"], now)
+        [a] = [a for a in alerts.active(state, 900.0) if a["key"].startswith("security/log:")]
+        self.assertEqual((a["state"], a["count"]), ("held", 1))
+        self.assertLessEqual(a["last"], 710.0)                       # age from the line
+        now = a["last"] + alerts.EVENT_HOLD["crit"] + 1
+        state = alerts.step(state, "security", r.collect([], now)["checks"], now)
+        self.assertEqual([a for a in alerts.active(state, now)
+                          if a["key"].startswith("security/log:")], [])
 
     def test_noise(self):
         lines = _jlines(("3", "systemd-tmpfiles", '"/home" already exists', "x.service"),
@@ -1001,8 +1027,9 @@ class TestWatch(unittest.TestCase):
         r, snap = self.run_(ev)
         last = 100.0                                            # _events: first one at 100 s
         self.assertEqual(snap["checks"][0]["n"], 1)
+        self.assertEqual(snap["checks"][0]["at"], last)
         snap = r.collect([], last + 60)
-        self.assertEqual(snap["checks"][0]["n"], 0)              # still open, nothing new
+        self.assertEqual(snap["checks"], [])                     # nothing new: not reported
         _, snap = self.run_(ev, now=last + 120, r=r)
         self.assertEqual(snap["checks"][0]["n"], 1)              # ran again
         snap = r.collect([], 100.0 + sec.WINDOW + 1)             # 2nd run was at 100 s too

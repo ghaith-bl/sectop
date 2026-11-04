@@ -168,9 +168,11 @@ def _safe(s: str) -> str:
 
 
 def checks(a: Auth, now: float, window: float, stamp) -> list:
-    """crit rows whose last one is under `window` old -> one check each."""
+    """crit rows with new lines since the last report, last one under `window` old ->
+    one event check each, at = the newest line."""
     out = []
-    hot = sorted((r for r in a.rows.values() if r.sev == "crit" and now - r.last <= window),
+    hot = sorted((r for r in a.rows.values()
+                  if r.sev == "crit" and r.n > r.reported and now - r.last <= window),
                  key=lambda r: -r.last)[:MAX_CHECKS]
     for r in hot:
         key = "auth:" + ":".join(_safe(x) for x in (r.service, r.result, r.login, r.user))
@@ -184,6 +186,6 @@ def checks(a: Auth, now: float, window: float, stamp) -> list:
             title = f"{r.service} refused: {r.user} {r.result}"
         out.append({"key": key, "sev": "crit", "title": title[:160],
                     "detail": f"{r.login}>{r.user} tty {r.tty}, last {stamp(r.last)}, "
-                              f"{r.why}", "n": max(0, r.n - r.reported)})
+                              f"{r.why}", "n": r.n - r.reported, "at": r.last})
         r.reported = r.n
     return out

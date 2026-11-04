@@ -397,9 +397,11 @@ def _digest(text: str) -> str:
 
 
 def checks(k: Kernel, now: float, window: float, stamp) -> list:
-    """crit rows whose last one is under `window` old -> one check each."""
+    """crit rows with new lines since the last report, last one under `window` old ->
+    one event check each, at = the newest line (a new taint bit: when it was read)."""
     every = list(k.taint_rows.values()) + list(k.rows.values())
-    hot = sorted((r for r in every if r.sev == "crit" and now - r.last <= window),
+    hot = sorted((r for r in every
+                  if r.sev == "crit" and r.n > r.reported and now - r.last <= window),
                  key=lambda r: -r.last)[:MAX_CHECKS]
     out = []
     for r in hot:
@@ -410,6 +412,6 @@ def checks(k: Kernel, now: float, window: float, stamp) -> list:
             title = f"kernel {r.label or r.kind}: {r.what}"
         out.append({"key": key, "sev": "crit", "title": " ".join(title.split())[:160],
                     "detail": f"{r.kind} from {r.src}, last {stamp(r.last)}, {r.why}",
-                    "n": max(0, r.n - r.reported)})
+                    "n": r.n - r.reported, "at": r.last})
         r.reported = r.n
     return out
