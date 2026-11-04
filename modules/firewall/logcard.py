@@ -78,7 +78,9 @@ def load(rule: str, run=_run) -> tuple:
         first = (res.err.strip() or res.out.strip()).splitlines()[0]
         return [], f"journalctl failed (rc {res.rc}): {first[:200]}"
     entries, _cursor, bad = journal.parse(res.out)
-    entries = [e for e in entries if e.kind == rule]
+    # oldest first by time: with --grep, -n hands the lines back newest first (host
+    # 2026-11-04: flows showed first newer than last). Stable: same second keeps order
+    entries = sorted((e for e in entries if e.kind == rule), key=lambda e: e.ts)
     notes = []
     if cut:
         notes.append("read cut (timeout / size): the newest lines may be missing")

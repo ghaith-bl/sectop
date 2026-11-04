@@ -70,6 +70,13 @@ class TestQuery(unittest.TestCase):
         self.assertEqual((len(entries), note), (20, ""))       # other rules dropped
         self.assertEqual(run.calls[0][1:], (logcard.TIMEOUT, logcard.OUT_LIMIT))
 
+    def test_load_sorts_oldest_first(self):
+        lines = host_lines().splitlines(keepends=True)
+        entries, _ = logcard.load("fwd_vm_lan", Run(ok("".join(reversed(lines)))))
+        self.assertEqual([e.cursor for e in entries], [f"c{i}" for i in range(20)])
+        row = card("".join(reversed(lines)))["flows"]["rows"][0]
+        self.assertLess(float(row["cells"][1]), float(row["cells"][0]))   # first < last
+
     def test_load_problems(self):
         _, note = logcard.load("fwd_vm_lan", Run(Result(-9, host_lines(), "", True, False)))
         self.assertIn("read cut", note)
