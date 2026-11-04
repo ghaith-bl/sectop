@@ -147,11 +147,16 @@ class TestTop(unittest.TestCase):
         ui.acks = {"fw/h": (1, "crit")}
         f = frame([mod(engine=True)], ui=ui, alerts=al)
         bar = text(f.lines[1])
-        self.assertTrue(bar.startswith(" WARN new in_vpn   CRIT handshake stale"))  # acked last
+        self.assertTrue(bar.startswith(" WARN new in_vpn   "))
+        self.assertNotIn("handshake stale", bar)            # acked: out of the bar
         self.assertTrue(bar.endswith("2 alerts  1 acked "))
-        self.assertEqual(part(f.lines[1:2], "CRIT"), ("CRIT", "dim"))
+        self.assertEqual(f.alerts, (("fw/h", 1, "crit"), ("fw/in", 1, "warn")))  # a again
         al[0]["count"] = 2                               # new count: shows again
         self.assertTrue(text(lay([mod(engine=True)], ui=ui, alerts=al)[1]).startswith(" CRIT"))
+        ui.acks = {"fw/h": (2, "crit"), "fw/in": (1, "warn")}
+        bar = text(lay([mod(engine=True)], ui=ui, alerts=al)[1])
+        self.assertTrue(bar.startswith(" all acked"))
+        self.assertTrue(bar.endswith("2 alerts  2 acked "))
 
     def test_acked(self):
         a = alert("k", "warn", "t", count=2)
@@ -1263,6 +1268,61 @@ class TestAlertsView(unittest.TestCase):
         self.assertFalse(find(f.lines, "fine"))                   # ok lines: not here
         self.assertFalse(find(f.lines, "[WARN] firewall"))        # no module headers
         self.assertTrue(find(f.lines, "! Esc q close"))
+
+    def test_lines_of_one_flow_merged(self):
+        """A leak line and the audit flow of the same packets: one row (2026-11-04 host:
+        every leak line had an audit twin, two leak lines of one flow = two rows)."""
+        fw = {"name": "firewall", "status": "warn", "summary": "", "flags": [],
+              "stale": False, "waiting": False, "panels": [
+                  {"id": "audit", "title": "audit 1 flows", "type": "table", "sev": "ok",
+                   "columns": ["last", "n", "dir", "verdict", "dst"],
+                   "types": ["age", "num", "text", "text", "text"],
+                   "rows": [{"cells": ["1060.0", "4", "out", "block", "203.0.x.x:4123"],
+                             "sev": "warn", "ref": "fw:f1", "ip": "203.0.113.7"},
+                            {"cells": ["1061.0", "2", "out", "block", "1.1.x.x:53"],
+                             "sev": "warn"}]},
+                  {"id": "leak", "title": "out_leak 3", "type": "table", "sev": "warn",
+                   "columns": ["age", "dst", "context"], "types": ["age", "text", "text"],
+                   "rows": [{"cells": ["1062.0", "203.0.x.x:4123", "tunnel up, blocked"],
+                             "sev": "warn", "ref": "fw:f1"},
+                            {"cells": ["1050.0", "203.0.x.x:4123", "tunnel up, blocked"],
+                             "sev": "warn", "ref": "fw:f1"},
+                            {"cells": ["1055.0", "198.51.x.x:123", "tunnel up, blocked"],
+                             "sev": "warn", "ref": "fw:f2"}]}]}
+        f = frame([mod(), fw], ui=self.ui, now=1100.0, width=120, height=40, alerts=[])
+        self.ui.update(f)
+        self.ui.key(ord("!"))
+        f = frame([mod(), fw], ui=self.ui, now=1100.0, width=120, height=40, alerts=[])
+        self.ui.update(f)
+        merged = find(f.lines, "firewall/audit+leak")
+        self.assertEqual(len(merged), 1)
+        self.assertIn("38s", merged[0])                     # newest of the three: the leak line
+        self.assertIn(" 4 ", merged[0])                     # the audit flow's count
+        self.assertIn("out  block  203.0.x.x:4123", merged[0])
+        [alone] = find(f.lines, "198.51.x.x:123")           # no twin: its own row, n 1
+        self.assertIn("firewall/leak", alone)
+        self.assertIn(" 1 ", alone)
+        self.assertTrue(find(f.lines, "1.1.x.x:53"))         # no ref: untouched
+        self.assertTrue(find(f.lines, "warn 4   0 alerts, 4 lines, all screens"))
+        self.ui.key(9)                                      # tab: the warn box
+        self.ui.update(frame([mod(), fw], ui=self.ui, now=1100.0, width=120, height=40,
+                             alerts=[]))
+        self.ui.key(10)                                     # its first line: the merged row
+        f = frame([mod(), fw], ui=self.ui, now=1100.0, width=120, height=40, alerts=[])
+        self.assertTrue(find(f.lines, "3 lines of one flow"))
+        self.assertTrue(find(f.lines, "firewall/leak  203.0.x.x:4123  tunnel up, blocked"))
+
+    def test_merge_refs_counts(self):
+        def r(age, n, where, counted, ref="x"):
+            return {"cells": [age, n, "line", where, "w"], "sev": "warn", "id": where + age,
+                    "detail": [], "counted": counted, "ref": ref}
+        out = render._merge_refs([r("10.0", "1", "m/leak", False), r("12.0", "1", "m/leak", False),
+                                  r("11.0", "1", "m/leak", False)])
+        self.assertEqual(out[0]["cells"][:4], ["12.0", "3", "line", "m/leak"])
+        out = render._merge_refs([r("10.0", "1", "m/leak", False), r("9.0", "7", "m/audit", True),
+                                  r("5.0", "-", "n/x", False, ref="y")])
+        self.assertEqual([o["cells"][:4] for o in out], [["10.0", "7", "line", "m/audit+leak"],
+                                                          ["5.0", "-", "line", "n/x"]])
 
     def test_alert_first_held_dim(self):
         self.ui.key(ord("!"))

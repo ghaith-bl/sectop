@@ -97,8 +97,8 @@ HELP = (
     ("/  (in a detail)", "search its lines: jumps to the first match, enter keeps it"),
     ("n  N  (in a detail)", "next / previous match"),
     ("w", "whois of the selected IP (RDAP by sectop-whois.service, via the tunnel)"),
-    ("a", "ack the alerts in the alert bar (dims them; a higher count or severity "
-          "shows them again)"),
+    ("a", "ack the alerts in the alert bar (they leave the bar, dim in the alerts "
+          "view; a higher count or severity shows them again)"),
     ("Esc", "clear the filter of the focused table"),
     ("f", "on a row with a filter (programs): filter the other tables of the screen to "
           "it; again: clear"),
@@ -393,27 +393,32 @@ def acked(a: dict, acks: dict) -> bool:
 
 
 def _alerts(view: list, alerts: list, acks: dict, mask: bool, width: int) -> tuple:
-    """Alert bar -> (line, shown engine alerts as (key, count, sev)).
+    """Alert bar -> (line, bar engine alerts as (key, count, sev), acked ones too:
+    key a acks them all again with their count).
 
-    Items: engine alerts (core/alerts.py active(): warn / crit, not noise) and
-    module problems the engine does not cover (status unknown: not loaded,
-    stale, error; crit / warn of a v1 module). Not acked first, then acked
-    (dim). Each group: crit, warn, unknown, engine order inside. A held alert
-    (condition gone, kept for its hold time) has a dim title. Right side:
-    counts, incl. info and noise alerts, which are not in the bar.
+    Items: engine alerts (core/alerts.py active(): warn / crit, not noise, not
+    acked) and module problems the engine does not cover (status unknown: not
+    loaded, stale, error; crit / warn of a v1 module). Order: crit, warn,
+    unknown, engine order inside. A held alert (condition gone, kept for its
+    hold time) has a dim title. An acked alert leaves the bar (2026-11-04)
+    until its count or severity rises: counted on the right, dim in the alerts
+    view. Right side: counts, incl. acked, info and noise alerts.
     """
     items = []                                  # (acked, rank, parts)
     shown = []
+    n_acked = 0
     for a in alerts:
         if a["noise"] is not None or a["sev"] not in BAR_SEVS:
             continue
         ack = acked(a, acks)
-        title = a["title"] + (f" x{a['count']}" if a["count"] > 1 else "")
-        dim = ack or a["state"] != "open"
-        items.append((ack, ALERT_RANK[a["sev"]],
-                      [("dim" if ack else a["sev"], TAGS[a["sev"]]),
-                       ("dim" if dim else "plain", f" {title}")]))
         shown.append((a["key"], a["count"], a["sev"]))
+        if ack:
+            n_acked += 1
+            continue
+        title = a["title"] + (f" x{a['count']}" if a["count"] > 1 else "")
+        items.append((False, ALERT_RANK[a["sev"]],
+                      [(a["sev"], TAGS[a["sev"]]),
+                       ("dim" if a["state"] != "open" else "plain", f" {title}")]))
     for m in view:
         st = m["status"]
         if m.get("waiting") or st not in ALERT_RANK or (m.get("engine") and st != "unknown"):
@@ -421,8 +426,8 @@ def _alerts(view: list, alerts: list, acks: dict, mask: bool, width: int) -> tup
         items.append((False, ALERT_RANK[st], [(st, TAGS[st]), ("plain", f" {m['name']}")]))
     items.sort(key=lambda it: (it[0], it[1]))   # stable: engine order inside a rank
 
-    n = len(items)
-    k = sum(1 for it in items if it[0])
+    n = len(items) + n_acked
+    k = n_acked
     info = sum(1 for a in alerts if a["noise"] is None and a["sev"] == "info")
     noise = sum(1 for a in alerts if a["noise"] is not None)
     right = f"{n} alert{'s' if n != 1 else ''}" if n else ""
@@ -434,7 +439,7 @@ def _alerts(view: list, alerts: list, acks: dict, mask: bool, width: int) -> tup
         parts.append(("   " if i else " ", "plain"))
         parts += [(t, s) for s, t in its]
     if not parts:
-        parts = [(" no alerts", "dim")]
+        parts = [(" all acked" if k else " no alerts", "dim")]
     if not right:
         return _line(width, mask, *parts), tuple(shown)
     rp = [(right + " ", "dim")]
@@ -885,30 +890,94 @@ def _box_rows(view: list, stampfmt) -> list:
                     detail.append({"k": col, "v": stampfmt(when) if when is not None else (
                         spark_text(c) if t == "spark" else c), "sev": r["sev"]})
                 detail += list(r.get("detail", ()))
-                row = {"cells": [ages[0] if ages else "-", n[0] if n else "-", "line", where,
+                # no n column: a line with a ref is one occurrence (a log line), else -
+                row = {"cells": [ages[0] if ages else "-",
+                                 n[0] if n else ("1" if "ref" in r else "-"), "line", where,
                                  "  ".join(rest)],
                        "sev": r["sev"], "id": f"{where}|{r.get('id') or r['cells']}",
-                       "detail": detail}
-                for k in ("tone", "ip", "progs", "logs"):
+                       "detail": detail, "counted": bool(n)}
+                for k in ("tone", "ip", "progs", "logs", "ref"):
                     if k in r:
                         row[k] = r[k]
                 out.append((r["sev"], row))
     return out
 
 
+def _num_cell(cell: str) -> int:
+    try:
+        return int(cell)
+    except ValueError:
+        return 0
+
+
+def _merge_refs(rows: list) -> list:
+    """Lines of one severity with the same `ref` (one flow, e.g. its leak lines and its
+    audit flow) -> one row. Base: the line with an n column (the audit flow), else the
+    newest. last = the newest, n = the most of: the counted n, the lines without one.
+    from = every box (`firewall/audit+leak`), the detail names the other lines."""
+    groups, out = {}, []
+    for r in rows:
+        ref = r.get("ref")
+        if ref is None:
+            out.append(r)
+        elif ref in groups:
+            groups[ref].append(r)
+        else:
+            groups[ref] = [r]
+            out.append(ref)
+    done = []
+    for it in out:
+        if not isinstance(it, str):
+            done.append(it)
+            continue
+        grp = groups[it]
+        if len(grp) == 1:
+            done.append(grp[0])
+            continue
+        newest = max(grp, key=lambda r: _when(r["cells"][0]) or 0.0)
+        base = next((r for r in grp if r["counted"]), newest)
+        n = max(max((_num_cell(r["cells"][1]) for r in grp if r["counted"]), default=0),
+                sum(1 for r in grp if not r["counted"]))
+        wheres = []
+        for r in [base] + [r for r in grp if r is not base]:
+            if r["cells"][3] not in wheres:
+                wheres.append(r["cells"][3])
+        mod = wheres[0].partition("/")[0]
+        src = wheres[0] + "".join("+" + (w.partition("/")[2] if w.startswith(mod + "/")
+                                         else w) for w in wheres[1:])
+        row = dict(base)
+        row["cells"] = [newest["cells"][0], str(n), "line", src, base["cells"][4]]
+        row["detail"] = list(base["detail"]) + [{"k": "merged", "v": f"{len(grp)} lines "
+                                                 "of one flow"}]
+        row["detail"] += [{"k": "also", "v": f"{r['cells'][3]}  {r['cells'][4]}",
+                           "sev": r["sev"]} for r in grp if r is not base]
+        for k in ("ip", "progs", "logs"):
+            if k not in row:
+                got = next((r[k] for r in grp if k in r), None)
+                if got is not None:
+                    row[k] = got
+        done.append(row)
+    return done
+
+
 def _alert_boxes(view: list, alerts: list, acks: dict, stampfmt=_stamp) -> list:
     """Alerts view (key !): one full-width table per severity, crit first. In each: the
     engine alerts (open, held, acked, noise), then the lines of every box of every screen
-    with that severity, newest first. `from` = the module + box (or `<module> alert`)."""
+    with that severity, newest first, lines of one flow (`ref`) merged. `from` = the
+    module + box (or `<module> alert`)."""
     rows = {s: [] for s in ALERT_SEVS}
     for a in alerts:
         if a["sev"] in rows:
             rows[a["sev"]].append(_alert_row(a, acks, stampfmt))
+    lines = {s: [] for s in ALERT_SEVS}
     for sev, r in _box_rows(view, stampfmt):
-        rows[sev].append(r)
+        lines[sev].append(r)
     out = []
     for sev in ALERT_SEVS:
         lst = rows[sev]
+        for r in _merge_refs(lines[sev]):
+            r.pop("counted", None)
+            lst.append(r)
         lst.sort(key=lambda r: (STATE_RANK.get(r["cells"][2], 5),
                                 -(_when(r["cells"][0]) or 0.0)))
         na = sum(1 for r in lst if r["cells"][2] != "line")

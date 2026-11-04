@@ -131,6 +131,9 @@ its log card instead of the detail: core/logs.py runs the module's card builder 
 map `CARDS`, firewall: modules/firewall/logcard.py) in the UI process, once, on enter.
 The row's second cell and its detail (verdict, meaning, match, log) go into the card head.
 Not shown (2026-11-04).
+Row `ref` optional (str, 1..200 printable ASCII): what the row shows, the same across
+boxes (firewall: one flow, its audit row and its leak lines). The alerts view merges
+lines with the same ref (see Screen). Not shown (2026-11-04).
 Row `progs` optional (list of 1..5 str, each 1..64 printable ASCII without space): the
 programs the row belongs to (core/proc.py names: unit / app id of the cgroup). Key `c`
 opens the card of the first one, on the row or in its detail (2026-10-27); on a line
@@ -248,8 +251,8 @@ A condition that is not true any more is left out.
       `TAG title` + ` xN` when count > 1. Held alert (condition gone, within hold): dim title.
     - module problems the engine does not cover: status unknown (not loaded, stale,
       error), crit / warn of a v1 module: `TAG name`. Not while waiting for the first collect.
-    - Not acked first, then acked (dim tag). Each group: crit, warn, unknown, engine
-      order inside.
+    - Acked alerts are not listed (2026-11-04), only counted. Order: crit, warn,
+      unknown, engine order inside. Nothing left but acked: ` all acked` (dim).
     - Right: `N alerts  K acked  I info  Z noise` (info and noise alerts are counted, not
       listed). Too long: alerts cut (`~`), counts stay.
   - one header per module on this screen: `[STATUS] name  summary  | flags`
@@ -342,10 +345,15 @@ A condition that is not true any more is left out.
 - Alerts view (`!`): every engine alert (core/alerts.py active()) and every crit / warn /
   info table row and kv item of every module, one table per severity (box keys
   `alerts/crit`, `alerts/warn`, `alerts/info`). Cols: last (the row's first age cell),
-  n (its `n` column), state (`open` `held` `acked` `noise`, or `line` for a box line),
+  n (its `n` column; none: `1` for a line with a `ref`, else `-`), state (`open` `held`
+  `acked` `noise`, or `line` for a box line),
   from (`<module>/<panel id>` or `<module> alert`), what (its other cells). A line keeps
   its sev, tone, ip, progs and logs; its detail = the box title, every column, its own
   detail (like the card). Nothing new for modules: rows need a `sev`, as before.
+  Lines of one severity with the same `ref` = one row (2026-11-04): base = the line with
+  an `n` column (else the newest), last = the newest, n = the most of the counted n and
+  the lines without one, from = every box (`firewall/audit+leak`), detail: `merged N
+  lines of one flow` + an `also` line per other line.
 - Card (`c`, on a row with `progs`): a table overlay (box key `card`) with every table
   row of every module (all screens) whose `progs` holds the first name of the selected
   row, box by box. Cols: last (its first age cell), box (`<module>/<panel>`), what (its
@@ -359,8 +367,10 @@ A condition that is not true any more is left out.
   `!word` to every filterable box of the screen (once; skipped when it would pass 60
   chars). Both are plain filters: shown in the box titles, `Esc` clears a box.
 - Ack (`a`, also in help / detail, not while typing a filter): every engine alert in the
-  alert bar is acked: key -> (count, sev) at ack (`core/ui.py`). Shown dim, last, until
-  its count or severity rises. Acks of alerts no longer in the bar are dropped. Phase 2:
+  alert bar is acked: key -> (count, sev) at ack (`core/ui.py`). Out of the bar, dim in
+  the alerts view, until its count or severity rises (2026-11-04, was: dim in the bar).
+  The bar's key list keeps acked alerts, so `a` again keeps their ack. Acks of alerts no
+  longer in the bar are dropped. Phase 2:
   memory only (sectop still runs as root, no file in my home).
   In help / detail / card: `Esc` `q` `enter` `?` close, line keys scroll. Esc delay 25 ms.
 - Redraw: full after a collect (not while paused) or a key (incl. resize); between those

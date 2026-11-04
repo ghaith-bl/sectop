@@ -251,6 +251,16 @@ class TestValidate(unittest.TestCase):
             s2["panels"][1]["rows"][0]["logs"] = bad
             self.assertInvalid(s2)
 
+    def test_row_ref(self):
+        s = snap()
+        s["panels"][1]["rows"][0]["ref"] = "fw:out_leak|out|udp|994|192.168.8.102|203.0.113.9:123|wlo1"
+        self.assertTrue(validate(s)["panels"][1]["rows"][0]["ref"].startswith("fw:out_leak|"))
+        self.assertNotIn("ref", validate(snap())["panels"][1]["rows"][0])
+        for bad in ("", "a" * 201, "x\ny", "caf\u00e9", 1, None):
+            s2 = snap()
+            s2["panels"][1]["rows"][0]["ref"] = bad
+            self.assertInvalid(s2)
+
     def test_rows_cut(self):
         s = snap()
         s["panels"][1]["rows"] = [{"cells": ["a", "b"]}] * 1000

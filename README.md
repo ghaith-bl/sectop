@@ -63,6 +63,7 @@ Public IPs masked (key m), the way the screens start.
 - collector = non-root service, UI = my user, no sudo. Neither runs as root
   (docs/architecture.md, Privilege split)
 - alert bar on every screen (alert engine, warn / crit), key a acks what it shows
+  (acked: out of the bar, counted on the right, dim in the alerts view)
 - !: alerts view, one box per severity (crit, warn, info) with every alert and every
   colored line of all screens, each line naming the box it came from
 - public IPs masked by default, toggle with key m. The detail view (enter) shows them

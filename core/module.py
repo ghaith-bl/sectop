@@ -48,6 +48,7 @@ NAME_RE = re.compile(r"[a-z0-9_]+")
 PICK_RE = re.compile(r"[ -~]{1,60}")    # row filter: printable ASCII, the filter prompt's chars
 PROG_RE = re.compile(r"[\x21-\x7e]{1,64}")         # row progs: program names (core/proc.py)
 LOGS_RE = re.compile(r"[a-z][a-z0-9_]{0,39}")      # row logs: rule name (core/logs.py)
+REF_RE = re.compile(r"[\x20-\x7e]{1,200}")          # row ref: one flow across boxes
 MAX_PROGS = 5
 KEY_RE = re.compile(r"[A-Za-z0-9_.:/@%+-]{1,128}")    # check key: rule + subject
 
@@ -183,6 +184,11 @@ def _table(p: dict, w: str) -> dict:
             row["level"] = _choice(r, "level", LEVELS, wr)
         if "id" in r:                    # stable row key: the cursor follows it
             row["id"] = _str(r, "id", wr)
+        if "ref" in r:                   # one flow / event across boxes: alerts view merges
+            v = r["ref"]
+            if not isinstance(v, str) or not REF_RE.fullmatch(v):
+                raise InvalidSnapshot(f"{wr}.ref: 1..200 printable ASCII chars required")
+            row["ref"] = v
         if "filter" in r:                # f follow / x hide (core/ui.py)
             v = r["filter"]
             if not isinstance(v, str) or not PICK_RE.fullmatch(v) or not v.strip():
