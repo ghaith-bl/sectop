@@ -1205,6 +1205,110 @@ class TestLogCard(unittest.TestCase):
         self.assertTrue(find(f.lines, "1.1.1.1"))            # fields: real, like any detail
 
 
+class TestAlertsView(unittest.TestCase):
+    """! : every alert and every crit / warn / info line, one box per severity
+    (2026-11-04 host: a crit and a warn were only in the bar / their own box)."""
+
+    def setUp(self):
+        self.sec = {"name": "security", "status": "crit", "summary": "", "flags": [],
+                    "stale": False, "waiting": False, "panels": [
+                        {"id": "auth", "title": "auth 1", "type": "table", "sev": "ok",
+                         "columns": ["last", "n", "login>user", "service", "result"],
+                         "types": ["age", "num", "text", "text", "text"],
+                         "rows": [{"cells": ["1040.0", "3", "null>null", "sudo", "failed"],
+                                   "sev": "warn", "progs": ["sudo"]}]},
+                        {"id": "logs", "title": "logs 2", "type": "table", "sev": "ok",
+                         "columns": ["last", "n", "from", "what"],
+                         "types": ["age", "num", "text", "text"],
+                         "rows": [{"cells": ["1041.0", "1", "sudo", "auth could not identify"],
+                                   "sev": "crit"},
+                                  {"cells": ["1030.0", "6", "audit", "faillock"],
+                                   "sev": "info"},
+                                  {"cells": ["1020.0", "1", "x", "fine"], "sev": "ok"}]}]}
+        self.alerts = [
+            {"key": "security/logs:abc", "module": "security", "sev": "crit",
+             "title": "sudo crit: auth could not identify", "detail": "PRIORITY 2\nunit sudo",
+             "count": 1, "first": 1041.0, "since": 1041.0, "last": 1041.0, "hold": 60.0,
+             "true": True, "state": "open", "noise": None},
+            {"key": "firewall/new:out_dns", "module": "firewall", "sev": "warn",
+             "title": "new out_dns", "detail": "", "count": 2, "first": 1000.0,
+             "since": 1000.0, "last": 1050.0, "hold": 60.0, "true": False, "state": "held",
+             "noise": None}]
+        self.ui = UI(len(SCR))
+        self.draw()
+
+    def draw(self):
+        f = frame([mod(), self.sec], ui=self.ui, now=1100.0, width=120, height=40,
+                  alerts=self.alerts)
+        self.ui.update(f)
+        return f
+
+    def test_boxes_by_severity_with_the_source(self):
+        self.ui.key(ord("!"))
+        f = self.draw()
+        self.assertEqual([b.key for b in self.ui.boxes],
+                         ["alerts/crit", "alerts/warn", "alerts/info"])
+        self.assertTrue(find(f.lines, "[! alerts]"))
+        self.assertTrue(find(f.lines, "crit 3   1 alert, 2 lines, all screens"))
+        self.assertTrue(find(f.lines, "warn 3   1 alert, 2 lines, all screens"))
+        self.assertTrue(find(f.lines, "info 1   0 alerts, 1 line, all screens"))
+        crit = find(f.lines, "security alert")[0]
+        self.assertIn("open", crit)
+        self.assertTrue(find(f.lines, "security/logs   sudo  auth could not identify"))
+        warn = find(f.lines, "security/auth")[0]
+        self.assertIn("null>null  sudo  failed", warn)
+        self.assertIn(" 3 ", warn)                                # its n column
+        self.assertTrue(find(f.lines, "firewall alert  new out_dns"))
+        self.assertTrue(find(f.lines, "firewall/mode   rollback: -"))   # a kv item
+        self.assertFalse(find(f.lines, "fine"))                   # ok lines: not here
+        self.assertFalse(find(f.lines, "[WARN] firewall"))        # no module headers
+        self.assertTrue(find(f.lines, "! Esc q close"))
+
+    def test_alert_first_held_dim(self):
+        self.ui.key(ord("!"))
+        f = self.draw()
+        lines = [text(line) for line in f.lines]
+        i_alert = next(i for i, t in enumerate(lines) if "firewall alert" in t)
+        i_line = next(i for i, t in enumerate(lines) if "security/auth" in t)
+        self.assertLess(i_alert, i_line)                          # alerts before lines
+        self.assertEqual(part(f.lines, "new out_dns")[1], "dim")  # held: dim
+
+    def test_detail_card_and_close(self):
+        self.ui.key(ord("!"))
+        self.draw()
+        self.ui.key(10)                                           # crit alert: detail
+        f = self.draw()
+        self.assertEqual(self.ui.detail, "alerts/crit")
+        self.assertTrue(find(f.lines, "security/logs:abc"))
+        self.assertTrue(find(f.lines, "unit sudo"))
+        self.ui.key(27)
+        self.draw()
+        self.ui.key(9)                                            # tab: warn box
+        self.draw()
+        self.ui.key(ord("j"))                                     # its 2nd line: auth row
+        self.draw()
+        self.ui.key(ord("c"))
+        self.assertEqual(self.ui.card, "sudo")                    # card from the view
+        self.ui.key(27)
+        self.draw()
+        self.assertTrue(self.ui.alerts)
+        self.ui.key(27)                                           # no filter: closes
+        f = self.draw()
+        self.assertFalse(self.ui.alerts)
+        self.assertTrue(find(f.lines, "[1 one]"))
+
+    def test_own_focus_screen_focus_kept(self):
+        self.ui.focus[0] = "firewall/conns"
+        self.ui.key(ord("!"))
+        self.draw()
+        self.ui.key(9)
+        self.draw()
+        self.assertEqual(self.ui.focus["alerts"], "alerts/warn")
+        self.ui.key(ord("q"))                                     # closes, never quits
+        self.draw()
+        self.assertEqual(self.ui.focus[0], "firewall/conns")
+
+
 class TestSparkColumn(unittest.TestCase):
     def table(self, cell):
         return {"v": 1, "status": "ok", "summary": "", "events": [], "panels": [

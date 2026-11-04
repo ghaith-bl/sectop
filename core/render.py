@@ -102,6 +102,8 @@ HELP = (
     ("Esc", "clear the filter of the focused table"),
     ("f", "on a row with a filter (programs): filter the other tables of the screen to "
           "it; again: clear"),
+    ("!", "alerts: every alert and every crit / warn / info line of all screens, one box "
+          "per severity, the source box on each line; ! Esc q close"),
     ("enter  (hostfw counter)", "log card: every logged line of the counter this boot, as "
                                 "flows; enter = the packets of a flow, enter = all fields "
                                 "of a packet, Esc back"),
@@ -117,7 +119,9 @@ HELP = (
     ("q", "quit"),
 )
 FOOTER = ("1-{n} screen  tab <- -> box  up down j k select  enter detail  c card  / filter  "
-          "w whois  a ack  p pause  m mask  ? help  q quit")
+          "w whois  a ack  ! alerts  p pause  m mask  ? help  q quit")
+FOOTER_ALERTS = (" ! Esc q close  tab box  up down j k select  enter detail  c card  / filter  "
+                 "w whois  a ack  p pause")
 TYPING = "  enter apply  esc cancel  (all words match, !word must not)"
 TYPING_FIND = "  enter keep  esc cancel  (any case, text of a line)"
 FOOTER_DETAIL = (" up down PgUp PgDn scroll  g G Home End top / end  / search  n N match  "
@@ -370,7 +374,10 @@ def _tabs(screens, ui, width: int, now, tsfmt) -> list:
     for i, s in enumerate(screens):
         label = f"{i + 1} {s.name}"
         parts.append(("  " if i else " ", "plain"))
-        parts.append((f"[{label}]", "tabon") if i == ui.screen else (label, "note"))
+        on = i == ui.screen and not getattr(ui, "alerts", False)
+        parts.append((f"[{label}]", "tabon") if on else (label, "note"))
+    if getattr(ui, "alerts", False):
+        parts += [("  ", "plain"), ("[! alerts]", "tabon")]
     right = [("PAUSED", "warn"), ("  ", "plain")] if ui.paused else []
     tail = f"mask {'on' if ui.mask else 'off'}"
     if now is not None:
@@ -460,6 +467,9 @@ def _footer(n_screens: int, width: int, ui=None) -> list:
         return _line(width, False, (FOOTER_DETAIL, "note"))
     if getattr(ui, "logcard", None) is not None:
         return _line(width, False, (FOOTER_LOGS, "note"))
+    if getattr(ui, "alerts", False) and not getattr(ui, "card", None) \
+            and not getattr(ui, "help", False):
+        return _line(width, False, (FOOTER_ALERTS, "note"))
     if getattr(ui, "card", None) is not None:
         return _line(width, False, (FOOTER_CARD, "note"))
     if getattr(ui, "help", False):
@@ -812,6 +822,104 @@ def _boxes(screen, mods: list, feed: list) -> list:
     if not out:
         note = screen.note if not mods else "no data yet"
         out.append(_Box(f"{screen.name}/note", screen.name, "ok", "note", [note or "-"]))
+    return out
+
+
+ALERT_COLUMNS = ["last", "n", "state", "from", "what"]
+ALERT_TYPES = ["age", "num", "text", "text", "text"]
+ALERT_SEVS = ("crit", "warn", "info")
+STATE_RANK = {"open": 0, "held": 1, "acked": 2, "noise": 3, "line": 4}
+
+
+def _alert_row(a: dict, acks: dict, stampfmt) -> dict:
+    """An engine alert (core/alerts.py active()) as a row of the alerts view."""
+    state = "noise" if a.get("noise") else ("acked" if acked(a, acks) else a["state"])
+    detail = [{"k": "alert", "v": a["key"]}, {"k": "count", "v": str(a["count"])},
+              {"k": "first", "v": stampfmt(a["first"])},
+              {"k": "since", "v": stampfmt(a["since"])},
+              {"k": "last", "v": stampfmt(a["last"])},
+              {"k": "hold", "v": f"{a['hold']:g} s after the last report"}]
+    if a.get("noise"):
+        detail.append({"k": "noise", "v": a["noise"]})
+    for n, line in enumerate(str(a.get("detail") or "").splitlines()):
+        detail.append({"k": "detail" if n == 0 else "", "v": line, "sev": a["sev"]})
+    row = {"cells": [repr(a["last"]), str(a["count"]), state, f"{a['module']} alert",
+                     a["title"]], "sev": a["sev"], "id": "alert|" + a["key"], "detail": detail}
+    if state != "open":
+        row["tone"] = "dim"
+    return row
+
+
+def _box_rows(view: list, stampfmt) -> list:
+    """(sev, row) for every crit / warn / info table row and kv item of every module,
+    with where it is (module/box), its first age, its n column, its other cells."""
+    out = []
+    for m in view:
+        for p in m.get("panels", ()):
+            where = f"{m['name']}/{p['id']}"
+            if p.get("type") == "kv":
+                for it in p["items"]:
+                    if it.get("sev") in ALERT_SEVS:
+                        out.append((it["sev"], {
+                            "cells": ["-", "-", "line", where, f"{it['k']}: {it['v']}"],
+                            "sev": it["sev"], "id": f"{where}|{it['k']}",
+                            "detail": [{"k": "box title", "v": p["title"]},
+                                       {"k": it["k"], "v": it["v"], "sev": it["sev"]}],
+                            **({"ip": it["ip"]} if "ip" in it else {})}))
+                continue
+            if p.get("type") != "table":
+                continue
+            cols_ = p["columns"]
+            types = p.get("types") or ["text"] * len(cols_)
+            for r in p["rows"]:
+                if r.get("sev") not in ALERT_SEVS:
+                    continue
+                ages = [c for c, t in zip(r["cells"], types) if t == "age"]
+                n = [c for c, col in zip(r["cells"], cols_) if col == "n"]
+                rest = [spark_text(c) if t == "spark" else c
+                        for c, t, col in zip(r["cells"], types, cols_)
+                        if t != "age" and col != "n"]
+                detail = [{"k": "box title", "v": p["title"]}]
+                for col, c, t in zip(cols_, r["cells"], types):
+                    when = _when(c) if t == "age" else None
+                    detail.append({"k": col, "v": stampfmt(when) if when is not None else (
+                        spark_text(c) if t == "spark" else c), "sev": r["sev"]})
+                detail += list(r.get("detail", ()))
+                row = {"cells": [ages[0] if ages else "-", n[0] if n else "-", "line", where,
+                                 "  ".join(rest)],
+                       "sev": r["sev"], "id": f"{where}|{r.get('id') or r['cells']}",
+                       "detail": detail}
+                for k in ("tone", "ip", "progs", "logs"):
+                    if k in r:
+                        row[k] = r[k]
+                out.append((r["sev"], row))
+    return out
+
+
+def _alert_boxes(view: list, alerts: list, acks: dict, stampfmt=_stamp) -> list:
+    """Alerts view (key !): one full-width table per severity, crit first. In each: the
+    engine alerts (open, held, acked, noise), then the lines of every box of every screen
+    with that severity, newest first. `from` = the module + box (or `<module> alert`)."""
+    rows = {s: [] for s in ALERT_SEVS}
+    for a in alerts:
+        if a["sev"] in rows:
+            rows[a["sev"]].append(_alert_row(a, acks, stampfmt))
+    for sev, r in _box_rows(view, stampfmt):
+        rows[sev].append(r)
+    out = []
+    for sev in ALERT_SEVS:
+        lst = rows[sev]
+        lst.sort(key=lambda r: (STATE_RANK.get(r["cells"][2], 5),
+                                -(_when(r["cells"][0]) or 0.0)))
+        na = sum(1 for r in lst if r["cells"][2] != "line")
+        title = (f"{sev} {len(lst)}   {na} alert{'s' if na != 1 else ''}, "
+                 f"{len(lst) - na} line{'s' if len(lst) - na != 1 else ''}, all screens")
+        panel = {"id": sev, "title": title, "type": "table", "sev": "ok",
+                 "columns": list(ALERT_COLUMNS), "types": list(ALERT_TYPES),
+                 "roles": ["note", "value", "text", "name", "text"], "rows": lst}
+        box = _Box(f"alerts/{sev}", title, "ok", "table", panel)
+        box.full = True
+        out.append(box)
     return out
 
 
@@ -1170,7 +1278,7 @@ def _grid(boxes: list, ui, width: int, room: int, mask: bool, tsfmt, pref) -> tu
     rows = rows[:len(hs)]
     shown = [b for row in rows for b, _ in row]
     focus = _pick_focus(None if len(shown) == 1 and not shown[0].cursor
-                        else ui.focus.get(ui.screen), pref, shown)
+                        else ui.focus.get(getattr(ui, "place", ui.screen)), pref, shown)
 
     lines, infos, above = [], [], None
     for row, hr in zip(rows, hs):
@@ -1254,13 +1362,16 @@ def layout(screens, view: list, feed: list, ui, width: int, height: int,
 
     bar, shown = _alerts(view, list(alerts), getattr(ui, "acks", {}), mask, width)
     top = [_tabs(screens, ui, width, now, tsfmt), bar]
-    top += [_header(m, width, mask) for m in mods]
+    in_alerts = getattr(ui, "alerts", False)
+    if not in_alerts:
+        top += [_header(m, width, mask) for m in mods]
     if len(top) >= height:
         return Frame(top[:height], (), alerts=shown)
     room = height - len(top)
     footer = [_footer(len(screens), width, ui)] if room >= 4 else []
     room -= len(footer)
-    boxes = _boxes(scr, mods, feed)
+    boxes = (_alert_boxes(view, list(alerts), getattr(ui, "acks", {}), stampfmt) if in_alerts
+             else _boxes(scr, mods, feed))
     filters = getattr(ui, "filters", {})
     ref = now if ref is None else ref
     for b in boxes:
@@ -1273,7 +1384,7 @@ def layout(screens, view: list, feed: list, ui, width: int, height: int,
         over.secrets = mask                  # m shows the raw argv, like the IPs
         boxes = [over]
     grid, infos, focus = _grid(boxes, ui, width, room, mask, tsfmt,
-                               getattr(scr, "focus", None))
+                               None if in_alerts else getattr(scr, "focus", None))
     return Frame(top + grid + footer, infos, focus, shown)
 
 

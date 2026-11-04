@@ -575,5 +575,36 @@ class TestLogCardKeys(unittest.TestCase):
         self.assertIsNone(u.logdata)
 
 
+class TestAlertsKeys(unittest.TestCase):
+    def test_open_close(self):
+        u = ui()
+        u.key(ord("!"))
+        self.assertTrue(u.alerts)
+        self.assertTrue(u.key(ord("q")))                 # q closes it, no quit
+        self.assertFalse(u.alerts)
+        u.key(ord("!"))
+        u.key(ord("!"))
+        self.assertFalse(u.alerts)
+        u.key(ord("!"))
+        u.key(ord("2"))                                  # a screen: view closed
+        self.assertEqual((u.alerts, u.screen), (False, 1))
+
+    def test_esc_clears_a_filter_first(self):
+        u = UI(3)
+        u.alerts = True
+        u.boxes = (BoxInfo("alerts/crit", 3, 3, filterable=True),)
+        u.filters["alerts/crit"] = "sudo"
+        u.key(ESC)
+        self.assertEqual((u.alerts, u.filters), (True, {}))
+        u.key(ESC)
+        self.assertFalse(u.alerts)
+
+    def test_not_from_an_overlay(self):
+        u = ui()
+        u.help = True
+        u.key(ord("!"))
+        self.assertFalse(u.alerts)
+
+
 if __name__ == "__main__":
     unittest.main()

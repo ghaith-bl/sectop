@@ -471,8 +471,15 @@ Alert = state, not event.
   reason, end time). Examples: ACPI BIOS errors, NVRM lines from akmod-nvidia (logs),
   failed `nvidia` loads (kernel).
 - Ack: dims the alert, does not delete it. Higher count or severity after ack shows it
-  again. Key `a` acks every alert in the bar (2026-10-20). A per-alert list: later, if
-  needed.
+  again. Key `a` acks every alert in the bar (2026-10-20).
+- Alerts view (key `!`, 2026-11-04): instead of the screen, one full-width box per
+  severity (crit, warn, info), each: the engine alerts (open, held, acked, noise; state
+  column), then every line of that severity in every box of every screen (`from` =
+  module/box, so the source is clear at once). Why: a wrong sudo password is a warn line
+  in the auth box but no alert (warn / info rows: color only), a crit log line was only in
+  the bar's title. Own focus; enter = detail, c = card, / filter, w whois, a ack;
+  `!` / Esc / q / a screen key closes. Built in the UI from what state.json already
+  carries: closed alerts are not in it (history: later, it would change the state file).
 - Bar: warn / crit only. Info alerts (e.g. out_lan drops) and noise alerts are counted on
   the right, not listed.
 - Who decides what: modules report checks (key, sev, title, detail, n, hold) each

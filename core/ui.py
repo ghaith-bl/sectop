@@ -42,6 +42,12 @@ logs_done()). Three levels, enter goes down, Esc back up: flows (box logflows), 
 packets of one flow (box logpkts), the fields of one packet (detail). / filters the
 flows / packets table. Pauses while open.
 
+Alerts view: ! (not in an overlay) shows, instead of the screen, every engine alert and
+every crit / warn / info line of all screens, one box per severity (render
+_alert_boxes). Its own focus (place "alerts"); keys as on a screen: tab, select, enter
+detail, c card, / filter, w whois, a ack. ! Esc (no filter to clear) q or a screen number
+closes it (2026-11-04: crit and warn each in a box of their own, the source on the line).
+
 Ack: a acks every engine alert in the last alert bar (Frame.alerts): key ->
 (count, sev) at ack. render.acked() dims it until its count or severity
 rises. Kept here, not in core: the channel stays one-way (docs/architecture.md).
@@ -67,6 +73,7 @@ class UI:
     screen: int = 0
     mask: bool = True
     help: bool = False
+    alerts: bool = False             # alerts view (!) instead of the screen
     paused: bool = False
     detail: str | None = None        # box key whose selected line is shown in detail
     card: str | None = None          # program whose card is shown (c)
@@ -103,7 +110,12 @@ class UI:
                 self.mark = b.mark
         self.seek = None                         # the frame did the move
         if frame.focus is not None and not self.overlay:
-            self.focus[self.screen] = frame.focus
+            self.focus[self.place] = frame.focus
+
+    @property
+    def place(self):
+        """Focus key: the screen index, or "alerts" while the alerts view is shown."""
+        return "alerts" if self.alerts else self.screen
 
     @property
     def overlay(self) -> bool:
@@ -114,7 +126,7 @@ class UI:
         keys = [b.key for b in self.boxes]
         if self.overlay:
             return keys[0] if keys else None
-        want = self.focus.get(self.screen)
+        want = self.focus.get(self.place)
         return want if want in keys else (keys[0] if keys else None)
 
     def key(self, k: int) -> bool:
@@ -156,6 +168,11 @@ class UI:
                     self.seek = "next" if k == ord("n") else "prev"
             else:
                 self._move_key(k)
+        elif self.alerts and (k in (ord("q"), ord("Q"), ord("!")) or (
+                k == ESC and not self.filters.get(self.focused() or ""))):
+            self.alerts = False                  # close the alerts view, never quit here
+        elif k == ord("!"):
+            self.alerts = True
         elif k in (ord("q"), ord("Q")):
             return False
         elif k == ord("/"):
@@ -180,6 +197,7 @@ class UI:
         elif ord("1") <= k <= ord("9"):
             if k - ord("1") < self.n_screens:
                 self.screen = k - ord("1")
+                self.alerts = False
         elif k in (TAB, curses.KEY_RIGHT, ord("l")):
             self._cycle(1)
         elif k in (curses.KEY_BTAB, curses.KEY_LEFT, ord("h")):
@@ -368,7 +386,7 @@ class UI:
         if not keys:
             return
         i = keys.index(self.focused())
-        self.focus[self.screen] = keys[(i + step) % len(keys)]
+        self.focus[self.place] = keys[(i + step) % len(keys)]
 
     def _move_key(self, k: int) -> None:
         b = self._box()
@@ -381,7 +399,7 @@ class UI:
                 ord("G"): BIG, curses.KEY_END: BIG}.get(k)
         if step is None:
             return
-        self.focus[self.screen] = self.focus.get(self.screen) or b.key
+        self.focus[self.place] = self.focus.get(self.place) or b.key
         if b.cursor:                             # move the selected line
             self.sel[b.key] = min(max(b.sel + step, 0), max(0, b.lines - 1))
             self.anchor.pop(b.key, None)         # explicit move: no re-anchoring this frame

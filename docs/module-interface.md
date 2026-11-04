@@ -328,8 +328,15 @@ A condition that is not true any more is left out.
   down / up / `j` `k` line; `space` `PgDn` / `PgUp` page; `g` `G` / `Home` `End` first / last;
   `enter` detail (a row with `logs`: its log card); `/` filter (in a detail: search, `n`
   `N` next / previous match);
-  `Esc` clear filter; `f` follow; `x` hide; `c` card; `w` whois; `a` ack; `p` pause;
-  `m` mask; `?` help; `q` quit.
+  `Esc` clear filter; `f` follow; `x` hide; `c` card; `w` whois; `a` ack; `!` alerts;
+  `p` pause; `m` mask; `?` help; `q` quit.
+- Alerts view (`!`): every engine alert (core/alerts.py active()) and every crit / warn /
+  info table row and kv item of every module, one table per severity (box keys
+  `alerts/crit`, `alerts/warn`, `alerts/info`). Cols: last (the row's first age cell),
+  n (its `n` column), state (`open` `held` `acked` `noise`, or `line` for a box line),
+  from (`<module>/<panel id>` or `<module> alert`), what (its other cells). A line keeps
+  its sev, tone, ip, progs and logs; its detail = the box title, every column, its own
+  detail (like the card). Nothing new for modules: rows need a `sev`, as before.
 - Card (`c`, on a row with `progs`): a table overlay (box key `card`) with every table
   row of every module (all screens) whose `progs` holds the first name of the selected
   row, box by box. Cols: last (its first age cell), box (`<module>/<panel>`), what (its
