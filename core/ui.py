@@ -36,6 +36,12 @@ c in the detail of such a row opens its card too (2026-10-27: c from the detail 
 nothing). c on a line without a program: the footer says so (ui.hint, until the next
 key), instead of nothing.
 
+Log card: enter on a row with `logs` (a hostfw counter) opens every logged line of that
+rule this boot (core/logs.py, read once on open: ui.logreq, core/app.py runs it and calls
+logs_done()). Three levels, enter goes down, Esc back up: flows (box logflows), the
+packets of one flow (box logpkts), the fields of one packet (detail). / filters the
+flows / packets table. Pauses while open.
+
 Ack: a acks every engine alert in the last alert bar (Frame.alerts): key ->
 (count, sev) at ack. render.acked() dims it until its count or severity
 rises. Kept here, not in core: the channel stays one-way (docs/architecture.md).
@@ -64,6 +70,10 @@ class UI:
     paused: bool = False
     detail: str | None = None        # box key whose selected line is shown in detail
     card: str | None = None          # program whose card is shown (c)
+    logcard: tuple | None = None     # (module, box key, rule) of the open log card
+    logflow: str | None = None       # flow id shown in the log card (packets level)
+    logreq: tuple | None = None      # log card waiting to be read (core runs it)
+    logdata: dict | None = None      # the open log card (core/logs.py load())
     focus: dict = field(default_factory=dict)    # screen index -> box key
     sel: dict = field(default_factory=dict)      # box key -> selected body line
     scroll: dict = field(default_factory=dict)   # box key -> first visible body line
@@ -97,7 +107,8 @@ class UI:
 
     @property
     def overlay(self) -> bool:
-        return self.help or self.detail is not None or self.card is not None
+        return (self.help or self.detail is not None or self.card is not None
+                or self.logcard is not None)
 
     def focused(self) -> str | None:
         keys = [b.key for b in self.boxes]
@@ -122,7 +133,13 @@ class UI:
         elif k in (ord("a"), ord("A")):
             self._ack()
         elif self.overlay:
-            if k in (ord("c"), ord("C")) and self.card is None and self.detail is not None:
+            if self.logcard is not None and self.detail is None and k in ENTER_KEYS:
+                self._log_enter()                    # flows -> packets -> fields
+            elif self.logcard is not None and self.detail is None and k == ord("/"):
+                key = self._log_box()
+                self._typing_box, self._typing_old = key, self.filters.get(key, "")
+                self.typing = self._typing_old       # filter the flows / packets
+            elif k in (ord("c"), ord("C")) and self.card is None and self.detail is not None:
                 self._card()                         # the card of the detail's row
             elif k in ENTER_KEYS and self.card is not None and self.detail is None:
                 self._open()                         # the selected card row's detail
@@ -196,6 +213,13 @@ class UI:
         (one that comes back has a higher count: it shows again anyway)."""
         self.acks = {key: (count, sev) for key, count, sev in self.bar}
 
+    def logs_done(self, req: tuple, data: dict) -> None:
+        """Log card read (core/app.py). A card closed meanwhile: dropped."""
+        if self.logreq == req:
+            self.logreq = None
+        if self.logcard == req:
+            self.logdata = data
+
     def done(self, ip: str, pairs: list) -> None:
         """Lookup finished (core/app.py)."""
         self.whois.pop(ip, None)
@@ -263,9 +287,39 @@ class UI:
         key = self.focused()
         return next((b for b in self.boxes if b.key == key), None)
 
+    def _log_box(self) -> str:
+        return "logflows" if self.logflow is None else "logpkts"
+
+    def _open_logs(self, b) -> None:
+        self.logcard = self.logreq = (b.key.partition("/")[0], b.key, b.logs)
+        self.logflow, self.logdata = None, None
+        for key in ("logflows", "logpkts"):
+            self.sel[key] = self.scroll[key] = 0
+            self.anchor.pop(key, None)
+            self.filters.pop(key, None)
+        self._set_find("")
+        if not self.paused:                      # freeze while reading the card
+            self.paused = self._auto_pause = True
+
+    def _log_enter(self) -> None:
+        """flows: open the selected flow's packets; packets: the selected line's fields."""
+        b = self._box()
+        if b is None or b.lines == 0 or not b.cursor or b.ident is None:
+            return
+        if self.logflow is None and b.key == "logflows":
+            self.logflow = b.ident
+            self.sel["logpkts"] = self.scroll["logpkts"] = 0
+            self.anchor.pop("logpkts", None)
+            self.filters.pop("logpkts", None)
+        else:
+            self._open()
+
     def _open(self) -> None:
         b = self._box()
         if b is None or b.lines == 0 or not b.cursor:
+            return
+        if b.logs and self.logcard is None:      # a counter row: its log card
+            self._open_logs(b)
             return
         self.detail = b.key
         self.sel["detail"] = self.scroll["detail"] = 0
@@ -290,8 +344,18 @@ class UI:
             self.paused = self._auto_pause = True
 
     def _close(self) -> None:
-        if self.card is not None and self.detail is not None:
-            self.detail = None                   # back to the card, still paused
+        if self.logcard is not None and self.detail is None and self.logflow is not None:
+            self.logflow = None                  # packets -> back to the flows
+            self.filters.pop("logpkts", None)
+            return
+        if self.logcard is not None and self.detail is None:
+            self.logcard = self.logreq = self.logdata = None
+            self.filters.pop("logflows", None)
+            if self._auto_pause:
+                self.paused = self._auto_pause = False
+            return
+        if (self.card is not None or self.logcard is not None) and self.detail is not None:
+            self.detail = None                   # back to the card / log card, still paused
             self._set_find("")
             return
         self.help, self.detail, self.card = False, None, None

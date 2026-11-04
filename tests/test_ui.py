@@ -493,5 +493,87 @@ class TestCardKey(unittest.TestCase):
         self.assertEqual((u.card, u.detail, u.hint),
                          (None, "firewall/programs", "c: no program on this line"))
 
+class TestLogCardKeys(unittest.TestCase):
+    """enter on a counter row (logs): log card, enter goes down, Esc back up."""
+
+    REQ = ("firewall", "firewall/counters", "fwd_vm_lan")
+
+    def ui(self):
+        u = UI(3)
+        u.boxes = (BoxInfo("firewall/counters", 3, 3, logs="fwd_vm_lan"),)
+        u.focus[0] = "firewall/counters"
+        return u
+
+    def test_down_and_back_up(self):
+        u = self.ui()
+        u.key(10)
+        self.assertEqual((u.logcard, u.logreq, u.detail, u.paused), (self.REQ, self.REQ, None,
+                                                                     True))
+        u.logs_done(self.REQ, {"lines": 1})
+        self.assertEqual((u.logreq, u.logdata), (None, {"lines": 1}))
+        u.boxes = (BoxInfo("logflows", 2, 2, sel=1, ident="tcp|a|b|virbr0>wlo1|vm"),)
+        u.key(10)                                        # a flow: its packets
+        self.assertEqual((u.logflow, u.detail), ("tcp|a|b|virbr0>wlo1|vm", None))
+        u.boxes = (BoxInfo("logpkts", 5, 5, sel=2, ident="c3"),)
+        u.key(10)                                        # a packet: its fields
+        self.assertEqual(u.detail, "logpkts")
+        u.boxes = (BoxInfo("detail", 9, 9, cursor=False),)
+        u.key(ESC)                                       # fields -> packets
+        self.assertEqual((u.detail, u.logflow), (None, "tcp|a|b|virbr0>wlo1|vm"))
+        u.boxes = (BoxInfo("logpkts", 5, 5, sel=2, ident="c3"),)
+        u.key(ESC)                                       # packets -> flows
+        self.assertEqual((u.logcard, u.logflow), (self.REQ, None))
+        u.boxes = (BoxInfo("logflows", 2, 2),)
+        u.key(ESC)                                       # flows -> closed, resumes
+        self.assertEqual((u.logcard, u.logdata, u.paused), (None, None, False))
+
+    def test_q_backs_out_too(self):
+        u = self.ui()
+        u.key(10)
+        u.boxes = (BoxInfo("logflows", 2, 2),)
+        self.assertTrue(u.key(ord("q")))                 # closes, never quits from the card
+        self.assertIsNone(u.logcard)
+
+    def test_row_without_logs_opens_the_detail(self):
+        u = UI(3)
+        u.boxes = (BoxInfo("firewall/counters", 3, 3),)
+        u.key(10)
+        self.assertEqual((u.logcard, u.detail), (None, "firewall/counters"))
+
+    def test_filter_flows_then_packets(self):
+        u = self.ui()
+        u.key(10)
+        u.boxes = (BoxInfo("logflows", 2, 2, ident="f1"),)
+        for k in "/icmp":
+            u.key(ord(k))
+        u.key(10)
+        self.assertEqual(u.filters.get("logflows"), "icmp")
+        u.key(10)                                        # enter after typing: down
+        self.assertEqual(u.logflow, "f1")
+        u.boxes = (BoxInfo("logpkts", 2, 2, ident="p1"),)
+        for k in "/SYN":
+            u.key(ord(k))
+        u.key(10)
+        self.assertEqual(u.filters.get("logpkts"), "SYN")
+        u.key(ESC)                                       # back up: packet filter gone
+        self.assertNotIn("logpkts", u.filters)
+        self.assertEqual(u.filters.get("logflows"), "icmp")
+
+    def test_empty_table_enter_does_nothing(self):
+        u = self.ui()
+        u.key(10)
+        u.boxes = (BoxInfo("logflows", 0, 2),)
+        u.key(10)
+        self.assertIsNone(u.logflow)
+
+    def test_late_result_of_a_closed_card(self):
+        u = self.ui()
+        u.key(10)
+        u.boxes = (BoxInfo("logflows", 2, 2),)
+        u.key(ESC)
+        u.logs_done(self.REQ, {"lines": 1})
+        self.assertIsNone(u.logdata)
+
+
 if __name__ == "__main__":
     unittest.main()

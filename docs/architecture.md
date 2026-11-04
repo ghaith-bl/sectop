@@ -74,6 +74,21 @@ Who talks to what, both ways, on the firewall screen.
 - Actions phase: block key = destination into a hostfw block set with timeout
   (hostfw can only tighten).
 
+## Log cards (2026-11-04)
+
+`enter` on a hostfw counter: every line of that rule this boot, flows -> packets -> fields
+(docs/modules/firewall.md, Counter card). Read in the UI process, as my user (journal
+readable: tested 2026-11-04, `journalctl -k -b -n 1 -g '^HFW-'` without sudo), once when
+the card opens, never on a tick. An exception to "the UI never collects", on purpose:
+- on key press only, like whois; nothing runs while the card is closed
+- fixed argv (core.run.run: absolute path, root-owned binary, no shell, timeout, size
+  cap), the grep pattern built from the row's rule name, which must match
+  `[a-z][a-z0-9_]{0,39}`; no typed text reaches the command
+- the same kernel lines the collector already reads (kernel-formatted fields, the same
+  parser: modules/firewall/journal.py); shown through sanitize.display() like all text
+- not via the collector: the channel stays one-way (the UI never writes to it)
+- Blocks the UI up to 5 s (3000 lines max).
+
 ## Lookups (whois)
 
 Read-only, on key press only: `w` = RDAP lookup of the selected address

@@ -47,6 +47,7 @@ MIN_INTERVAL = 1.0
 NAME_RE = re.compile(r"[a-z0-9_]+")
 PICK_RE = re.compile(r"[ -~]{1,60}")    # row filter: printable ASCII, the filter prompt's chars
 PROG_RE = re.compile(r"[\x21-\x7e]{1,64}")         # row progs: program names (core/proc.py)
+LOGS_RE = re.compile(r"[a-z][a-z0-9_]{0,39}")      # row logs: rule name (core/logs.py)
 MAX_PROGS = 5
 KEY_RE = re.compile(r"[A-Za-z0-9_.:/@%+-]{1,128}")    # check key: rule + subject
 
@@ -194,6 +195,11 @@ def _table(p: dict, w: str) -> dict:
                 raise InvalidSnapshot(f"{wr}.progs: 1..{MAX_PROGS} names of 1..64 printable "
                                       "ASCII chars, no space, required")
             row["progs"] = list(v)
+        if "logs" in r:                  # enter = log card of this rule (core/logs.py)
+            v = r["logs"]
+            if not isinstance(v, str) or not LOGS_RE.fullmatch(v):
+                raise InvalidSnapshot(f"{wr}.logs: rule name [a-z][a-z0-9_]{{0,39}} required")
+            row["logs"] = v
         if "detail" in r:
             row["detail"] = _detail(r, wr)
         rows.append(row)

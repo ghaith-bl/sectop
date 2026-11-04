@@ -201,6 +201,26 @@ class TestLookupStep(unittest.TestCase):
                                                          {"8.8.8.8": [("name", "X")]}))
 
 
+class TestLogsStep(unittest.TestCase):
+    def test_step(self):
+        from core.ui import UI
+        ui = UI(3)
+        calls = []
+        self.assertFalse(app.step_logs(ui, [], lambda req, view: calls.append(req)))
+        req = ("firewall", "firewall/counters", "out_dns")
+        ui.logcard = ui.logreq = req
+        self.assertTrue(app.step_logs(ui, ["v"], lambda r, v: calls.append((r, v)) or {"x": 1}))
+        self.assertEqual((calls, ui.logreq, ui.logdata), ([(req, ["v"])], None, {"x": 1}))
+
+    def test_closed_meanwhile(self):
+        from core.ui import UI
+        ui = UI(3)
+        req = ("firewall", "firewall/counters", "out_dns")
+        ui.logreq = req                               # card closed before the read ran
+        app.step_logs(ui, [], lambda r, v: {"x": 1})
+        self.assertEqual((ui.logreq, ui.logdata), (None, None))
+
+
 class TestMain(unittest.TestCase):
     def run_main(self, argv, cfg=None, euid=1000):
         cfg = cfg or types.SimpleNamespace(mask_public_ips=True)

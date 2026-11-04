@@ -511,10 +511,13 @@ def _counter_panel(st: State, counters: dict | None, deltas: dict, now: float,
             continue                                          # zero counters hidden
         until, sev = st.held.get(name, (0, None))
         sev = sev if until > now else None
-        rows.append({"cells": [name, str(pkts), f"+{deltas[name]}" if deltas[name] else "",
-                               _human(nbytes)], "sev": sev or "ok",
-                     "tone": _tone(_verdict(name, live, st.noscope)),
-                     "detail": _counter_detail(st, name, nbytes, live)})
+        row = {"cells": [name, str(pkts), f"+{deltas[name]}" if deltas[name] else "",
+                         _human(nbytes)], "sev": sev or "ok",
+               "tone": _tone(_verdict(name, live, st.noscope)),
+               "detail": _counter_detail(st, name, nbytes, live)}
+        if name not in NOT_LOGGED:
+            row["logs"] = name                   # enter = log card (modules/firewall/logcard.py)
+        rows.append(row)
     zero = len(counters) - len(rows)
     title = "hostfw counters" + (f"  ({zero} zero hidden)" if zero else "")
     return {"id": "counters", "title": title, "type": "table",

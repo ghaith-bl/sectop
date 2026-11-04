@@ -67,6 +67,8 @@ Public IPs masked (key m), the way the screens start.
 - w: whois (RDAP) of the selected IP, by a socket service with its own dynamic user
 - c: program card, every row of every screen that belongs to the selected row's program
   (firewall flows, root commands, logins, SELinux denials, logs)
+- enter on a hostfw counter: its log card, every line it logged this boot as flows, then
+  the packets of a flow, then every field of a packet (counted vs logged in the head)
 
 ## Modules
 

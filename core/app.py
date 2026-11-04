@@ -7,7 +7,8 @@ collector; ack stays here (core/ui.py). No update for a while or a bad
 file -> a crit alert "collector: ..." on top of the last good data.
 
 v1: single thread. Each loop: read the state file if it changed, draw,
-wait for a key (TICK_MS). whois: core/lookup.py (socket service).
+wait for a key (TICK_MS). whois: core/lookup.py (socket service). Log card: core/logs.py
+(one journal query on enter, after the frame that says 'reading').
 
 Run: sectop [SCREEN]   (launcher /usr/local/bin/sectop, docs/install.md)
 SCREEN = name or number from core/screens.py, default 1.
@@ -22,6 +23,7 @@ import sys
 import time
 
 from core import config as configmod
+from core import logs as logsmod
 from core import lookup as lookupmod
 from core import render, statefile
 from core.sanitize import display
@@ -161,6 +163,15 @@ def step_lookup(ui: UI, lookup=lookupmod.lookup) -> bool:
     return True
 
 
+def step_logs(ui: UI, view: list, load=logsmod.load) -> bool:
+    """Read the log card the UI asked for (blocks up to the query timeout). True if one ran."""
+    req = ui.logreq
+    if req is None:
+        return False
+    ui.logs_done(req, load(req, view))
+    return True
+
+
 def _ui(stdscr, reader: Reader, ui: UI) -> None:
     """Full redraw only after a new state or a stale flip (not while paused) or
     a key (incl. resize); otherwise just the clock once a second. A whois runs
@@ -184,6 +195,10 @@ def _ui(stdscr, reader: Reader, ui: UI) -> None:
             render.draw_top(stdscr, SCREENS, ui, now)
             shown = int(now)
         if step_lookup(ui):
+            dirty = True
+            continue
+        if ui.logreq is not None:
+            step_logs(ui, frozen[0] if frozen else reader.current(time.time())[0])
             dirty = True
             continue
         key = stdscr.getch()

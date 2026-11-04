@@ -526,6 +526,14 @@ class TestCollect(Base):
         counters = next(p for p in s["panels"] if p["id"] == "counters")
         self.assertEqual(counters["title"], "hostfw counters  (11 zero hidden)")
 
+    def test_counter_rows_open_the_log_card(self):
+        rows = self.panel(self.collect(), "counters")["rows"]
+        logs = {r["cells"][0]: r.get("logs") for r in rows}
+        self.assertEqual(logs["out_leak"], "out_leak")
+        self.assertEqual(logs["in_noise"], "in_noise")             # noise too
+        for name in fw.NOT_LOGGED & set(logs):                     # no lines: plain detail
+            self.assertIsNone(logs[name])
+
     def test_counters_first_tick_no_alarm(self):
         s = self.collect()
         rows = next(p for p in s["panels"] if p["id"] == "counters")["rows"]

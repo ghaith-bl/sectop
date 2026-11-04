@@ -287,12 +287,41 @@ Title: `peers <addresses>  <sockets> open`, `(ss: <error>)` if ss failed.
 
 ## Counter detail
 
-`enter` on a counter row: meaning (hostfw rule comment), match (from hostfw
+Row detail of a counter: meaning (hostfw rule comment), match (from hostfw
 `docs/rules.md`, kept in `MATCH`), verdict, what new packets do (alert key, severity,
 hold; `no alert` for allowed and hidden kinds), log rate,
 exact bytes, since (table load), then the last 10 log lines of that kind since sectop
-started (also in_noise, which is hidden elsewhere). out_dns_vpn / out_wg / out_vpn_api are
-counted only, never logged: no lines.
+started (also in_noise, which is hidden elsewhere). Searched by `/`, shown by `enter` only
+for out_dns_vpn / out_wg / out_vpn_api (counted only, never logged: no lines, no card).
+
+## Counter card (log card, 2026-11-04)
+
+`enter` on any other counter row (row `logs` = the counter name, in_noise too): every
+line hostfw logged for it this boot, read when the card opens (modules/firewall/logcard.py,
+in the UI process, core/logs.py). Why: the detail had 10 lines since sectop started, no
+order; host 2026-11-04 `fwd_vm_lan 20` needed `journalctl -g` to see what they were.
+
+- Query: `journalctl -b 0 _TRANSPORT=kernel -o json --output-fields=MESSAGE -q
+  --no-pager --grep=^HFW-<RULE>: -n 3000`, 5 s, 4 MiB. The rule must match
+  `[a-z][a-z0-9_]{0,39}` (no typed text in the argv). Newest 3000 lines; a cut read or
+  bad lines: said in the card head (warn color).
+- Head: `counted N` (counter, since the hostfw table load) vs `logged M` (lines, this
+  boot), then what the difference means (N > M: rate limit, the rest counted only;
+  N < M: table reloaded this boot), verdict (rule's severity color), meaning, match.
+- Flows (box `logflows`): one row per proto, src, dst, iface, uid (journal.flow(): the
+  ephemeral port left out), newest first. Cols: last, first, n, proto (`icmp 8 echo`,
+  `icmpv6 135 neighbor solicit`), src, dst, iface (`virbr0>wlo1`), uid (`vm` for VM
+  kinds). Row detail: lines, first, last, source ports seen (first 20).
+- Packets (enter on a flow, box `logpkts`): every line of the flow, oldest first. Head:
+  the flow, count, first / last. Cols: time, proto, src:port, dst:port, TCP flags, len,
+  ttl, iface.
+- Fields (enter on a packet): rule, verdict, full time, then every field with a label
+  (`source port (SPT)`). Colors: addresses, ports, proto, ifaces, uid in the value color,
+  flags orange (high), verdict in the rule's severity color (allowed: cyan).
+- Row colors as the counter row: sev = the kind's severity (allowed: ok), tone = the
+  verdict (allow blue, block yellow), in_noise dim. Mask on: public IPs masked in the
+  tables, real in the fields (like every detail). `w` on a flow / packet: whois of the far
+  side. `/` filters flows / packets. Esc goes one level up, then closes.
 
 ## out_leak box
 

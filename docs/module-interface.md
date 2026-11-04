@@ -126,6 +126,11 @@ Row `id` optional (str): stable key of the row (e.g. a grouped flow). The cursor
 it when the row moves or its text changes. Not shown.
 Row `filter` optional (str, 1..60 printable ASCII, not blank): filter text for keys `f` /
 `x` on that row (e.g. a program name). Not shown.
+Row `logs` optional (str, `[a-z][a-z0-9_]{0,39}`): a rule name. `enter` on the row opens
+its log card instead of the detail: core/logs.py runs the module's card builder (static
+map `CARDS`, firewall: modules/firewall/logcard.py) in the UI process, once, on enter.
+The row's second cell and its detail (verdict, meaning, match, log) go into the card head.
+Not shown (2026-11-04).
 Row `progs` optional (list of 1..5 str, each 1..64 printable ASCII without space): the
 programs the row belongs to (core/proc.py names: unit / app id of the cgroup). Key `c`
 opens the card of the first one, on the row or in its detail (2026-10-27); on a line
@@ -321,7 +326,8 @@ A condition that is not true any more is left out.
   Resume shows the current view.
 - Keys: `1-9` screen; `tab` / right / `l` next box, `shift-tab` / left / `h` previous box;
   down / up / `j` `k` line; `space` `PgDn` / `PgUp` page; `g` `G` / `Home` `End` first / last;
-  `enter` detail; `/` filter (in a detail: search, `n` `N` next / previous match);
+  `enter` detail (a row with `logs`: its log card); `/` filter (in a detail: search, `n`
+  `N` next / previous match);
   `Esc` clear filter; `f` follow; `x` hide; `c` card; `w` whois; `a` ack; `p` pause;
   `m` mask; `?` help; `q` quit.
 - Card (`c`, on a row with `progs`): a table overlay (box key `card`) with every table

@@ -1120,6 +1120,91 @@ class TestCard(unittest.TestCase):
         self.assertNotIn("card", self.ui.filters)                # a new card: no filter
 
 
+class TestLogCard(unittest.TestCase):
+    """enter on a hostfw counter: flows, enter: packets, enter: fields (2026-11-04)."""
+
+    def setUp(self):
+        from tests import test_logcard as tl
+        self.tl = tl
+        self.fw = mod()
+        self.fw["panels"].insert(1, {
+            "id": "counters", "title": "hostfw counters", "type": "table", "sev": "ok",
+            "columns": ["counter", "pkts", "new", "bytes"],
+            "types": ["text", "num", "num", "num"],
+            "rows": [{"cells": ["fwd_vm_lan", "20", "", "1.3K"], "sev": "ok", "tone": "yellow",
+                      "logs": "fwd_vm_lan",
+                      "detail": [{"k": k, "v": v} for k, v in tl.INFO.items() if k != "pkts"]}]})
+        self.ui = UI(len(SCR))
+        self.ui.focus[0] = "firewall/counters"
+        self.draw()
+
+    def draw(self):
+        f = frame([self.fw], ui=self.ui, now=1100.0, width=120, height=50)
+        self.ui.update(f)
+        return f
+
+    def test_down_to_the_fields_and_back(self):
+        from core import logs
+        self.ui.key(10)
+        f = self.draw()
+        self.assertTrue(find(f.lines, "reading this boot's journal lines of the counter"))
+        self.assertEqual(self.ui.logreq, ("firewall", "firewall/counters", "fwd_vm_lan"))
+        self.ui.logs_done(self.ui.logreq, logs.load(self.ui.logreq, [self.fw],
+                                                    run=self.tl.Run(self.tl.ok(
+                                                        self.tl.host_lines()))))
+        f = self.draw()
+        self.assertTrue(find(f.lines, "log card: HFW-FWD-VM-LAN   2 flows, 20 lines this boot"))
+        self.assertTrue(find(f.lines, "counted 20 packets"))
+        self.assertTrue(find(f.lines, "every counted packet has its line"))
+        self.assertEqual(part(f.lines, "verdict  block")[1], "warn")
+        row = find(f.lines, "10.96.0.1:443")[0]
+        self.assertIn("17", row)
+        self.assertTrue(find(f.lines, "enter open  / filter  w whois  Esc back"))
+        self.ui.key(10)                                      # newest flow: the SYNs
+        f = self.draw()
+        self.assertEqual(self.ui.logflow, "tcp|192.168.122.122|10.96.0.1:443|virbr0>wlo1|vm")
+        self.assertTrue(find(f.lines, "log card: HFW-FWD-VM-LAN > flow   17 packets   enter = "
+                                      "fields"))
+        self.assertTrue(find(f.lines, "flow  tcp 192.168.122.122 -> 10.96.0.1:443"))
+        self.assertTrue(find(f.lines, "192.168.122.122:40016"))
+        self.ui.key(10)                                      # first packet: its fields
+        f = self.draw()
+        self.assertEqual(self.ui.detail, "logpkts")
+        self.assertEqual(part(f.lines, "source port (SPT)")[1], "name")
+        self.assertEqual(part(f.lines, "40000")[1], "value")
+        self.assertEqual(part(f.lines, "DF SYN")[1], "high")
+        self.assertFalse(find(f.lines, "severity"))          # fields only, no cell copy
+        for _ in range(2):
+            self.ui.key(27)
+            self.draw()
+        self.assertEqual((self.ui.logflow, self.ui.detail), (None, None))
+        self.ui.key(27)
+        self.draw()
+        self.assertEqual((self.ui.logcard, self.ui.paused), (None, False))
+
+    def test_error_note(self):
+        self.ui.key(10)
+        self.ui.logs_done(self.ui.logreq, {"error": "log card: ValueError: bad"})
+        f = self.draw()
+        self.assertTrue(find(f.lines, "log card: ValueError: bad"))
+
+    def test_mask_in_the_table_real_in_the_fields(self):
+        from core import logs
+        self.ui.key(10)
+        self.ui.logs_done(self.ui.logreq, logs.load(self.ui.logreq, [self.fw],
+                                                    run=self.tl.Run(self.tl.ok(
+                                                        self.tl.host_lines()))))
+        f = self.draw()
+        self.assertTrue(find(f.lines, "1.1.x.x"))            # mask on: public IP masked
+        self.ui.key(ord("j"))
+        self.draw()
+        self.ui.key(10)
+        self.draw()
+        self.ui.key(10)
+        f = self.draw()
+        self.assertTrue(find(f.lines, "1.1.1.1"))            # fields: real, like any detail
+
+
 class TestSparkColumn(unittest.TestCase):
     def table(self, cell):
         return {"v": 1, "status": "ok", "summary": "", "events": [], "panels": [

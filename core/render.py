@@ -102,6 +102,9 @@ HELP = (
     ("Esc", "clear the filter of the focused table"),
     ("f", "on a row with a filter (programs): filter the other tables of the screen to "
           "it; again: clear"),
+    ("enter  (hostfw counter)", "log card: every logged line of the counter this boot, as "
+                                "flows; enter = the packets of a flow, enter = all fields "
+                                "of a packet, Esc back"),
     ("c", "program card: every row of every screen with the selected row's program "
           "(rows that know their program; on the row or in its detail); select a row, "
           "enter = its detail"),
@@ -121,6 +124,7 @@ FOOTER_DETAIL = (" up down PgUp PgDn scroll  g G Home End top / end  / search  n
                  "w whois  Esc close")
 FOOTER_HELP = " up down PgUp PgDn scroll  g G Home End top / end  Esc close"
 FOOTER_CARD = " up down j k select  enter detail (Esc back to the card)  / filter  Esc close"
+FOOTER_LOGS = " up down j k select  enter open  / filter  w whois  Esc back"
 FILTER_MAX = 60
 
 _ATTR = {}                                   # style -> curses attr, set in setup()
@@ -140,6 +144,7 @@ class BoxInfo:
     pick: str | None = None    # row filter of the selected line (f follow, x hide)
     mark: int | None = None    # detail search: pair index of the current match
     progs: tuple = ()          # program names of the selected line (c = card)
+    logs: str | None = None    # rule of the selected line (enter = log card)
 
 
 @dataclass(frozen=True)
@@ -453,6 +458,8 @@ def _footer(n_screens: int, width: int, ui=None) -> list:
         return _line(width, False, (" " + hint, "info"))
     if detail:
         return _line(width, False, (FOOTER_DETAIL, "note"))
+    if getattr(ui, "logcard", None) is not None:
+        return _line(width, False, (FOOTER_LOGS, "note"))
     if getattr(ui, "card", None) is not None:
         return _line(width, False, (FOOTER_CARD, "note"))
     if getattr(ui, "help", False):
@@ -562,7 +569,7 @@ class _Box:
             gaps = 2 * (len(widths) - 1)
             self.w = max(TABLE_MIN, sum(widths) + gaps)
             self.least = min(self.w, max(TABLE_MIN, sum(floors) + gaps))
-            self.h = 1 + max(1, len(rows))
+            self.h = len(d.get("head", ())) + 1 + max(1, len(rows))
         elif self.kind == "spark":
             self.w, self.h = SPARK_W, 1
             self.least = SPARK_W
@@ -630,7 +637,9 @@ class _Box:
 
             body = [_line(w, mask, _glyph(r["sev"]), *parts(cells, r))
                     for cells, r in zip(rows, self.view)]
-            return [header()], body or dash
+            notes = [_line(w, mask, (" " * GLYPH_W, "plain"), (t, st))
+                     for t, st in d.get("head", ())]      # log card: counted vs logged
+            return notes + [header()], body or dash
         if self.kind == "spark":
             return [], [_spark(d, w, mask)]
         if self.kind == "feed":
@@ -648,6 +657,9 @@ class _Box:
             it = d["items"][i]
             return [(it["k"], it["v"], _pair_style(it["sev"])),
                     ("severity", it["sev"], _sev_word(it["sev"]))]
+        if self.kind == "table" and i < len(self.view) and d.get("detail_only"):
+            return [(it["k"], it["v"], it.get("style") or _pair_style(it.get("sev", "ok")))
+                    for it in self.view[i].get("detail", ())]    # log card packet: fields
         if self.kind == "table" and i < len(self.view):
             r = self.view[i]
             # a problem row: its own cells in its severity color, so the eye lands there
@@ -656,7 +668,8 @@ class _Box:
                 d["columns"], r["cells"], self.types())]
             out.append(("severity", r["sev"], _sev_word(r["sev"])))
             if r.get("detail"):
-                out += [("", "")] + [(it["k"], it["v"], _pair_style(it.get("sev", "ok")))
+                out += [("", "")] + [(it["k"], it["v"], it.get("style")
+                                      or _pair_style(it.get("sev", "ok")))
                                      for it in r["detail"]]
             return out
         if self.kind == "spark" and d["values"]:
@@ -694,6 +707,11 @@ class _Box:
         if self.kind == "detail":                # c in a detail: the card of its row
             return tuple(getattr(self, "src_progs", ()))
         return ()
+
+    def logs_at(self, i: int) -> str | None:
+        if self.kind == "table" and 0 <= i < len(self.view):
+            return self.view[i].get("logs")
+        return None
 
     def pick_at(self, i: int) -> str | None:
         if self.kind == "table" and 0 <= i < len(self.view):
@@ -841,10 +859,46 @@ def _card(view: list, prog: str, stampfmt=_stamp) -> tuple:
     return panel, len(rows), n_boxes
 
 
+def _logcard(ui, ref, tsfmt, stampfmt):
+    """The open log card's box: flows, the packets of one flow, or a note (reading /
+    failed / flow gone)."""
+    data = getattr(ui, "logdata", None)
+    rule = ui.logcard[2]
+    if data is None:
+        return _Box("lognote", f"log card: {rule}   Esc close", "ok", "note",
+                    ["reading this boot's journal lines of the counter ..."])
+    if "error" in data:
+        return _Box("lognote", f"log card: {rule}   Esc close", "ok", "note", [data["error"]])
+    flow = getattr(ui, "logflow", None)
+    if flow is None:
+        n = len(data["flows"]["rows"])
+        title = (f"log card: {data['code']}   {n} flow{'s' if n != 1 else ''}, "
+                 f"{data['lines']} lines this boot"
+                 + ("" if ui.detail == "logflows" else "   enter = packets"))
+        key, panel = "logflows", data["flows"]
+    else:
+        panel = data["packets"].get(flow)
+        if panel is None:
+            return _Box("lognote", f"log card: {rule}   Esc back", "ok", "note", ["flow gone"])
+        n = len(panel["rows"])
+        title = (f"log card: {data['code']} > flow   {n} packet{'s' if n != 1 else ''}"
+                 + ("" if ui.detail == "logpkts" else "   enter = fields"))
+        key = "logpkts"
+    box = _Box(key, title, "ok", "table", panel)
+    box.ref, box.tsfmt, box.stampfmt = ref, tsfmt, stampfmt
+    box.filt = getattr(ui, "filters", {}).get(key, "")
+    return box
+
+
 def _overlay(boxes: list, ui, mask: bool, tsfmt, view=(), ref=None, stampfmt=_stamp):
-    """Help, detail or card box instead of the grid, or None."""
+    """Help, detail, card or log card box instead of the grid, or None."""
     if ui.help:
         return _Box("help", "keys", "ok", "note", [f"{k:<22}{v}" for k, v in HELP])
+    if getattr(ui, "logcard", None) is not None:
+        lbox = _logcard(ui, ref, tsfmt, stampfmt)
+        if ui.detail is None or ui.detail != lbox.key:
+            return lbox                          # a table: select, / filter, enter down
+        boxes = [lbox]
     card = getattr(ui, "card", None)
     if card is not None:
         panel, n, nb = _card(view, card, stampfmt)
@@ -1136,7 +1190,7 @@ def _grid(boxes: list, ui, width: int, room: int, mask: bool, tsfmt, pref) -> tu
             infos.append(BoxInfo(b.key, len(body), vis, sel, off,
                                  ids[sel] if ids and b.cursor else None, b.cursor,
                                  b.filterable, b.ip_at(sel), b.pick_at(sel), mark,
-                                 b.progs_at(sel)))
+                                 b.progs_at(sel), b.logs_at(sel)))
             on = b.key == focus
             left = _title(b, on and b.cursor, mask)
             titles.append((x, left, max(0, cw - 3)))

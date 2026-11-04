@@ -241,6 +241,16 @@ class TestValidate(unittest.TestCase):
             s2["panels"][1]["rows"][0]["filter"] = bad
             self.assertInvalid(s2)
 
+    def test_row_logs(self):
+        s = snap()
+        s["panels"][1]["rows"][0]["logs"] = "fwd_vm_lan"
+        self.assertEqual(validate(s)["panels"][1]["rows"][0]["logs"], "fwd_vm_lan")
+        self.assertNotIn("logs", validate(snap())["panels"][1]["rows"][0])
+        for bad in ("", "FWD", "fwd-vm", "1x", "a" * 41, "x;y", "x y", 1, None):
+            s2 = snap()
+            s2["panels"][1]["rows"][0]["logs"] = bad
+            self.assertInvalid(s2)
+
     def test_rows_cut(self):
         s = snap()
         s["panels"][1]["rows"] = [{"cells": ["a", "b"]}] * 1000
