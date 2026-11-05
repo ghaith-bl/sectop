@@ -234,7 +234,11 @@ class TestSocket(unittest.TestCase):
         self.assertEqual(pairs[-2][0], "source")
 
     def test_too_large_and_timeout(self):
-        path = self.serve(lambda conn: conn.sendall(b"x" * (lookup.MAX_ANSWER + 10)))
+        def big(conn):                                   # read the request first: a close
+            conn.recv(64)                                # before ask() sent = EPIPE (race)
+            conn.sendall(b"x" * (lookup.MAX_ANSWER + 10))
+
+        path = self.serve(big)
         with self.assertRaises(ValueError):
             lookup.ask(path, "8.8.8.8", 5.0)
         ev = threading.Event()
