@@ -75,7 +75,7 @@ IFACE_RE = netd.IFACE_RE
 
 # hostfw counter / log kind -> severity. None = hidden (counter only, no event).
 SEV = {
-    "out_leak": "crit",
+    "out_leak": "crit", "out_split": "crit",
     "out_dns": "warn", "in_lan": "warn", "in_vpn": "warn", "out_noscope": "warn",
     "fwd_vm_lan": "warn", "fwd_in": "warn",
     "out_disco": "info", "out_share": "info", "out_lan": "info",
@@ -86,6 +86,8 @@ ALLOWED = {"out_dns_vpn", "out_wg", "out_vpn_api", "out_router_admin", "out_lan_
            "out_new", "fwd_vm_new"}
 AUDIT_ONLY = {"out_new", "fwd_vm_new"}          # every new flow: audit box, no event
 LOG_ONLY = {"in_noise", "in_lan", "in_vpn"}     # hostfw logs, firewalld zone decides
+# rejected in every mode: their deny chain has its own reject, no jump enforce
+ALWAYS_BLOCK = {"out_split"}
 AUDIT_COLUMNS = ["last", "n", "dir", "verdict", "proto", "uid", "prog", "src", "dst", "iface"]
 LEAK_COLUMNS = ["age", "uid", "proto", "dst", "iface", "context"]
 PEER_COLUMNS = ["peer", "open", "new", "drop", "prog", "last"]
@@ -138,6 +140,9 @@ MATCH = {
     "out_leak": "anything else leaving on the uplink (not tunnel transport, DHCP, router)",
     "out_noscope": "new flows from GNOME Shell's cgroup (set noscope_cg): an app without "
                    "its own scope; own switch (hostfw noscope)",
+    "out_split": "VPN split tunneling (ct mark 0xf41, or the relay mark on a non-root "
+                 "socket: mullvad-exclude) not to a VM bridge: a program tried to leave "
+                 "the tunnel; rejected in every mode",
     "fwd_vm_lan": "VM traffic to LAN / uplink (not via the tunnel)",
     "fwd_in": "new forwarded traffic not from a VM",
     "in_noise": "LAN broadcast / multicast to the host (not via the tunnel)",
@@ -652,6 +657,8 @@ def _verdict(kind: str, live: str, noscope: str = "unknown") -> str:
         return "allow"
     if kind in LOG_ONLY:
         return "zone"
+    if kind in ALWAYS_BLOCK:
+        return "block"
     if kind == "out_noscope":
         live = noscope
     return {"enforce": "block", "observe": "pass"}.get(live, "deny")

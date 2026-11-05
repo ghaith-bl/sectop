@@ -721,6 +721,26 @@ class TestCollect(Base):
         self.assertEqual(fw._verdict("out_noscope", "observe", "enforce"), "block")
         self.assertEqual(fw._verdict("out_leak", "observe", "enforce"), "pass")
 
+    def test_split_always_blocked(self):
+        """out_split (hostfw 2026-11-05): split tunneling (mullvad-exclude, setuid) off the
+        VM bridges; rejected in every mode, still red: someone tried to leave the tunnel."""
+        self.add_counters("out_split")
+        for live in ("observe", "enforce", "?"):
+            self.assertEqual(fw._verdict("out_split", live), "block", live)
+        self.assertEqual(fw.kind_sev("out_split"), "crit")
+        self.collect()
+        self.tick()
+        self.bump("out_split", 1)
+        self.host.set("journalctl", ok(jline(
+            "sp1", self.wall - 1, "HFW-OUT-SPLIT: IN= OUT=wlp0s20f3 SRC=192.168.1.20 "
+            "DST=198.51.100.7 LEN=60 PROTO=TCP SPT=40100 DPT=443 SYN UID=1000 GID=1000 ")))
+        s = self.collect()
+        c = self.check(s, "new:out_split")
+        self.assertEqual((c["sev"], c["n"]), ("crit", 1))
+        self.assertIn("mullvad-exclude", c["detail"])
+        flow = self.panel(s, "audit")["rows"][0]
+        self.assertEqual(flow["cells"][2:4], ["out", "block"])
+
     def test_counter_reset(self):
         self.collect()
         self.tick()

@@ -110,7 +110,7 @@ Log kind = counter name: `HFW-OUT-LEAK` -> `out_leak`, `HFW-FWD-VM-LAN` -> `fwd_
 
 | sev | kinds |
 |---|---|
-| crit | out_leak (warn when blocked: enforce, 2026-11-04) |
+| crit | out_leak (warn when blocked: enforce, 2026-11-04), out_split (always blocked, still crit) |
 | warn | out_dns, in_lan, in_vpn, fwd_vm_lan, fwd_in, out_noscope |
 | info | out_disco, out_share, out_lan, unknown kinds |
 | hidden | in_noise (counter only, no event, no audit row) |
@@ -137,6 +137,11 @@ Log kind = counter name: `HFW-OUT-LEAK` -> `out_leak`, `HFW-FWD-VM-LAN` -> `fwd_
     to (an allowed flow logged, or a socket open now): late replies after a flow closed.
     No line this tick (rate limit, lag) -> warn, source unknown.
 - Counter lower than last tick (table reloaded) -> its new value counts as new.
+- out_split (hostfw 2026-11-05): split tunneling (ct mark 0xf41, or the relay mark on a
+  non-root socket: `mullvad-exclude` is setuid root, any local user can run a program
+  outside the tunnel) not to a VM bridge.
+  Own reject in hostfw, no `jump enforce`: verdict `block` in every mode (ALWAYS_BLOCK).
+  crit all the same: blocked, but someone tried to leave the tunnel.
 - out_noscope (hostfw 2026-11-03): new flows from GNOME Shell's cgroup (an app without
   its own scope). Own switch in hostfw, chain `enforce_noscope` (`hostfw noscope observe
   | enforce`), read from the same table (`nft.mode(text, "enforce_noscope")`): verdict
