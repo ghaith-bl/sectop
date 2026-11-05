@@ -4,6 +4,8 @@
 # Kinds and keys: docs/modules/posture.md. No commands in this file: each kind is code.
 # sev = severity when the check fails. Red (crit) + alert only when a protection is off
 # (decided 2026-10-25). ref = accepted deviation: shown dim, no alert.
+# "@admin": install.sh puts the installing (sudo) user here, the admin account
+# (account split 2026-11-05). Copied by hand: replace it with your admin user.
 
 # ---- SELinux ----
 
@@ -107,7 +109,7 @@ kind = "group"
 sev = "crit"
 why = "wheel (sudo) members"
 group = "wheel"
-want = ["null"]
+want = ["@admin"]
 
 [[check]]
 id = "su-group"
@@ -115,6 +117,26 @@ kind = "group"
 sev = "warn"
 why = "su closed: sugroup empty"
 group = "sugroup"
+want = []
+
+# account split (2026-11-05): group sectop reads the collector's state and asks the
+# whois socket, admin only; sectop-feed (user helper -> collector) is a unit Group=,
+# never a member list.
+
+[[check]]
+id = "sectop-group"
+kind = "group"
+sev = "warn"
+why = "sectop readers: the admin only"
+group = "sectop"
+want = ["@admin"]
+
+[[check]]
+id = "sectop-feed"
+kind = "group"
+sev = "warn"
+why = "sectop-feed without members (helper unit Group= only)"
+group = "sectop-feed"
 want = []
 
 [[check]]
@@ -481,6 +503,15 @@ why = "Mullvad daemon socket only for group mullvad"
 path = "/run/mullvad-vpn"
 mode = "760"
 owner = "root:mullvad"
+
+# socket access = full daemon control (disconnect, lockdown off): admin only (2026-11-05)
+[[check]]
+id = "mullvad-group"
+kind = "group"
+sev = "warn"
+why = "Mullvad daemon control (group mullvad): the admin only"
+group = "mullvad"
+want = ["@admin"]
 
 # ---- time (silverblue-cis-hardening time, 2026-10-31) ----
 # chrony with NTS only (Netnod + PTB). authselectmode require: a source without NTS

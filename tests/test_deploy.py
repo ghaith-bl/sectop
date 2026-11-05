@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 
 from core import app, collector, lookup, netd, userd
@@ -200,6 +201,52 @@ class TestInstallScript(unittest.TestCase):
             self.assertIn(f"  put_default {name}\n", text)
             self.assertTrue(os.path.isfile(os.path.join(DEPLOY, f"{name}.toml")))
         self.assertLess(text.index("  install_code "), text.index("  check_conf"))   # DEST first
+
+    def test_posture_admin_from_install_user(self):
+        """deploy/posture.toml names no user: "@admin" in want lists, install.sh puts the
+        sudo (admin) user there (2026-11-05). Comments keep the placeholder."""
+        bash = shutil.which("bash")
+        if bash is None:
+            self.skipTest("no bash")
+        from modules.posture import policy
+        with open(os.path.join(DEPLOY, "posture.toml"), "rb") as f:
+            raw = f.read()
+        want = {c.id: c.want for c in policy.parse(raw, "posture.toml") if c.kind == "group"}
+        for cid in ("wheel", "sectop-group", "mullvad-group"):
+            self.assertEqual(want[cid], ("@admin",), cid)
+        self.assertEqual(want["sectop-feed"], ())
+        with open(os.path.join(ROOT, "install.sh"), encoding="ascii") as f:
+            text = f.read()
+        self.assertLess(text.index('  rm -rf "$TMP/new/tests"'),
+                        text.index('  render_defaults "$TMP/new" "$user"'))
+        with tempfile.TemporaryDirectory() as d:
+            os.mkdir(os.path.join(d, "deploy"))
+            path = os.path.join(d, "deploy", "posture.toml")
+            with open(path, "wb") as f:
+                f.write(raw)
+            script = ('die() { echo "$*"; exit 1; }\n'
+                      + text[text.index("render_defaults() {"):].split("\n}\n", 1)[0]
+                      + '\n}\nrender_defaults "$1" "$2"\n')
+            r = subprocess.run([bash, "-c", script, "x", d, "admin"], capture_output=True,
+                               text=True, timeout=30)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            with open(path, "rb") as f:
+                done = f.read()
+        want = {c.id: c.want for c in policy.parse(done, "posture.toml") if c.kind == "group"}
+        for cid in ("wheel", "sectop-group", "mullvad-group"):
+            self.assertEqual(want[cid], ("admin",), cid)
+        self.assertIn(b'# "@admin": install.sh', done)                # comment untouched
+        self.assertEqual(done.replace(b'"admin"', b'"@admin"'), raw)  # nothing else
+
+    def test_desktop_user_option(self):
+        """--desktop-user NAME: helper instance for NAME, admin (sudo user) in sectop."""
+        with open(os.path.join(ROOT, "install.sh"), encoding="ascii") as f:
+            text = f.read()
+        self.assertIn('  install_users "$user"\n', text)          # admin: m <admin> sectop
+        self.assertIn('  install_units "$desktop"\n', text)       # desktop: helper only
+        self.assertIn('  check_desktop "$desktop" "$user"\n', text)
+        self.assertLess(text.index('  check_desktop "$desktop"'), text.index("  preflight\n"))
+        self.assertIn("printf 'm %s sectop\\n' \"$1\"", text)
 
     def test_installs_every_unit(self):
         with open(os.path.join(ROOT, "install.sh"), encoding="ascii") as f:

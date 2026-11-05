@@ -723,10 +723,13 @@ class TestModule(unittest.TestCase):
         self.assertEqual(set(policy.KINDS) - {c.kind for c in checks}, set())   # all used
 
     def test_host_like_mine(self):
-        """Deploy policy on a host like mine after step 9 (2026-10-26): all pass."""
+        """Deploy policy as install.sh writes it (admin "admin") on a host like mine after
+        step 9 (2026-10-26) and the account split (2026-11-05): all pass."""
         with open(DEPLOY, "rb") as f:
-            checks = policy.parse(f.read(), DEPLOY)
+            checks = policy.parse(f.read().replace(b'"@admin"', b'"admin"'), DEPLOY)
         h = FakeHost()
+        h.files["/etc/group"] = ("wheel:x:10:admin\nsugroup:x:1001:\nmullvad:x:953:admin\n"
+                                 "sectop:x:954:admin\nsectop-feed:x:955:\n")
         h.blobs[kinds.SECUREBOOT] = bytes([6, 0, 0, 0, 1])               # mokutil: enabled
         h.files["/sys/kernel/security/lockdown"] = "none [integrity] confidentiality\n"
         h.files["/proc/sys/kernel/tainted"] = "0\n"

@@ -2,9 +2,15 @@
 #
 # install.sh - install sectop from this repo's git HEAD as root-owned code + services.
 #
-#   sudo ./install.sh            install or update (HEAD, not uncommitted changes)
-#   sudo ./install.sh --check    requirements only, changes nothing
-#   sudo ./install.sh --remove   stop + remove units, code, launcher, sysusers file
+#   sudo ./install.sh                       install or update (HEAD, not uncommitted changes)
+#   sudo ./install.sh --desktop-user NAME   same, user helper for NAME (two accounts)
+#   sudo ./install.sh --check               requirements only, changes nothing
+#   sudo ./install.sh --remove              stop + remove units, code, launcher, sysusers file
+#
+# Users: the one running sudo is the admin: member of group sectop (reads the UI state,
+# whois), its name in the posture default (wheel, sectop, mullvad: "@admin"). The desktop
+# user (GNOME session) gets the user helper sectop-user@NAME.service and no sectop group.
+# One account: no --desktop-user, both are the sudo user.
 #
 # Why: code a service runs must not be writable by my user (docs/architecture.md,
 # Privilege split). git archive HEAD -> /usr/local/lib/sectop, root-owned.
@@ -42,8 +48,8 @@ remove() {
   rm -rf "$DEST"
   rm -f "$SYSUSERS"
   log "removed: units, $DEST, $BIN, $SYSUSERS"
-  log "kept: $CONF; users sectop, sectop-net and group sectop"
-  log "  (by hand: userdel sectop; userdel sectop-net; groupdel sectop)"
+  log "kept: $CONF; users sectop, sectop-net and groups sectop, sectop-feed"
+  log "  (by hand: userdel sectop; userdel sectop-net; groupdel sectop; groupdel sectop-feed)"
 }
 
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -82,7 +88,7 @@ preflight() {
   log "posture: /etc/sectop/posture.toml checks my baseline; other hosts: expect fails"
 }
 
-install_code() {   # $1 = repo, $2 = login user
+install_code() {   # $1 = repo, $2 = admin (runs git, posture default)
   local repo=$1 user=$2
   install -d -m 0755 "$(dirname "$DEST")"
   TMP=$(mktemp -d "$(dirname "$DEST")/.sectop.XXXXXX")     # same filesystem: mv = rename
@@ -98,6 +104,7 @@ install_code() {   # $1 = repo, $2 = login user
   mkdir "$TMP/new"
   tar -x -C "$TMP/new" -f "$TMP/head.tar"
   rm -rf "$TMP/new/tests"                       # not needed to run; fixtures stay in the repo
+  render_defaults "$TMP/new" "$user"
   /usr/bin/python3 -I -m compileall -q "$TMP/new/core" "$TMP/new/modules" >/dev/null
   chown -R root:root "$TMP/new"
   find "$TMP/new" -type d -exec chmod 0755 {} +
@@ -115,7 +122,15 @@ install_code() {   # $1 = repo, $2 = login user
   log "code: $DEST ($(sudo -u "$user" git -C "$repo" log -1 --format='%h %s'))"
 }
 
-install_users() {  # $1 = login user
+# deploy/posture.toml: "@admin" in want lists -> the admin's name (wheel, sectop,
+# mullvad members). $2 matched the user name regex in main: safe in sed.
+render_defaults() {   # $1 = new code dir, $2 = admin
+  local f=$1/deploy/posture.toml
+  sed -i -E "/^want = /s/\"@admin\"/\"$2\"/g" "$f"
+  if grep -qE '^want = .*"@admin"' "$f"; then die "posture default: @admin left in $f"; fi
+}
+
+install_users() {  # $1 = admin (only member of group sectop added here)
   install -d -m 0755 "$(dirname "$SYSUSERS")"   # Silverblue: /etc/sysusers.d does not exist
   { cat "$DEST/deploy/sectop.sysusers"
     printf 'm %s sectop\n' "$1"
@@ -154,13 +169,22 @@ check_conf() {     # collector and net unit read the config as non-root users
   log "config: $CONF 0755, *.toml 0644 root:root (read by sectop users, no secrets)"
 }
 
-install_units() {  # $1 = login user: its user helper (sectop-user@<user>.service)
-  local u helper=sectop-user@$1.service
+install_units() {  # $1 = desktop user: its user helper (sectop-user@<user>.service)
+  local u inst helper=sectop-user@$1.service
   for u in "${UNITS[@]}"; do
     install -m 0644 -o root -g root "$DEST/deploy/$u" "$UNIT_DIR/$u"
   done
   relabel "$UNIT_DIR"/sectop*
   systemctl daemon-reload
+  # one helper: another desktop user's instance (older install) goes
+  for inst in $( { systemctl list-units --all --plain --no-legend 'sectop-user@*.service' \
+                     | awk '{print $1}'
+                   find "$UNIT_DIR/multi-user.target.wants" -maxdepth 1 \
+                     -name 'sectop-user@*.service' -printf '%f\n' 2>/dev/null; } | sort -u); do
+    [[ $inst == "$helper" ]] && continue
+    systemctl disable --now "$inst" >/dev/null 2>&1 || true
+    log "$inst stopped + disabled (desktop user is now $1)"
+  done
   systemctl enable sectop-net.service sectop.service sectop-whois.socket "$helper" >/dev/null
   systemctl restart sectop-net.service sectop.service sectop-whois.socket "$helper"
   for u in sectop-net.service sectop.service sectop-whois.socket "$helper"; do
@@ -172,29 +196,61 @@ install_units() {  # $1 = login user: its user helper (sectop-user@<user>.servic
   done
 }
 
+USER_RE='^[a-z_][a-z0-9_-]{0,31}$'
+
+in_group() { id -nG "$1" | tr ' ' '\n' | grep -qx "$2"; }
+
+# the desktop user: a login account, not the admin's privileges
+check_desktop() {  # $1 = desktop user, $2 = admin
+  local d=$1 uid
+  [[ $d =~ $USER_RE && $d != root ]] || die "--desktop-user: bad user name '$d'"
+  uid=$(id -u "$d" 2>/dev/null) || die "--desktop-user: no such user '$d'"
+  (( uid >= 1000 )) || die "--desktop-user: $d is a system user (uid $uid)"
+  [[ $d == "$2" ]] && return 0
+  if in_group "$d" wheel; then
+    warn "$d is in wheel: sudo from the desktop session (from the admin: gpasswd -d $d wheel)"
+  fi
+  if in_group "$d" sectop; then
+    warn "$d is in group sectop: reads the UI state + whois socket. sysusers never removes"
+    warn "  a member: sudo gpasswd -d $d sectop, then $d logs out and in (or reboot)"
+  fi
+}
+
 main() {
   [[ $EUID -eq 0 ]] || die "run with sudo"
   [[ ${1:-} == --remove ]] && { remove; return; }
   [[ ${1:-} == --check ]] && { preflight; return; }
-  [[ $# -eq 0 ]] || die "usage: sudo $0 [--check | --remove]"
+  local desktop=""
+  if [[ ${1:-} == --desktop-user ]]; then
+    [[ $# -eq 2 ]] || die "usage: sudo $0 --desktop-user NAME"
+    desktop=$2; shift 2
+  fi
+  [[ $# -eq 0 ]] || die "usage: sudo $0 [--desktop-user NAME | --check | --remove]"
   local user=${SUDO_USER:-} repo
-  [[ $user =~ ^[a-z_][a-z0-9_-]*$ && $user != root ]] \
+  [[ $user =~ $USER_RE && $user != root ]] \
     || die "run with sudo from your login (SUDO_USER missing or root)"
+  desktop=${desktop:-$user}
+  check_desktop "$desktop" "$user"
   repo=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
   local member=no
-  if id -nG "$user" | tr ' ' '\n' | grep -qx sectop; then member=yes; fi
+  if in_group "$user" sectop; then member=yes; fi
   preflight
   install_code "$repo" "$user"
   install_users "$user"
   check_conf
-  install_units "$user"
+  install_units "$desktop"
+  if [[ $desktop == "$user" ]]; then
+    log "one account: $user reads sectop and runs the user helper"
+  else
+    log "admin $user: group sectop | desktop $desktop: user helper only, no sectop group"
+  fi
   if [[ $member == yes ]]; then
     log "UI: sectop   (as $user, no sudo)"
   else
     log "UI: $user is new in group sectop: log out and in once, then: sectop"
   fi
   log "check: systemd-analyze security sectop.service sectop-net.service sectop-whois@x.service"
-  log "       systemd-analyze security sectop-user@$user.service"
+  log "       systemd-analyze security sectop-user@$desktop.service"
 }
 
 main "$@"
