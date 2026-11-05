@@ -11,8 +11,14 @@ cgroups, no input from anyone.
 Every INTERVAL s: the user's shared cgroups (user@<uid>.service/<slice>/
 org.gnome.Shell@*.service), each pid in their cgroup.procs: comm + socket inodes of its
 fds (socket:[<ino>]). Not dumpable (fd unreadable) -> denied. Written whole to
-/run/sectop-user/<user>/socks.json (core/statefile.py), dir 0750 <user>:sectop, file 0640
-<user>:sectop (fchown, no setgid bit: RestrictSUIDSGID=yes): the collector reads it.
+/run/sectop-user/<user>/socks.json (core/statefile.py), dir 0750 <user>:sectop-feed, file
+0640 <user>:sectop-feed: the collector reads it.
+
+Group sectop-feed (2026-11-05, account split): the unit's primary group (Group=), so the
+dir systemd makes (RuntimeDirectory=) and every file the helper creates get it, no chown.
+Only the helper and the collector (SupplementaryGroups=) hold it, nobody is a member. The
+login user needs no group: the daily user stays out of group sectop (no state.json, no
+whois socket for the GNOME session).
 
 Display only: the user can write anything into that file, and a process sets its own
 comm. The collector uses it to name sockets of the shared cgroup, never for a check.
@@ -39,7 +45,7 @@ from core.sanitize import display
 
 USER_DIR = "/run/sectop-user"
 FILE = "socks.json"
-GROUP = "sectop"
+GROUP = "sectop-feed"            # unit Group=: helper -> collector only
 VERSION = 1
 INTERVAL = 2.0                   # as the firewall tick
 MAX_AGE = 10.0                   # older file: helper stopped or stuck, not used
@@ -142,21 +148,24 @@ def _log(msg: str) -> None:
 
 
 def prepare(path: str, uid: int, gid: int) -> None:
-    """The runtime dir systemd made for me (RuntimeDirectory=): group sectop, 0750, so
-    the collector (group sectop) gets in. OSError / ValueError."""
+    """The runtime dir systemd made for me (RuntimeDirectory=, User= / Group=): mine,
+    group sectop-feed, 0750, so the collector gets in. No chown: a wrong group means a
+    wrong unit. OSError / ValueError."""
     st = os.lstat(path)
     if not stat.S_ISDIR(st.st_mode) or st.st_uid != uid:
         raise ValueError(f"{path}: not a directory owned by uid {uid}")
-    os.chown(path, -1, gid, follow_symlinks=False)
+    if st.st_gid != gid:
+        raise ValueError(f"{path}: group {st.st_gid}, not {GROUP} ({gid}): check Group=")
     os.chmod(path, 0o750, follow_symlinks=False)
 
 
-def loop(uid: int, gid: int, path: str, write=statefile.write, wall=time.time,
+def loop(uid: int, path: str, write=statefile.write, wall=time.time,
          sleep=time.sleep, log=_log, stop=lambda: False, scan=scan) -> None:
+    """New files get my primary group (sectop-feed): no fchown."""
     problem = None
     while not stop():
         try:
-            write(path, doc(uid, wall(), scan(uid)), 0o640, gid)
+            write(path, doc(uid, wall(), scan(uid)), 0o640)
             err = None
         except (OSError, statefile.StateError) as e:
             err = f"{path}: {type(e).__name__}: {e}"
@@ -189,8 +198,8 @@ def main(argv: list | None = None) -> int:
     if not USER_RE.fullmatch(name):
         _log(f"user name {name!r} not supported")
         return 2
-    if gid != os.getgid() and gid not in os.getgroups():
-        _log(f"{name} is not in group {GROUP} (install.sh adds the login user)")
+    if gid != os.getgid():
+        _log(f"primary group is not {GROUP} (Group={GROUP} in sectop-user@.service)")
         return 2
     d = os.path.join(USER_DIR, name)
     try:
@@ -200,7 +209,7 @@ def main(argv: list | None = None) -> int:
         return 2
     signal.signal(signal.SIGTERM, _term)
     try:
-        loop(uid, gid, os.path.join(d, FILE))
+        loop(uid, os.path.join(d, FILE))
     except (KeyboardInterrupt, Quit):
         pass
     return 0

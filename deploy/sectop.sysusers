@@ -1,6 +1,9 @@
 # sectop users and group (docs/architecture.md, Privilege split).
 # install.sh installs this as /etc/sysusers.d/sectop.conf and adds one line:
-#   m <my user> sectop        (the UI reads /run/sectop, connects to the whois socket)
+#   m <admin user> sectop     (the UI reads /run/sectop, connects to the whois socket)
+# sectop-feed: no members. The user helper's unit Group= and the collector's
+# SupplementaryGroups=: the helper -> collector channel (/run/sectop-user/<user>/).
 g sectop      -
+g sectop-feed -
 u sectop      -:sectop  "sectop collector"  -  -
 u sectop-net  -:sectop  "sectop net unit"   -  -

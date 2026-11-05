@@ -1,6 +1,7 @@
 # sectop collector: modules + alert engine -> /run/sectop/state.json.
 # No capabilities, no network. Journal via group systemd-journal, nft / wg from
-# the net unit's files. docs/architecture.md (Privilege split), docs/install.md
+# the net unit's files, the user helper's socks.json via group sectop-feed.
+# docs/architecture.md (Privilege split), docs/install.md
 [Unit]
 Description=sectop collector (state for the sectop UI, no capabilities)
 Documentation=file:/usr/local/lib/sectop/docs/install.md
@@ -11,7 +12,7 @@ After=sectop-net.service
 Type=exec
 User=sectop
 Group=sectop
-SupplementaryGroups=systemd-journal
+SupplementaryGroups=systemd-journal sectop-feed
 ExecStart=/usr/bin/python3 -I -B /usr/local/lib/sectop/bin/sectop-collector
 Restart=on-failure
 RestartSec=5s

@@ -40,13 +40,15 @@ class TestUnits(unittest.TestCase):
         with open(os.path.join(DEPLOY, "sectop.sysusers"), encoding="ascii") as f:
             lines = [ln.split() for ln in f if ln.strip() and not ln.startswith("#")]
         self.assertIn(["g", "sectop", "-"], lines)
+        self.assertIn(["g", "sectop-feed", "-"], lines)
+        self.assertNotIn("m", {ln[0] for ln in lines})        # members: install.sh only
         users = {ln[1]: ln[2] for ln in lines if ln[0] == "u"}
         self.assertEqual(users, {"sectop": "-:sectop", "sectop-net": "-:sectop"})
         self.assertEqual((app.COLLECTOR_USER, netd.NET_USER), ("sectop", "sectop-net"))
         c, n = svc("sectop.service"), svc("sectop-net.service")
         self.assertEqual((c["User"], c["Group"], n["User"], n["Group"]),
                          ("sectop", "sectop", "sectop-net", "sectop"))
-        self.assertEqual(c["SupplementaryGroups"], "systemd-journal")
+        self.assertEqual(c["SupplementaryGroups"], f"systemd-journal {userd.GROUP}")
         self.assertNotIn("SupplementaryGroups", n)
         self.assertEqual(svc("sectop-whois@.service")["DynamicUser"], "yes")
 
@@ -125,9 +127,19 @@ class TestUnits(unittest.TestCase):
                           h["UMask"]), ("%i", "sectop-user/%i", "0750", "0027"))
         self.assertEqual(userd.USER_DIR, "/run/sectop-user")
         self.assertNotIn("RemoveIPC", h)
-        self.assertNotIn("Group", h)                         # no group sectop handed out
-        self.assertNotIn("SupplementaryGroups", h)
+        self.assertEqual((h["Group"], userd.GROUP), ("sectop-feed", "sectop-feed"))
+        self.assertNotIn("SupplementaryGroups", h)           # never group sectop
         self.assertEqual(svc("sectop.service")["RemoveIPC"], "yes")
+
+    def test_user_helper_hides_reader_paths(self):
+        """2026-11-05 account split: the helper runs as the desktop user, who must not
+        read the collector's state or use the whois socket."""
+        h = svc("sectop-user@.service")
+        hidden = h["InaccessiblePaths"].split()
+        self.assertEqual(hidden, ["-" + os.path.dirname(collector.STATE_PATH),
+                                  "-" + lookup.SOCKET])
+        after = unit("sectop-user@.service")["Unit"]["After"][-1].split()
+        self.assertEqual(after, ["sectop.service", "sectop-whois.socket"])
 
 
 class TestLaunchers(unittest.TestCase):

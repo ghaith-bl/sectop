@@ -186,22 +186,30 @@ class TestHelper(unittest.TestCase):
     def test_prepare(self):
         d = os.path.join(self.tmp.name, "null")
         os.mkdir(d, 0o700)
-        userd.prepare(d, UID, os.getgid())
+        gid = os.stat(d).st_gid
+        userd.prepare(d, UID, gid)
         self.assertEqual(stat.S_IMODE(os.stat(d).st_mode), 0o750)
         with self.assertRaises(ValueError):
-            userd.prepare(d, UID + 1, os.getgid())
+            userd.prepare(d, UID + 1, gid)
+        with self.assertRaises(ValueError):                  # wrong group: never chown
+            userd.prepare(d, UID, gid + 1)
+        self.assertEqual(os.stat(d).st_gid, gid)
         os.symlink(d, d + "-link")
         with self.assertRaises(ValueError):
-            userd.prepare(d + "-link", UID, os.getgid())
+            userd.prepare(d + "-link", UID, gid)
 
-    def test_loop_writes_with_group(self):
+    def test_loop_writes_with_my_group(self):
+        """The file gets the helper's primary group (Group=sectop-feed), no fchown."""
         path = os.path.join(self.tmp.name, userd.FILE)
         n, logs = iter(range(1)), []
-        userd.loop(UID, os.getgid(), path, wall=lambda: 7.0, sleep=lambda s: None,
-                   log=logs.append, stop=lambda: next(n, None) is None,
-                   scan=lambda uid: [])
+        with mock.patch.object(userd.statefile.os, "fchown") as fchown:
+            userd.loop(UID, path, wall=lambda: 7.0, sleep=lambda s: None,
+                       log=logs.append, stop=lambda: next(n, None) is None,
+                       scan=lambda uid: [])
+        fchown.assert_not_called()
         st = os.stat(path)
-        self.assertEqual((stat.S_IMODE(st.st_mode), st.st_gid), (0o640, os.getgid()))
+        self.assertEqual((stat.S_IMODE(st.st_mode), st.st_gid),
+                         (0o640, os.stat(self.tmp.name).st_gid))
         with open(path) as f:
             self.assertEqual(json.load(f), {"v": 1, "uid": UID, "ts": 7.0, "procs": []})
         self.assertEqual(logs, [])
@@ -220,12 +228,12 @@ class TestHelper(unittest.TestCase):
                  mock.patch.object(userd.grp, "getgrnam",
                                    return_value=types.SimpleNamespace(gr_gid=4242)), \
                  mock.patch.object(userd.os, "getgid", return_value=1000), \
-                 mock.patch.object(userd.os, "getgroups", return_value=[1000, 10]), \
+                 mock.patch.object(userd.os, "getgroups", return_value=[1000, 4242]), \
                  mock.patch.object(userd, "loop") as loop:
-                self.assertEqual(userd.main([]), 2)                      # not in sectop
+                self.assertEqual(userd.main([]), 2)       # member is not enough: Group=
                 loop.assert_not_called()
         self.assertIn("refusing to run as root", logs[0])
-        self.assertIn("not in group sectop", logs[1])
+        self.assertIn("primary group is not sectop-feed", logs[1])
 
 
 if __name__ == "__main__":

@@ -1,21 +1,31 @@
 # sectop user helper: names the processes in GNOME Shell's shared cgroup for the
 # firewall screen (socket inode -> pid, comm). Runs as the login user %i, reads only
-# that user's own processes' fds. No capabilities, no network.
+# that user's own processes' fds. No capabilities, no network. %i = the desktop user
+# (install.sh --desktop-user), who needs no sectop group.
 # docs/architecture.md (Privilege split), docs/install.md
 [Unit]
 Description=sectop user helper for %i (socket owners in GNOME Shell's cgroup)
 Documentation=file:/usr/local/lib/sectop/docs/install.md
+# the paths InaccessiblePaths= hides exist before the namespace is set up
+After=sectop.service sectop-whois.socket
 
 [Service]
 Type=exec
 User=%i
+# primary group sectop-feed: the runtime dir and the helper's files get it, the collector
+# reads them (SupplementaryGroups=). No member has it: not handed to the login user.
+Group=sectop-feed
 ExecStart=/usr/bin/python3 -I -B /usr/local/lib/sectop/bin/sectop-user
 Restart=on-failure
 RestartSec=5s
-# /run/sectop-user/%i: the helper sets group sectop on it (it must be a member)
+# /run/sectop-user/%i: %i:sectop-feed 0750, made by systemd (User= / Group=)
 RuntimeDirectory=sectop-user/%i
 RuntimeDirectoryMode=0750
 UMask=0027
+# the collector's state and the whois socket: never needed here. Extra layer only: the
+# guard is group sectop (the desktop user is no member). Applies to what exists at start
+# (a collector restart makes a new /run/sectop); '-' = fine when missing.
+InaccessiblePaths=-/run/sectop -/run/sectop-whois.sock
 
 CapabilityBoundingSet=
 AmbientCapabilities=
