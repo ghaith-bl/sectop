@@ -11,6 +11,10 @@ Security posture.
   file checks as config.toml (root-owned, not group / other writable, no symlink). Read
   once in init: `sudo systemctl restart sectop.service` after a change. Missing: no
   checks, summary `no posture.toml`. Bad file: init fails, module off, header says why.
+- `"@admin"` in a want list (groups wheel, sectop, mullvad; 2026-11-05 account split):
+  install.sh writes the sudo user there. The repo file names no user. Group checks
+  `sectop-group` (admin only), `sectop-feed` (no members), `mullvad-group` (admin only):
+  warn.
 - Kinds (`checks.py`): fixed code. The policy picks a kind, its file / unit / values,
   the sev and the ref. No commands in the policy.
 - Files where a file exists. Commands only where there is none, fixed argv, run as user

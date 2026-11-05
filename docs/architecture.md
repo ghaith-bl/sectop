@@ -603,13 +603,20 @@ Design (least privilege: NIST SP 800-53 / 800-171 AC-6, systemd.exec(5), capabil
     sectop-net.service   user sectop-net, CAP_NET_ADMIN only -> /run/sectop-net/
     sectop.service       user sectop, journal group, no caps -> /run/sectop/state.json
     sectop-whois.socket  one sectop-whois@.service per lookup, DynamicUser, RDAP only
-    sectop-user@<me>     my user, no caps, no network -> /run/sectop-user/<me>/
-    sectop (UI)          my user, no sudo, reads /run/sectop/state.json
+    sectop-user@<daily>  desktop user, group sectop-feed, no caps, no network
+                         -> /run/sectop-user/<daily>/
+    sectop (UI)          admin user, no sudo, group sectop: reads /run/sectop/state.json
 
 - Collector = system service started by systemd, not from my login. loginuid stays
   unset (pam_loginuid(8): set by login entry points), so rules with `auid>=1000` /
   `auid!=-1` do not match: daemon events, not user events. Audit rules unchanged: the
   same commands from a login are still recorded.
+- Two accounts (2026-11-05, CIS Controls v8 5.4, NIST SP 800-53 AC-6(2), NSA/CISA
+  AA23-278A): admin (text console, wheel, sudo) and daily user (GNOME, browsers, no
+  sudo). The admin reads sectop (group `sectop`), the daily user only runs the user
+  helper and holds no sectop group: malware in the GNOME session gets no alerts view,
+  no feed, no whois socket. One account (no `--desktop-user`): both are the same user,
+  as before.
 - Users (2026-10-20): static system users `sectop` (collector) and `sectop-net` (net
   unit), group `sectop` (sysusers.d), no login, no home. Two users: the collector cannot
   forge firewall data, the capability never sits next to the parsing code. Not
@@ -618,7 +625,7 @@ Design (least privilege: NIST SP 800-53 / 800-171 AC-6, systemd.exec(5), capabil
   Journal via `SupplementaryGroups=systemd-journal` (journalctl(1): this group reads all
   journal files).
 - Output: `RuntimeDirectory=sectop`, mode 0750 -> `/run/sectop/state.json` (write +
-  rename). My user in group `sectop`, read only. File, not socket: one-way, less code.
+  rename). The admin in group `sectop`, read only. File, not socket: one-way, less code.
   Written after every collect and every 5 s. No update for 3 x `interval` of the state
   (longest module interval, at most the 5 s heartbeat; min 15 s) -> UI shows crit alert
   "collector: <why>". Capped 2026-10-26: posture runs every 300 s, uncapped the UI would
@@ -638,13 +645,21 @@ Design (least privilege: NIST SP 800-53 / 800-171 AC-6, systemd.exec(5), capabil
   users). Too strong for a monitor -> `ss --cgroup` (see Firewall audit).
 - User helper (2026-11-03): the cgroup names no program for processes in GNOME Shell's
   shared cgroup (org.gnome.Shell@<x>.service: an app whose launcher forked before GNOME
-  moved it). `sectop-user@<me>.service` (system template unit, `User=%i`) runs as my
-  user: same uid = may read the fds of my own processes, no capability. Reads only my
-  shared cgroups' processes: comm + socket inodes (`socket:[<ino>]`) ->
-  `/run/sectop-user/<me>/socks.json` (dir 0750, file 0640, group sectop set by the
-  helper; it refuses to run if my user is not in group sectop). Collector: socket inode
-  (`ss -e`) -> process, display only (my user can write anything there, a process sets
-  its own comm): never a check. No root service, no CAP_SYS_PTRACE (decided 2026-11-03).
+  moved it). `sectop-user@<daily>.service` (system template unit, `User=%i`) runs as the
+  desktop user: same uid = may read the fds of its own processes, no capability. Reads
+  only its shared cgroups' processes: comm + socket inodes (`socket:[<ino>]`) ->
+  `/run/sectop-user/<daily>/socks.json`. Collector: socket inode (`ss -e`) -> process,
+  display only (the user can write anything there, a process sets its own comm): never
+  a check.
+- Helper -> collector channel (2026-11-05): group `sectop-feed`, no members.
+  `Group=sectop-feed` in the helper unit (primary group: systemd makes the runtime dir
+  `<daily>:sectop-feed` 0750, new files 0640 get the group, the helper chowns nothing),
+  `SupplementaryGroups=systemd-journal sectop-feed` in the collector. The helper refuses
+  to run with another primary group, and a runtime dir with another group. Before:
+  group sectop on dir + file by fchown, so the desktop user had to be in group sectop
+  (= could read the collector's state). `InaccessiblePaths=-/run/sectop
+  -/run/sectop-whois.sock` on top (extra layer, what exists at start; the guard is the
+  group). No root service, no CAP_SYS_PTRACE (decided 2026-11-03).
   `PrivateNetwork=yes`, `IPAddressDeny=any`, `AF_UNIX` only, `ProtectProc=default` (my
   own processes), no `RemoveIPC=` (would remove my desktop's IPC objects on stop).
   Not dumpable processes (fd unreadable): `denied`, no name.
@@ -670,8 +685,8 @@ Design (least privilege: NIST SP 800-53 / 800-171 AC-6, systemd.exec(5), capabil
 - SELinux: without a policy the services run as `unconfined_service_t` (RHEL Using
   SELinux, "Writing a custom SELinux policy"). Own policy (`sepolicy generate --init`)
   after the split works, built from its real behavior (AVC).
-- UI = my user, no sudo. Reads `/run/sectop/state.json`. One-way: the UI never writes
-  to the collector (ack stays in the UI).
+- UI = the admin, no sudo, on the text console. Reads `/run/sectop/state.json`. One-way:
+  the UI never writes to the collector (ack stays in the UI).
 
 Until the split is installed: `/etc/sectop/config.toml` `[modules.firewall] interval =
 6.0`, fewer commands per tick (slow sources on their own interval).

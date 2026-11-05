@@ -42,10 +42,13 @@ Public IPs masked (key m), the way the screens start.
 - Four services, none as root: `sectop-net` (CAP_NET_ADMIN only, no network: `nft`,
   `wg`), `sectop` collector (group systemd-journal, no capabilities, no network),
   `sectop-whois@` (dynamic user, network only, one RDAP lookup per connection),
-  `sectop-user@<me>` (my user, no capabilities, no network: names the processes in
-  GNOME Shell's shared cgroup, display only)
-- The UI runs as my user, no sudo, reads only /run/sectop (group sectop) and validates
-  every field before drawing it
+  `sectop-user@<desktop user>` (no capabilities, no network, group sectop-feed only:
+  names the processes in GNOME Shell's shared cgroup, display only)
+- Two accounts supported (`--desktop-user`): the UI runs as the admin (text console),
+  no sudo, reads only /run/sectop (group sectop) and validates every field before
+  drawing it. The daily GNOME user holds no sectop group
+- Posture: only the admin in wheel, sectop and mullvad (the install user, `"@admin"` in
+  deploy/posture.toml)
 - Code installed root-owned from git HEAD into /usr/local/lib/sectop; tests and
   fixtures stay in the repo
 - Read-only: no blocking, no killing, no unit stops (planned last, behind polkit)
@@ -60,7 +63,7 @@ Public IPs masked (key m), the way the screens start.
   (docs/architecture.md)
 - modules: collectors, return a JSON-serializable Snapshot
   (see docs/module-interface.md)
-- collector = non-root service, UI = my user, no sudo. Neither runs as root
+- collector = non-root service, UI = the admin user, no sudo. Neither runs as root
   (docs/architecture.md, Privilege split)
 - alert bar on every screen (alert engine, warn / crit), key a acks what it shows
   (acked: out of the bar, counted on the right, dim in the alerts view)
@@ -139,12 +142,14 @@ terminal, else the 8 basic colors.
     git clone https://github.com/ghaith-bl/sectop.git && cd sectop
     sudo ./install.sh --check    # requirements only, changes nothing
     sudo ./install.sh            # git HEAD -> /usr/local/lib/sectop, users, units
+    sudo ./install.sh --desktop-user <daily user>   # admin + daily account
     sudo ./install.sh --remove
 
-First install: log out and in once (your user joins group sectop).
+First install: log out and in once (the sudo user joins group sectop).
 
 Parts: sectop-net.service (nft / wg, CAP_NET_ADMIN only), sectop.service (collector),
-sectop-whois.socket (RDAP), UI as my user. See docs/install.md.
+sectop-whois.socket (RDAP), sectop-user@ (desktop user helper), UI as the sudo user.
+See docs/install.md.
 
 ## Run
 
