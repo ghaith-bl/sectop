@@ -13,6 +13,10 @@ Group=sectop
 ExecStart=/usr/bin/python3 -I -B /usr/local/lib/sectop/bin/sectop-net
 Restart=on-failure
 RestartSec=5s
+# a lasting failure: slower retries (5s .. 5min in 5 steps), not one every 5s
+# (2026-11-06: 169 restarts in 30 min, an AVC line each). systemd >= 254
+RestartSteps=5
+RestartMaxDelaySec=5min
 RuntimeDirectory=sectop-net
 RuntimeDirectoryMode=0750
 UMask=0027

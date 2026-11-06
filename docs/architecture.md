@@ -666,6 +666,10 @@ Design (least privilege: NIST SP 800-53 / 800-171 AC-6, systemd.exec(5), capabil
   `PrivateNetwork=yes`, `IPAddressDeny=any`, `AF_UNIX` only, `ProtectProc=default` (my
   own processes), no `RemoveIPC=` (would remove my desktop's IPC objects on stop).
   Not dumpable processes (fd unreadable): `denied`, no name.
+- Restarts (2026-11-06): collector, net unit and user helper `Restart=on-failure`, 5 s
+  growing to 5 min in 5 steps (`RestartSteps=`, `RestartMaxDelaySec=`, systemd >= 254).
+  A unit that can never start retries slowly instead of every 5 s; no start limit, so
+  it comes back by itself once the cause is gone.
 - No network in collector and net unit: `IPAddressDeny=any`,
   `RestrictAddressFamilies=AF_UNIX AF_NETLINK`.
 - whois (2026-10-20): `sectop-whois.socket` (`/run/sectop-whois.sock`, root:sectop 0660,

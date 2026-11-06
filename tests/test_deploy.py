@@ -132,6 +132,15 @@ class TestUnits(unittest.TestCase):
         self.assertNotIn("SupplementaryGroups", h)           # never group sectop
         self.assertEqual(svc("sectop.service")["RemoveIPC"], "yes")
 
+    def test_restart_backoff(self):
+        """2026-11-06: a helper that can never start was restarted every 5 s (169 times
+        in 30 min). Long-running units back off to 5 min instead of giving up."""
+        for name in ("sectop.service", "sectop-net.service", "sectop-user@.service"):
+            s = svc(name)
+            self.assertEqual((s["Restart"], s["RestartSec"], s["RestartSteps"],
+                              s["RestartMaxDelaySec"]),
+                             ("on-failure", "5s", "5", "5min"), name)
+
     def test_user_helper_hides_reader_paths(self):
         """2026-11-05 account split: the helper runs as the desktop user, who must not
         read the collector's state. Never a socket file in InaccessiblePaths=: SELinux

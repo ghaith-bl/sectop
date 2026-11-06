@@ -18,6 +18,10 @@ Group=sectop-feed
 ExecStart=/usr/bin/python3 -I -B /usr/local/lib/sectop/bin/sectop-user
 Restart=on-failure
 RestartSec=5s
+# a lasting failure: slower retries (5s .. 5min in 5 steps), not one every 5s
+# (2026-11-06: 169 restarts in 30 min, an AVC line each). systemd >= 254
+RestartSteps=5
+RestartMaxDelaySec=5min
 # /run/sectop-user/%i: %i:sectop-feed 0750, made by systemd (User= / Group=)
 RuntimeDirectory=sectop-user/%i
 RuntimeDirectoryMode=0750
