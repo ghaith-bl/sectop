@@ -657,9 +657,12 @@ Design (least privilege: NIST SP 800-53 / 800-171 AC-6, systemd.exec(5), capabil
   `SupplementaryGroups=systemd-journal sectop-feed` in the collector. The helper refuses
   to run with another primary group, and a runtime dir with another group. Before:
   group sectop on dir + file by fchown, so the desktop user had to be in group sectop
-  (= could read the collector's state). `InaccessiblePaths=-/run/sectop
-  -/run/sectop-whois.sock` on top (extra layer, what exists at start; the guard is the
-  group). No root service, no CAP_SYS_PTRACE (decided 2026-11-03).
+  (= could read the collector's state). `InaccessiblePaths=-/run/sectop` on top (extra
+  layer, what exists at start; the guard is the group). The whois socket is not in that
+  list since 2026-11-06: hiding a file is a bind mount over it, SELinux refuses `init_t`
+  `mounton` on a `var_run_t` `sock_file`, the helper failed with `226/NAMESPACE` before it
+  ran (restart loop). The socket's mode guards it (root:sectop 0660, desktop user no
+  member). No root service, no CAP_SYS_PTRACE (decided 2026-11-03).
   `PrivateNetwork=yes`, `IPAddressDeny=any`, `AF_UNIX` only, `ProtectProc=default` (my
   own processes), no `RemoveIPC=` (would remove my desktop's IPC objects on stop).
   Not dumpable processes (fd unreadable): `denied`, no name.

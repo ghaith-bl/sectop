@@ -6,8 +6,8 @@
 [Unit]
 Description=sectop user helper for %i (socket owners in GNOME Shell's cgroup)
 Documentation=file:/usr/local/lib/sectop/docs/install.md
-# the paths InaccessiblePaths= hides exist before the namespace is set up
-After=sectop.service sectop-whois.socket
+# the path InaccessiblePaths= hides exists before the namespace is set up
+After=sectop.service
 
 [Service]
 Type=exec
@@ -22,10 +22,13 @@ RestartSec=5s
 RuntimeDirectory=sectop-user/%i
 RuntimeDirectoryMode=0750
 UMask=0027
-# the collector's state and the whois socket: never needed here. Extra layer only: the
-# guard is group sectop (the desktop user is no member). Applies to what exists at start
-# (a collector restart makes a new /run/sectop); '-' = fine when missing.
-InaccessiblePaths=-/run/sectop -/run/sectop-whois.sock
+# the collector's state: never needed here. Extra layer only: the guard is group sectop
+# (the desktop user is no member). Applies to what exists at start (a collector restart
+# makes a new /run/sectop); '-' = fine when missing.
+# Not the whois socket: hiding a file means a bind mount over it, and SELinux refuses
+# init_t mounton on a var_run_t sock_file (AVC, 2026-11-06) -> 226/NAMESPACE, the helper
+# never starts. The socket's own mode guards it: root:sectop 0660.
+InaccessiblePaths=-/run/sectop
 
 CapabilityBoundingSet=
 AmbientCapabilities=

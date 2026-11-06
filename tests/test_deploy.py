@@ -134,13 +134,18 @@ class TestUnits(unittest.TestCase):
 
     def test_user_helper_hides_reader_paths(self):
         """2026-11-05 account split: the helper runs as the desktop user, who must not
-        read the collector's state or use the whois socket."""
+        read the collector's state. Never a socket file in InaccessiblePaths=: SELinux
+        refuses the bind mount over it (init_t mounton sock_file, 2026-11-06) and the
+        unit fails with 226/NAMESPACE; the whois socket is guarded by its mode."""
         h = svc("sectop-user@.service")
         hidden = h["InaccessiblePaths"].split()
-        self.assertEqual(hidden, ["-" + os.path.dirname(collector.STATE_PATH),
-                                  "-" + lookup.SOCKET])
+        self.assertEqual(hidden, ["-" + os.path.dirname(collector.STATE_PATH)])
+        self.assertNotIn(lookup.SOCKET, " ".join(hidden))
         after = unit("sectop-user@.service")["Unit"]["After"][-1].split()
-        self.assertEqual(after, ["sectop.service", "sectop-whois.socket"])
+        self.assertEqual(after, ["sectop.service"])
+        sock = {k: v[-1] for k, v in unit("sectop-whois.socket")["Socket"].items()}
+        self.assertEqual((sock["SocketUser"], sock["SocketGroup"], sock["SocketMode"]),
+                         ("root", "sectop", "0660"))
 
 
 class TestLaunchers(unittest.TestCase):

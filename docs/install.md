@@ -72,6 +72,9 @@ Collector, net unit and UI refuse to run as root (rc 2). No more
     systemctl status sectop-user@null.service          # the desktop user
     ls -l /run/sectop /run/sectop-net /run/sectop-whois.sock /run/sectop-user/null
     # want: /run/sectop-user/null null:sectop-feed 0750, socks.json 0640
+    # helper "activating (auto-restart)", status=226/NAMESPACE: systemd could not set up
+    # its mount namespace. journalctl -u sectop-user@null names the path, and
+    # ausearch -m AVC -ts recent shows an SELinux denial if that was the cause
     id null                                            # want: no sectop, no sectop-feed
     journalctl -b -u sectop-net -u sectop -u 'sectop-whois@*'
     systemd-analyze security sectop.service sectop-net.service sectop-whois@x.service
