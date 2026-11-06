@@ -76,7 +76,7 @@ preflight() {
     || warn "systemd-journald-audit.socket not active: no audit records for sectop"
   if ! systemctl is-active --quiet auditd.service; then
     warn "auditd not running: security screen mostly empty"
-  elif ! auditctl -l 2>/dev/null | grep -q 'key=root_cmds'; then
+  elif ! auditctl -l 2>/dev/null | grep 'key=root_cmds' >/dev/null; then
     warn "no audit rule key root_cmds (silverblue-cis-hardening audit-rules): no commands"
   fi
   for c in nft ss ip; do have "$c" || warn "no $c: firewall screen incomplete"; done
@@ -198,7 +198,9 @@ install_units() {  # $1 = desktop user: its user helper (sectop-user@<user>.serv
 
 USER_RE='^[a-z_][a-z0-9_-]{0,31}$'
 
-in_group() { id -nG "$1" | tr ' ' '\n' | grep -qx "$2"; }
+# no 'cmd | grep -q' under pipefail: grep -q quits at the first match, the writer can get
+# SIGPIPE and the pipe fails although the line was there
+in_group() { [[ " $(id -nG "$1" 2>/dev/null) " == *" $2 "* ]]; }
 
 # the desktop user: a login account, not the admin's privileges
 check_desktop() {  # $1 = desktop user, $2 = admin
