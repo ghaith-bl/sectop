@@ -41,6 +41,69 @@ def comments(text: str) -> dict:
     return out
 
 
+_VERDICTS = ("accept", "drop", "reject", "jump", "goto", "return", "queue")
+
+
+def _limit(e: dict) -> str:
+    lim = e.get("limit")
+    if not isinstance(lim, dict):
+        return ""
+    rate, per, burst = lim.get("rate"), lim.get("per"), lim.get("burst")
+    if not _count(rate) or not isinstance(per, str):
+        return ""
+    out = f"{rate}/{per}"
+    return out + (f" burst {burst}" if _count(burst) and burst else "")
+
+
+def logs(text: str) -> dict:
+    """Same output as counters() -> {counter name: log limit} for every named counter a
+    rule uses. "" = logged without a limit, None = counted only (no log statement).
+
+    A counter is logged when a log statement follows it before the first verdict: in the
+    same rule, or, for an unconditional counter rule (hostfw: `counter name x` alone),
+    in the next rules of the chain that have no match of their own (`limit ... log`).
+    Counters no rule uses (or -n / counters-only output) are left out.
+    """
+    by_chain = {}
+    for it in _items(text):
+        r = it.get("rule")
+        if isinstance(r, dict) and isinstance(r.get("expr"), list):
+            by_chain.setdefault(r.get("chain"), []).append(
+                [e for e in r["expr"] if isinstance(e, dict)])
+    out = {}
+    for rules in by_chain.values():
+        for i, expr in enumerate(rules):
+            names = [(j, e["counter"]) for j, e in enumerate(expr)
+                     if isinstance(e.get("counter"), str)]
+            for j, name in names:
+                found, lim, stop = None, "", False
+                for e in expr[j + 1:]:
+                    if "limit" in e:
+                        lim = _limit(e)
+                    if "log" in e:
+                        found = lim
+                        break
+                    if any(v in e for v in _VERDICTS):
+                        stop = True
+                        break
+                if found is None and not stop and not any("match" in e for e in expr):
+                    for nxt in rules[i + 1:]:
+                        if any("match" in e for e in nxt):
+                            break
+                        lim = ""
+                        for e in nxt:
+                            if "limit" in e:
+                                lim = _limit(e)
+                            if "log" in e:
+                                found = lim
+                                break
+                        if found is not None or any(v in e for e in nxt for v in _VERDICTS):
+                            break
+                if name not in out or out[name] is None:
+                    out[name] = found
+    return out
+
+
 def mode(text: str, chain: str = "enforce") -> str:
     """`list chain inet hostfw enforce` or `-t list table inet hostfw`
     -> observe | enforce | unknown.

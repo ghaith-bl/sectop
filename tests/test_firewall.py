@@ -70,6 +70,44 @@ class TestNft(unittest.TestCase):
         self.assertEqual(c["in_noise"], (2236, 314488))
         self.assertEqual(list(c)[0], "out_dns_vpn")            # nft order kept
 
+    def test_logs_from_ruleset(self):
+        """2026-11-07: event vs volume counter from the rules, not from a fixed list."""
+        lg = nft.logs(fix("nft-table-terse.json"))
+        self.assertEqual({n for n, v in lg.items() if v is None},
+                         {"out_dns_vpn", "out_wg", "out_vpn_api"})
+        self.assertEqual((lg["out_dns"], lg["out_new"], lg["in_noise"]),
+                         ("10/minute burst 20", "5/second burst 50", "6/minute burst 10"))
+        self.assertEqual(nft.logs(fix("nft-counters.json")), {})      # no rules: unknown
+
+    def test_logs_same_rule_and_changed_ruleset(self):
+        def doc(*rules):
+            return json.dumps({"nftables": [{"rule": {"chain": c, "expr": e}}
+                                            for c, e in rules]})
+        m = {"match": {"op": "==", "left": {"meta": {"key": "oifname"}}, "right": "wg0"}}
+        lim = {"limit": {"rate": 3, "per": "second", "burst": 9}}
+        log = {"log": {"prefix": "X: "}}
+        text = doc(("output", [m, {"counter": "out_wg"}, {"accept": None}]),   # volume
+                   ("output", [m, {"counter": "a"}, lim, log, {"accept": None}]),
+                   ("deny_b", [{"counter": "b"}]), ("deny_b", [log]),     # next rule, no limit
+                   ("deny_c", [{"counter": "c"}]), ("deny_c", [{"jump": {"target": "x"}}]),
+                   ("deny_c", [log]),                                     # after the verdict
+                   ("deny_d", [{"counter": "d"}]), ("deny_d", [m, log]))  # other match
+        self.assertEqual(nft.logs(text), {"out_wg": None,
+                                          "a": "3/second burst 9", "b": "",
+                                          "c": None, "d": None})
+
+    def test_why_unknown(self):
+        w = fw._why_unknown
+        self.assertEqual(w("2", "-", "224.0.0.22"),
+                         "2: no tcp / udp socket to match (ss lists tcp / udp only)")
+        self.assertEqual(w("udp", "-", "192.168.8.1"), "kernel (no socket owner in the log line)")
+        self.assertTrue(w("udp", "1000", "239.255.255.250").startswith("discovery"))
+        self.assertTrue(w("udp", "1000", "255.255.255.255").startswith("discovery"))
+        self.assertTrue(w("udp", "1000", "ff02:0000:0000:0000:0000:0000:0000:00fb")
+                        .startswith("discovery"))
+        self.assertEqual(w("tcp", "1000", "203.0.113.11"),
+                         "short flow, uid 1000: closed before the ss poll")
+
     def test_counters_bad(self):
         for text in ("[]", '{"nftables": {}}', "not json",
                      '{"nftables": [{"counter": {"name": "x", "packets": -1, "bytes": 0}}]}',
@@ -892,7 +930,8 @@ class TestCollect(Base):
         self.assertEqual({it["k"]: it["v"] for it in rows["(inbound)"]["detail"]}["note"],
                          fw.APP_OTHER["(inbound)"][2])
         self.assertEqual({it["k"]: it["v"] for it in rows["? uid 1000"]["detail"]}["note"],
-                         "program unknown: the flow closed before the next ss poll")
+                         "program unknown: uid 1000, the flow closed before the next ss poll "
+                         "(a flow row's detail says why: short flow, discovery, not tcp / udp)")
 
     def test_programs_keep_and_limit(self):
         self.audit()
@@ -956,8 +995,9 @@ class TestCollect(Base):
         self.assertEqual((detail["TTL"], detail["UID"], detail["flags"]), ("64", "1000", "DF SYN"))
         self.assertNotIn("IN", detail)                               # empty field skipped
         keys = [d["k"] for d in p["rows"][4]["detail"]]
-        self.assertEqual(keys[:8], ["count", "blocked", "src ports", "last line", "rule",
-                                    "verdict", "time", "prefix"])
+        self.assertEqual(keys[:9], ["count", "blocked", "src ports", "why ?", "last line",
+                                    "rule", "verdict", "time", "prefix"])
+        self.assertEqual(detail["why ?"], "short flow, uid 1000: closed before the ss poll")
         self.assertEqual(p["rows"][4]["id"],
                          "out_leak|out|tcp|1000|192.168.8.102|203.0.113.11:443|wlo1")
         self.assertEqual({d["k"]: d["v"] for d in p["rows"][3]["detail"]}["src ports"], "51544")
@@ -1004,15 +1044,16 @@ class TestCollect(Base):
         self.st.hms = lambda ts: f"t{int(ts) % 100}"
         s = self.collect()
         d = self.counter_detail(s, "out_dns")
-        self.assertEqual(d[:7], [
+        self.assertEqual(d[:8], [
             ("meaning", "DNS / DoT outside the VPN resolver"),
             ("match", "any other tcp/udp 53, 853 (not the VPN resolver)"),
             ("verdict", "block  rejected by hostfw (enforce mode)"),
             ("new packets", "alert new:out_dns (warn), kept crit 10 min, warn 5 min, info 1 "
                             "min after the last tick with new packets"),
+            ("kind", "event: the rule logs, lines below"),
             ("log", "10/min burst 20: lines are samples, the counter is exact"),
-            ("bytes", "32640"), ("since", "hostfw table load (a reload resets it)")])
-        self.assertEqual(d[7:], [("", ""), ("last lines", "1 since sectop started"),
+            ("bytes", "32.6K (32640)"), ("since", "hostfw table load (a reload resets it)")])
+        self.assertEqual(d[8:], [("", ""), ("last lines", "1 since sectop started"),
                                  ("t46", "uid 0 udp 192.168.8.102:40000 -> 198.51.100.53:53 "
                                          "wlo1")])
         noise = dict(self.counter_detail(s, "in_noise"))
@@ -1021,6 +1062,7 @@ class TestCollect(Base):
         self.assertEqual(noise["verdict"].split()[0], "zone")
         wg = dict(self.counter_detail(s, "out_wg"))
         self.assertEqual(wg["log"], "counted only, not logged")
+        self.assertEqual(wg["kind"], "volume: counted only, no log lines")
         self.assertNotIn("last lines", wg)
         self.assertEqual(wg["new packets"], "no alert (allowed traffic)")
         self.assertIn("(crit, warn when blocked, info pre-connect)", dict(self.counter_detail(s, "out_leak"))[

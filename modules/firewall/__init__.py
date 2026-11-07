@@ -149,7 +149,10 @@ MATCH = {
     "in_lan": "new inbound from the uplink",
     "in_vpn": "new inbound from the tunnel",
 }
+# Counted-only (volume) counters when the ruleset is not readable (older output, no
+# rules). Normally the kind comes from the ruleset itself: nft.logs() (2026-11-07).
 NOT_LOGGED = {"out_dns_vpn", "out_wg", "out_vpn_api"}
+PER = {"second": "s", "minute": "min", "hour": "h", "day": "d"}
 VERDICT_NOTE = {
     "allow": "allowed by hostfw (logged new flow or exception)",
     "zone": "hostfw only logs, the firewalld zone decides (default zone: drop)",
@@ -215,6 +218,7 @@ class State:
         self.hms = hms                 # epoch -> "HH:MM:SS" for audit rows
         self.stamp = stamp             # epoch -> full local time for audit detail
         self.comments = {}             # counter name -> hostfw rule comment
+        self.logs = {}                 # counter name -> log limit, None = counted only
         self.bins = {n: netd.bin_path(n) for n in ("nft", "journalctl", "ss", "wg")}
         self.net = net if net is not None else netd.Reader(tunnel, wall=wall)
         self.prev = None               # counters of last tick
@@ -415,6 +419,7 @@ def _hostfw(st: State, checks: list) -> tuple:
         return items, None, "-"
     counters = nft.counters(res.out)
     st.comments = nft.comments(res.out)
+    st.logs = nft.logs(res.out)
     items.append(_item("table", "loaded", tone="green"))
 
     live = nft.mode(res.out)
@@ -473,14 +478,40 @@ def _rollback_state(text: str, now: float) -> tuple:
     return (f"{out} -> {action}" if action else out), armed
 
 
-def _log_note(name: str) -> str:
-    if name in NOT_LOGGED:
+def _logged(st: State, name: str) -> bool:
+    """Event counter (its rule logs) or volume counter (counted only): from the ruleset;
+    a counter no rule shows (older output): the fixed list."""
+    if name in st.logs:
+        return st.logs[name] is not None
+    return name not in NOT_LOGGED
+
+
+def _limit_text(lim: str) -> str:
+    """nft "10/minute burst 20" -> "10/min burst 20"."""
+    rate, _, rest = lim.partition(" ")
+    n, _, per = rate.partition("/")
+    return f"{n}/{PER.get(per, per)}" + (f" {rest}" if rest else "")
+
+
+def _log_note(st: State, name: str) -> str:
+    if not _logged(st, name):
         return "counted only, not logged"
+    lim = st.logs.get(name)
+    if lim == "":
+        return "every packet logged (no limit in the rule)"
+    lim = _limit_text(lim) if lim else {"new": "5/s burst 50", "in_noise": "6/min burst 10"
+                                        }.get("new" if name.endswith("_new") else name,
+                                              "10/min burst 20")
     if name.endswith("_new"):
-        return "5/s burst 50 (one line per new flow, more than that: counter only)"
+        return f"{lim} (one line per new flow, more than that: counter only)"
     if name == "in_noise":
-        return "6/min burst 10, hidden from audit and events"
-    return "10/min burst 20: lines are samples, the counter is exact"
+        return f"{lim}, hidden from audit and events"
+    return f"{lim}: lines are samples, the counter is exact"
+
+
+def _bytes(n: int) -> str:
+    """One line: 30.7K (30697); small values once."""
+    return str(n) if n < 1000 else f"{_human(n)} ({n})"
 
 
 def _counter_detail(st: State, name: str, nbytes: int, live: str) -> list:
@@ -498,10 +529,12 @@ def _counter_detail(st: State, name: str, nbytes: int, live: str) -> list:
                "after the last tick with new packets")
     out = [("meaning", st.comments.get(name, "-")), ("match", MATCH.get(name, "-")),
            ("verdict", f"{verdict}  {VERDICT_NOTE[verdict]}"), ("new packets", new),
-           ("log", _log_note(name)), ("bytes", str(nbytes)),
+           ("kind", "event: the rule logs, lines below" if _logged(st, name)
+            else "volume: counted only, no log lines"),
+           ("log", _log_note(st, name)), ("bytes", _bytes(nbytes)),
            ("since", "hostfw table load (a reload resets it)")]
     lines = list(st.recent.get(name, ()))
-    if name not in NOT_LOGGED:
+    if _logged(st, name):
         out += [("", ""), ("last lines", f"{len(lines)} since sectop started" if lines
                            else "none since sectop started")]
         out += [(st.hms(ts), text) for ts, text in lines]
@@ -543,7 +576,7 @@ def _counter_panel(st: State, counters: dict | None, deltas: dict, now: float,
                          _human(nbytes)], "sev": sev or "ok",
                "tone": _tone(_verdict(name, live, st.noscope)),
                "detail": _counter_detail(st, name, nbytes, live)}
-        if name not in NOT_LOGGED:
+        if _logged(st, name):
             row["logs"] = name                   # enter = log card (modules/firewall/logcard.py)
         rows.append(row)
     zero = len(counters) - len(rows)
@@ -813,6 +846,23 @@ def _progs(names) -> list:
     return out
 
 
+def _why_unknown(proto: str, uid: str, dst: str) -> str:
+    """Why an outgoing line has no program (2026-11-07: a reason instead of a bare `?`).
+    proto, uid as in the log line, dst = its DST field."""
+    if proto not in ("tcp", "udp"):
+        return f"{proto or '-'}: no tcp / udp socket to match (ss lists tcp / udp only)"
+    if uid in ("", "-"):
+        return "kernel (no socket owner in the log line)"
+    try:
+        a = ipaddress.ip_address(dst.strip("[]"))
+    except ValueError:
+        a = None
+    if a is not None and (a.is_multicast or str(a) == "255.255.255.255"):
+        return (f"discovery (multicast / broadcast), uid {uid}: one short send, the socket "
+                "was gone before the ss poll")
+    return f"short flow, uid {uid}: closed before the ss poll"
+
+
 def _flow_row(st: State, key: tuple, fl: Flow) -> dict:
     kind, d, proto, uid, _src, _dst, iface = key
     if fl.progs:
@@ -825,6 +875,8 @@ def _flow_row(st: State, key: tuple, fl: Flow) -> dict:
                                                                  if len(fl.ports) > 1 else "")))
     if len(fl.progs) > 1:
         detail.append(("programs", ", ".join(fl.progs)))
+    if prog == "?":
+        detail.append(("why ?", _why_unknown(proto, uid, fl.entry.fields.get("DST", ""))))
     detail.append(("last line", "fields below"))
     sev = kind_sev(kind) or "ok"
     if kind == "out_leak":
@@ -1373,7 +1425,10 @@ def _app_row(st: State, key: str, a: App, socks: list) -> dict:
     elif key.startswith("? uid "):
         uid = key[len("? uid "):]
         prog, pick = "?", ("?" if uid == "-" else f"? {uid}")
-        note = "program unknown: the flow closed before the next ss poll"
+        note = ("program unknown: kernel or no socket owner (no uid in the log line)"
+                if uid == "-" else
+                f"program unknown: uid {uid}, the flow closed before the next ss poll "
+                "(a flow row's detail says why: short flow, discovery, not tcp / udp)")
     elif key.endswith("?") and "/" not in key:
         prog, pick = key, key
         note = (f"guess: the flow closed before the next ss poll; {key[:-1]} was the only "

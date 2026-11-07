@@ -234,6 +234,10 @@ answer per line and tick (every box shows the same):
    in the peers box). Own row (`brave?`, note `guess: ...`), never on a card (`progs`),
    not fed back into the peers box. Two or more programs: `?`.
 4. `?` (row `? uid N`)
+   Why `?` (2026-11-07), in the audit row detail `why ?` and the `? uid N` note:
+   not tcp / udp (`ss` lists tcp / udp only: IGMP, ICMP), no uid in the line (kernel,
+   no socket owner), multicast / broadcast destination (discovery: one short send),
+   else a short flow of uid N that closed before the ss poll.
 
 Shared cgroup (2026-11-03): an app GNOME starts can land in GNOME Shell's own unit
 (`org.gnome.Shell@<x>.service`) when its launcher forks before GNOME moves it into its
@@ -300,10 +304,17 @@ Title: `peers <addresses>  <sockets> open`, `(ss: <error>)` if ss failed.
 
 Row detail of a counter: meaning (hostfw rule comment), match (from hostfw
 `docs/rules.md`, kept in `MATCH`), verdict, what new packets do (alert key, severity,
-hold; `no alert` for allowed and hidden kinds), log rate,
-exact bytes, since (table load), then the last 10 log lines of that kind since sectop
-started (also in_noise, which is hidden elsewhere). Searched by `/`, shown by `enter` only
-for out_dns_vpn / out_wg / out_vpn_api (counted only, never logged: no lines, no card).
+hold; `no alert` for allowed and hidden kinds), kind, log rate,
+bytes (`30.7K (30697)`), since (table load), then the last 10 log lines of that kind since
+sectop started (also in_noise, which is hidden elsewhere). Searched by `/`, shown by `enter`
+only for volume counters (no lines, no card).
+
+Kind (2026-11-07): from the ruleset in the same `nft -j -t list table` call (nft.logs()),
+not a fixed list. event = a log statement follows the counter before the first verdict
+(same rule, or the next match-free rules of the chain: hostfw's `counter name x` then
+`limit ... log`); the log rate shown is the rule's own limit. volume = counted only
+(out_dns_vpn, out_wg, out_vpn_api today). A counter no rule shows (older output): the old
+fixed list `NOT_LOGGED`. Before, a hostfw change of what is logged needed a sectop change.
 
 ## Counter card (log card, 2026-11-04)
 
