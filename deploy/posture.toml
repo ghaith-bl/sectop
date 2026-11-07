@@ -288,6 +288,21 @@ sev = "warn"
 why = "initramfs failure halts, no root shell (kernel args)"
 want = ["rd.shell=0", "rd.emergency=halt"]
 
+# Memory / DMA hardening (silverblue-cis-hardening kargs, 2026-11-07, after a 4-day trial).
+[[check]]
+id = "init-on-free"
+kind = "cmdline"
+sev = "warn"
+why = "freed memory zeroed at once (kernel arg)"
+want = ["init_on_free=1"]
+
+[[check]]
+id = "iommu-strict"
+kind = "cmdline"
+sev = "warn"
+why = "DMA unmapped at once, no lazy IOTLB flush (kernel arg)"
+want = ["iommu.strict=1"]
+
 # Secure Boot on since step 9 (2026-10-26). Off again = switched off in the firmware
 # setup (admin password): crit. Lockdown follows it: warn, one alert is enough.
 

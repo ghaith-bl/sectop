@@ -190,3 +190,6 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
   99-finalize.rules, DISA STIG RHEL 9 V-258229): `audit-locked`, from the same journal
   CONFIG_CHANGE records as `audit-enabled`. A refused change while locked has res=0 and
   is not counted. warn: rules are loaded, only the lock is missing. 58 checks.
+- Kernel args 2026-11-07 (silverblue-cis-hardening `kargs`, after a 4-day trial):
+  `init-on-free` (`init_on_free=1`) and `iommu-strict` (`iommu.strict=1`), cmdline,
+  warn: missing = less hardening, not a hole. 63 checks in deploy/posture.toml.
