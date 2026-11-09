@@ -218,6 +218,12 @@ cmd = "hostfw|hostfw.sh apply|router-open|install"
 why = "hostfw loaded in observe, router hole or installed"
 
 [[rule]]
+id = "hostfw-api-update"
+sev = "warn"
+cmd = "hostfw|hostfw.sh api-update"
+why = "hostfw: the Mullvad API address allowed outside the tunnel may change"
+
+[[rule]]
 id = "wireguard-change"
 sev = "warn"
 cmd = "wg set|setconf|addconf|syncconf"

@@ -309,7 +309,7 @@ a change (install.sh restarts it too). Missing: no rules, every row ok, summary
   alerts start empty (state in memory). A crit row pushed out of the 200 groups: its
   alert ends.
 - Changes nothing on the host (no block, no kill).
-- Defaults: 58 rules (15 crit, 34 warn, 9 info) for my baseline (silverblue-cis-hardening:
+- Defaults: 59 rules (15 crit, 35 warn, 9 info) for my baseline (silverblue-cis-hardening:
   SELinux, auditd + CIS rules, firewalld drop zone, hostfw, wheel). Examples from the
   host screenshots 2026-10-25 in tests/test_watch.py (TestDefaults): install.sh commands
   info or ok, `modprobe nvidia` warn, `systemctl stop hostfw-rollback.*` (hostfw

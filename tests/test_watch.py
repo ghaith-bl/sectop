@@ -173,6 +173,10 @@ class TestDefaults(unittest.TestCase):
             ("/usr/bin/bash", ["bash", "/usr/local/sbin/hostfw", "enforce"], "info"),
             ("/usr/bin/bash", ["/bin/bash", "./hostfw.sh", "router-open", "10"], "warn"),
             ("/usr/bin/bash", ["bash", "/usr/local/sbin/hostfw", "status"], "ok"),
+            ("/usr/bin/bash", ["bash", "/usr/local/sbin/hostfw", "api-update"], "warn"),
+            ("/usr/bin/bash", ["bash", "/usr/local/sbin/hostfw", "noscope", "observe"],
+             "crit"),                                                 # word match: observe
+            ("/usr/bin/bash", ["bash", "/usr/local/sbin/hostfw", "noscope", "enforce"], "info"),
             ("/usr/bin/nft", ["nft", "delete", "table", "inet", "hostfw"], "crit"),
             ("/usr/bin/nft", ["nft", "flush", "ruleset"], "crit"),
             ("/usr/bin/nft", ["nft", "flush", "chain", "inet", "hostfw", "enforce"], "warn"),
@@ -219,4 +223,4 @@ class TestDefaults(unittest.TestCase):
 
     def test_levels(self):
         count = {s: sum(r.sev == s for r in self.rules) for s in watch.SEVS}
-        self.assertEqual(count, {"crit": 15, "warn": 34, "info": 9})
+        self.assertEqual(count, {"crit": 15, "warn": 35, "info": 9})
