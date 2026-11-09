@@ -39,8 +39,8 @@ Keys now: `1-3` screen, `tab` / arrows box, `j/k` / arrows select line, `PgDn/Pg
 `enter` detail, `/` filter (in a detail: search, `n` `N` next / previous match), `Esc` clear
 filter, `f` follow, `x` hide, `w` whois, `a` ack, `p` pause, `m` mask, `?` help, `q` quit,
 `g` `G` first / last line, `c` program card, `!` alerts view, `enter` on a hostfw counter:
-log card. Not built: `t` capture (from detail); `s` sort and `v` list / tree (processes
-box).
+log card. Not built: `s` sort and `v` list / tree (processes box). Cancelled: `t` capture
+(tcpdump needs capture rights, 2026-11-02).
 
 ## Firewall screen: network only (2026-10-20)
 
@@ -62,16 +62,16 @@ Who talks to what, both ways, on the firewall screen.
   (rate limit), counters are exact.
 - Row: time, dir, verdict, proto, uid, program, src, dst, iface. Color = severity.
 - Program name: netfilter logs only the UID.
-  - now: matched with `ss -p` (same 5-tuple) while the flow is still open
-  - after the split: `ss --cgroup`, no CAP_SYS_PTRACE (works as my user, 2026-10-20).
+  - `ss --cgroup` (same 5-tuple) while the flow is still open, no CAP_SYS_PTRACE;
+    GNOME Shell's shared cgroup: process names from the sectop-user helper.
     Socket -> cgroup -> app id / unit: `app-gnome-brave\x2dbrowser-<n>.scope`,
     `NetworkManager.service`. systemd.io DESKTOP_ENVIRONMENTS:
     `app[-<launcher>]-<ApplicationID>-<RANDOM>.scope`. One word: also fixes `x` for
     "Web Content".
   - not: audit `connect` rule (every unix socket connect matches too -> volume)
 - Detail (`enter`): all fields of the log line, rule, verdict meaning.
-- Later, from the detail view: short `tcpdump` on that host, bounded
-  (`-n -c 50 -s 128 -Z tcpdump` + run timeout). Fits "no long-lived children".
+- Cancelled 2026-11-02: short `tcpdump` from the detail view (needs capture rights,
+  sectop holds none).
 - Actions phase: block key = destination into a hostfw block set with timeout
   (hostfw can only tighten).
 
@@ -288,8 +288,7 @@ except `systemctl show` (posture runs it already as user sectop).
 - Temperatures: CPU, NVMe, RAM (hwmon names in config `sensors`, defaults `coretemp`,
   `nvme`, `spd5118`, checked on host 2026-10-27). dGPU not used (Integrated mode): not
   read. Other hwmon (battery, ACPI zone, Wi-Fi, cable NIC, fan curves): not shown.
-  - coretemp: `Package id 0` only (per core: hottest core in the detail, not built
-    yet). max = crit = 100 C: no warn from the sensor, warn from config (default 75 C
+  - coretemp: `Package id 0` only (per core: hottest core in the detail, not built). max = crit = 100 C: no warn from the sensor, warn from config (default 75 C
     for 60 s, 2026-10-27).
   - nvme: `Composite` only (max 80.8, crit 84.8). Its other sensors report max
     65261.8 C (not set): a limit over 200 C counts as none.
@@ -785,7 +784,7 @@ Best practice decides (Red Hat for the host). Fixtures from my host first
 ## Contract changes (Snapshot v2)
 
 - `checks`: conditions for the alert engine. Done (docs/module-interface.md, Checks).
-- Panel layout hint `width`: `full` done (audit box). Planned: half, min height.
+- Panel layout hint `width`: `full` done (audit box). Not built: half, min height.
 - `collect(state, ctx)`: done 2026-10-25 (journal entries). ctx `visible` dropped
   2026-10-27: the collector cannot know (see Resources).
 - Every module returns v2; core still accepts v1.
