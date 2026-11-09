@@ -104,13 +104,13 @@ without `..`.
 
 From silverblue-cis-hardening (harden-workstation.sh, docs/deviations.md,
 docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agreed
-2026-10-26.
+2026-10-26. 63 checks.
 
     crit  SELinux enforcing now; audit=1 + backlog in kernel args; audit not switched
           off; auditd, firewalld running; firewalld zone drop; only root UID 0; wheel =
-          me; /var on LUKS; system image not unlocked; ostree remotes verify; listeners;
+          the admin; /var on LUKS; system image not unlocked; ostree remotes verify; listeners;
           Secure Boot on; no hardware MAC on a link that is up; hostname localhost
-    warn  SELinux config enforcing + targeted; audit rules >= 70; audit locked (-e 2); journald audit
+    warn  SELinux config enforcing + targeted; audit rules >= 73; audit locked (-e 2); journald audit
           socket; su closed (sugroup empty, pam_wheel); faillock 5 / 900 s; pwquality 14
           / 4 classes; shadow, gshadow, passwd, group perms; sysctls of
           90-hardening.conf (kernel, IPv4, IPv6); no taint; CIS module blocks;
@@ -119,8 +119,9 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
           off; booted system <= 14 days; random MAC config; dhcp-send-hostname 0 on
           every Wi-Fi / cable profile; LLMNR + mDNS off; fallback hostname kernel arg;
           DNS servers only on the tunnel; no DNS in Wi-Fi / cable profiles; Mullvad
-          socket only for group mullvad; chronyd running; chrony NTS only
-          (authselectmode require, minsources 2)
+          socket only for group mullvad; sectop, sectop-feed, mullvad groups; kernel
+          args (AF_ALG off, page shuffle, no initrd shell, init_on_free, iommu.strict);
+          chronyd running; chrony NTS only (authselectmode require, minsources 2)
     info  update staged, waiting for a reboot
 
 - hostfw mode / boot mode: not here, the firewall screen checks them (alerts there).
@@ -169,8 +170,7 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
   `initcall_blacklist=af_alg_init`. warn: nothing used AF_ALG in 2 days of audit (rule
   key af-alg, logs box), a missing arg opens an attack surface, not a hole by itself.
   Live state not read: a test socket would hit the af-alg rule on every collect.
-  Audit rules want 72 (70 CIS + 2 af-alg).
-- Audit rules want 73 (2026-11-01): host had 73, 1 more than expected. The `privileged`
+- Audit rules want 73: 70 CIS + 2 af-alg + 1 setuid file (2026-11-01). The `privileged`
   list (55-privileged.rules) is built from the setuid / setgid files under /usr when the
   `audit-rules` section runs: 28 on the host, new one `/usr/bin/mullvad-exclude`
   (setuid root, mullvad-vpn, installed after the count of 70). The check is a floor
@@ -180,16 +180,16 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
   `page-shuffle` (`page_alloc.shuffle=1`) and `initrd-no-shell` (`rd.shell=0
   rd.emergency=halt`), both cmdline, warn: missing = less hardening, not a hole. The
   GRUB password that makes `initrd-no-shell` worth it is not checked: /boot/grub2 is not
-  readable for user sectop (not verified on the host). 56 checks.
+  readable for user sectop (not verified on the host).
 - Mullvad socket 2026-11-02 (silverblue-cis-hardening `mullvad`): `mullvad-socket`, perms
   of /run/mullvad-vpn, want 760 root:mullvad (host after the change). Without the
   drop-in the daemon makes it 766 root:root (host before): any local user can
   disconnect, turn lockdown off or change settings. stat only, the socket is never
-  opened. warn: the tunnel and lockdown are still on. 57 checks.
+  opened. warn: the tunnel and lockdown are still on.
 - Audit lock 2026-11-03 (silverblue-cis-hardening `audit-rules`, `-e 2` in
   99-finalize.rules, DISA STIG RHEL 9 V-258229): `audit-locked`, from the same journal
   CONFIG_CHANGE records as `audit-enabled`. A refused change while locked has res=0 and
-  is not counted. warn: rules are loaded, only the lock is missing. 58 checks.
+  is not counted. warn: rules are loaded, only the lock is missing.
 - Kernel args 2026-11-07 (silverblue-cis-hardening `kargs`, after a 4-day trial):
   `init-on-free` (`init_on_free=1`) and `iommu-strict` (`iommu.strict=1`), cmdline,
-  warn: missing = less hardening, not a hole. 63 checks in deploy/posture.toml.
+  warn: missing = less hardening, not a hole.

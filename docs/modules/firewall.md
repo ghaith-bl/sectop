@@ -417,8 +417,9 @@ Title: `audit <flows> flows  (<lines> lines)`, lines = all since sectop started.
   UID ...), flags (DF, SYN ...).
 - Blocked lines are samples (hostfw rate limit 10/min per rule), allowed new flows
   5/s burst 50. Counters stay exact.
-- Program for blocked flows: mostly `?` (rejected connect closes before the next poll).
-  Planned: Linux audit `connect` records (docs/architecture.md).
+- Program for blocked flows: mostly `?` (rejected connect closes before the next poll);
+  the row detail says why (`why ?`, see above). Not used: audit `connect` records (every
+  unix socket connect matches too: volume, docs/architecture.md).
 - Verdict uses the mode at collect time: lines logged just before a mode switch may show the new mode.
 
 Summary: `enforce | wg0-mullvad up | hs 20s | leak 4`, plus first 3 warn / crit checks.

@@ -37,9 +37,10 @@ can decide from what is on screen. Read-only until the privilege split (phase 3)
 
 Keys now: `1-3` screen, `tab` / arrows box, `j/k` / arrows select line, `PgDn/PgUp` page,
 `enter` detail, `/` filter (in a detail: search, `n` `N` next / previous match), `Esc` clear
-filter, `f` follow, `x` hide, `w` whois, `a` ack, `p` pause, `m` mask, `?` help, `q` quit.
-Planned: `t` capture (from detail); program card (`enter` on a program, phase 4); `s` sort
-and `v` list / tree (processes box).
+filter, `f` follow, `x` hide, `w` whois, `a` ack, `p` pause, `m` mask, `?` help, `q` quit,
+`g` `G` first / last line, `c` program card, `!` alerts view, `enter` on a hostfw counter:
+log card. Not built: `t` capture (from detail); `s` sort and `v` list / tree (processes
+box).
 
 ## Firewall screen: network only (2026-10-20)
 
@@ -388,11 +389,16 @@ Host checks 2026-10-27 (sandbox: nsenter into sectop.service as user sectop):
   (`not GNOME's own: brave x10, cat x2`, pids), info while new, warn + one check per
   cgroup `shared_cgroup:<unit>` after 10 s (a launch moves in ms: one scan may catch
   it). Always shown, even outside the top 30. Fix: silverblue-cis-hardening appunit.
-  Enforcement: hostfw rejects network from that cgroup (hardening repo, planned).
+  Enforcement: hostfw rule out_noscope rejects new flows from that cgroup (hardening
+  repo; enforce on my host since 2026-11-07).
 - Program card (`c`): rows here carry `progs`, so the card shows a program's processes,
   units and the other screens' rows together.
 
 ### Severity (red rule, 2026-10-25)
+
+Built: temperatures, `/var` free, zombie / `D`, GNOME Shell cgroup strays, unreadable
+sources. Not built: watched units, OOM kills, unit restarts (services box), pressure
+limits (shown only, no limit yet).
 
 crit (red, alert):
 - temperature >= `temp*_crit` of that sensor (no crit file: never red)
@@ -445,11 +451,12 @@ box via polkit, confirm, deny list (see Actions).
    tests/fixtures/system/host: fake tree, hwmon names and files as on my host).
 3. programs box (moved up 2026-10-27, my ask: "enter or c on memory must show what
    takes it"): done (modules/system/procs.py), see Boxes.
-4. services box (cgroup, journal, watched units); posture: no second alert.
-5. processes view (parent chain) + keys `s`, `v`, inside the programs box. Zombies and
-   `D`: done 2026-10-27 (rows on top of the programs box).
-6. Measure sectop.service CPU before / after, docs/modules/system.md, README legend.
-7. First public release: tools, requirements, dependencies.
+4. services box (cgroup, journal, watched units); posture: no second alert. Not built.
+5. processes view (parent chain) + keys `s`, `v`, inside the programs box: not built.
+   Zombies and `D`: done 2026-10-27 (rows on top of the programs box).
+6. Measure sectop.service CPU before / after, docs/modules/system.md: open. README
+   legend: done.
+7. First public release: done, v0.1.0 (2026-11-02).
 
 ## Alerts
 
@@ -690,20 +697,17 @@ Design (least privilege: NIST SP 800-53 / 800-171 AC-6, systemd.exec(5), capabil
   possible", systemd.exec(5)), checked with `systemd-analyze security <unit>` (Red Hat:
   results "should be considered hints").
 - SELinux: without a policy the services run as `unconfined_service_t` (RHEL Using
-  SELinux, "Writing a custom SELinux policy"). Own policy (`sepolicy generate --init`)
-  after the split works, built from its real behavior (AVC).
+  SELinux, "Writing a custom SELinux policy"). Own policy (`sepolicy generate --init`):
+  maybe later, not planned.
 - UI = the admin, no sudo, on the text console. Reads `/run/sectop/state.json`. One-way:
   the UI never writes to the collector (ack stays in the UI).
-
-Until the split is installed: `/etc/sectop/config.toml` `[modules.firewall] interval =
-6.0`, fewer commands per tick (slow sources on their own interval).
 
 ## Actions (last phase)
 
 Stop / restart a service, kill a process. Only after the privilege split:
 
-- Collector = non-root service (see Privilege split). UI = my user, unprivileged.
-- Actions run as my user via `systemctl`; polkit asks for the password.
+- Collector = non-root service (see Privilege split). UI = the admin, no sudo.
+- Actions run as the admin via `systemctl`; polkit asks for the password.
 - Confirm before every action. Deny list never touched: journald, NetworkManager,
   firewalld, hostfw, mullvad-daemon, sshd if present.
 - Every action logged to the journal.
@@ -784,7 +788,7 @@ Best practice decides (Red Hat for the host). Fixtures from my host first
 - Panel layout hint `width`: `full` done (audit box). Planned: half, min height.
 - `collect(state, ctx)`: done 2026-10-25 (journal entries). ctx `visible` dropped
   2026-10-27: the collector cannot know (see Resources).
-- v1 Snapshots keep working until all modules move to v2.
+- Every module returns v2; core still accepts v1.
 
 ## Phases
 
@@ -793,8 +797,10 @@ Best practice decides (Red Hat for the host). Fixtures from my host first
 2. Alert engine + noise list. Firewall checks move to it.
 3. Privilege split (non-root collector service, unprivileged UI). Moved before logs
    2026-10-20: the logs screen reads the audit log and must not show sectop's own commands.
-   Then: own SELinux policy for the collector.
 4. Logs + posture, and system (read-only). Both required, order free. Security screen:
    commands, auth, kernel, posture, logs; program card. See Phase 4 plan.
-   System = screen 3, see Processes screen (plan). Then the first public release.
-5. Actions.
+   System = screen 3, see Processes screen (plan).
+5. Actions (last, not started).
+
+Done: 1-4 (first public release v0.1.0, 2026-11-02). Own SELinux policy: maybe later,
+not planned.
