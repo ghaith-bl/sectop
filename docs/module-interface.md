@@ -39,7 +39,8 @@ def close(state: object) -> None: ...     # optional
 - `collect`: every INTERVAL. Returns Snapshot. Raise -> see Errors.
   `ctx` (`core.module.Context`, frozen): `journal` (entries since the last collect),
   `journal_up`, `journal_note` (see Journal). Empty for a module without JOURNAL.
-  Planned: `visible` (screen shown or not).
+  No `visible`: the collector cannot know which screen the UI shows
+  (docs/architecture.md, Resources).
 - `close`: on exit, if defined.
 - Single thread. No threads, no long-lived child processes in modules. The journal:
   declare JOURNAL, core runs one follower for all modules.
@@ -68,9 +69,9 @@ def close(state: object) -> None: ...     # optional
 | checks | list | v2 only, required. Check, max 50 (see Checks) |
 
 - Only dict, list, str, int, float, bool, None.
-  Core checks with `json.dumps`. Needed for the later split
-  (root collector service -> unprivileged UI).
-- v2 = v1 + `checks`. v1 still accepted (no checks) until all modules move to v2.
+  Core checks with `json.dumps`: the collector service writes it to
+  /run/sectop/state.json for the UI (docs/architecture.md, Privilege split).
+- v2 = v1 + `checks`. Every module returns v2; core still accepts v1 (no checks).
 
 ## Severity
 

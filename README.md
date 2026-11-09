@@ -9,7 +9,7 @@ hardening baseline still holds. Like btop, but for security. Python 3 stdlib onl
 > [silverblue-cis-hardening](https://github.com/ghaith-bl/silverblue-cis-hardening) sets
 > up on my laptop: its audit rule keys, its nftables table `hostfw`, its posture
 > baseline, Mullvad VPN. On another host many boxes stay empty and many posture checks
-> fail. Other distros, no VPN, no hostfw: planned for v0.2. Read-only: it changes nothing
+> fail. Other distros, no VPN, no hostfw: not supported (maybe later). Read-only: it changes nothing
 > on the host. No warranty (GPL-3.0, sections 15-16).
 
 ## Screenshots
@@ -26,7 +26,7 @@ Public IPs masked (key m), the way the screens start.
 
 - Linux with systemd + journald, `systemd-journald-audit.socket` enabled (audit records
   are read from the journal only)
-- Python >= 3.11 (tomllib); tested 3.13, 3.14
+- Python >= 3.11 (tomllib); CI tests 3.11 - 3.14
 - auditd + the audit rules of silverblue-cis-hardening (`audit-rules` section: keys
   root_cmds, user_emulation, kernel_modules, logins, identity, ...). Without them the
   security screen is mostly empty
