@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -478,11 +479,16 @@ class Base(unittest.TestCase):
         self.users = Users()
         self.cg = os.path.join(self.tmp.name, "cgroup")         # not the host's cgroups
         self.proc = os.path.join(self.tmp.name, "proc")
+        self.pw = {}                                            # uid -> name, not the host's
         self.st = fw.State(run=self.host, net=self.host, mono=lambda: self.mono,
                            wall=lambda: self.wall,
                            owner=os.getuid(), mode_file=self.mode_file,
                            rollback_file=self.rb_file, sysnet=self.sysnet, users=self.users,
-                           cgroup_root=self.cg, proc_root=self.proc)
+                           cgroup_root=self.cg, proc_root=self.proc,
+                           getpw=self.getpw)
+
+    def getpw(self, uid):
+        return types.SimpleNamespace(pw_name=self.pw[uid])
 
     def tun(self, flags="0x1091", tun_flags=True):
         """The tunnel as a tun device in the fake sysfs (userspace WireGuard)."""
@@ -914,12 +920,14 @@ class TestCollect(Base):
         self.assertEqual(p["types"], ["text", "text", "num", "num", "num", "num", "num", "age"])
         self.assertEqual((rows["brave"]["tone"], rows["brave"]["filter"]), ("blue", "brave"))
         self.assertEqual(rows["brave"]["progs"], ["brave"])                # c = program card
-        for other in ("? uid 1000", "? uid -", "vm", "(inbound)"):
+        for other in ("? uid 1000", "(kernel)", "vm", "(inbound)"):
             self.assertNotIn("progs", rows[other], other)
         # no ss match: grouped by uid; the leak (blocked) and two allowed flows of uid 1000
         self.assertEqual(rows["? uid 1000"]["cells"][:6], ["?", "1000", "0", "2", "1", "0"])
         self.assertEqual(rows["? uid 1000"]["filter"], "? 1000")
-        self.assertEqual((rows["? uid -"]["tone"], rows["? uid -"]["filter"]), ("red", "?"))
+        # no uid in the line (no socket owner): the kernel's own packets (2026-11-09)
+        self.assertEqual((rows["(kernel)"]["cells"][0], rows["(kernel)"]["tone"],
+                          rows["(kernel)"]["filter"]), ("(kernel)", "red", "kernel"))
         self.assertEqual(rows["vm"]["cells"][3:5], ["1", "1"])         # FWD-VM-NEW, FWD-VM-LAN
         self.assertEqual((rows["(inbound)"]["cells"][5], rows["(inbound)"]["filter"]),
                          ("1", "zone"))                                # IN-NOISE hidden
@@ -931,7 +939,8 @@ class TestCollect(Base):
                          fw.APP_OTHER["(inbound)"][2])
         self.assertEqual({it["k"]: it["v"] for it in rows["? uid 1000"]["detail"]}["note"],
                          "program unknown: uid 1000, the flow closed before the next ss poll "
-                         "(a flow row's detail says why: short flow, discovery, not tcp / udp)")
+                         "(a flow row's detail says why: short flow, discovery, not tcp / udp); "
+                         "uid 1000: no process runs as it now")
 
     def test_programs_keep_and_limit(self):
         self.audit()
@@ -967,7 +976,7 @@ class TestCollect(Base):
         self.assertEqual(rows, [                                    # newest first
             ["t59", "1", "out", "allow", "tcp", "1000", "?", "192.168.8.102", "192.168.8.50:22",
              "wlo1"],                                               # ephemeral port left out
-            ["t58", "1", "out", "block", "icmpv6", "-", "?", "fe80::1", "ff02::1:ff00:1",
+            ["t58", "1", "out", "block", "icmpv6", "-", "(kernel)", "fe80::1", "ff02::1:ff00:1",
              "wlo1"],
             ["t57", "1", "fwd", "block", "udp", "-", "vm", "192.168.122.10:123",
              "203.0.113.5:123", "virbr0>wlo1"],                     # equal ports: both kept
@@ -995,9 +1004,10 @@ class TestCollect(Base):
         self.assertEqual((detail["TTL"], detail["UID"], detail["flags"]), ("64", "1000", "DF SYN"))
         self.assertNotIn("IN", detail)                               # empty field skipped
         keys = [d["k"] for d in p["rows"][4]["detail"]]
-        self.assertEqual(keys[:9], ["count", "blocked", "src ports", "why ?", "last line",
-                                    "rule", "verdict", "time", "prefix"])
+        self.assertEqual(keys[:10], ["count", "blocked", "src ports", "why ?", "uid",
+                                     "last line", "rule", "verdict", "time", "prefix"])
         self.assertEqual(detail["why ?"], "short flow, uid 1000: closed before the ss poll")
+        self.assertEqual(detail["uid"], "uid 1000: no process runs as it now")
         self.assertEqual(p["rows"][4]["id"],
                          "out_leak|out|tcp|1000|192.168.8.102|203.0.113.11:443|wlo1")
         self.assertEqual({d["k"]: d["v"] for d in p["rows"][3]["detail"]}["src ports"], "51544")
@@ -1745,6 +1755,78 @@ class TestProgramNames(Base):
                                'users:(("curl",pid=9,fd=3))\n'))
         self.lines(TCP_NEW.format(dst="203.0.113.10", spt=40001))
         self.assertIn("? uid 1000", self.rows(self.collect()))
+
+    def procs(self, *items):
+        """Fake /proc: (pid, uid, cgroup) per process."""
+        for pid, uid, cgroup in items:
+            d = os.path.join(self.proc, str(pid))
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "status"), "w") as f:
+                f.write(f"Uid:\t{uid}\t{uid}\t{uid}\t{uid}\n")
+            with open(os.path.join(d, "cgroup"), "w") as f:
+                f.write(f"0::{cgroup}\n")
+
+    def test_guess_from_uid(self):
+        """2026-11-09: a service user runs one program -> its flows get that name (guess)."""
+        self.pw = {994: "chrony"}
+        self.procs((700, 994, "/system.slice/chronyd.service"))
+        ntp = ("HFW-OUT-LEAK: IN= OUT=wlo1 SRC=192.168.8.102 DST=203.0.113.20 LEN=76 "
+               "PROTO=UDP SPT=123 DPT=123 LEN=56 UID=994 GID=994 ")
+        self.lines(ntp)
+        snap = self.collect()
+        g = self.rows(snap)["chronyd?"]
+        self.assertEqual(g["cells"][:2], ["chronyd?", "994"])
+        self.assertNotIn("progs", g)                                    # never on a card
+        self.assertIn("only program running as uid 994 (chrony)", self.detail(g)["note"][0])
+        flow = self.panel(snap, "audit")["rows"][0]
+        self.assertEqual(flow["cells"][6], "chronyd?")
+        d = {it["k"]: it["v"] for it in flow["detail"]}
+        self.assertIn("uid 994 (chrony)", d["guess"])
+        self.assertNotIn("why ?", d)
+        peer = self.rows(snap, "peers")["203.0.113.20"]
+        self.assertEqual(peer["cells"][4], "?")                         # guess not fed back
+
+    def test_guess_from_uid_icmp(self):
+        """Not tcp / udp: no socket match, the uid guess still works (ping as a service)."""
+        self.procs((710, 995, "/system.slice/mullvad-probe.service"))
+        self.lines("HFW-OUT-NEW: IN= OUT=wg0-mullvad SRC=10.2.0.2 DST=203.0.113.9 LEN=84 "
+                   "PROTO=ICMP TYPE=8 CODE=0 ID=1 SEQ=1 UID=995 GID=995 ")
+        self.assertIn("mullvad-probe?", self.rows(self.collect()))
+
+    def test_no_uid_guess(self):
+        """Two programs, or a process with no unit (session): no guess; the user name."""
+        self.pw = {994: "chrony", 1001: "admin"}
+        self.procs((700, 994, "/system.slice/chronyd.service"),
+                   (701, 994, "/system.slice/other.service"),
+                   (800, 1001, "/user.slice/user-1001.slice/session-c1.scope"))
+        self.lines("HFW-OUT-NEW: IN= OUT=wg0-mullvad SRC=10.2.0.2 DST=203.0.113.9 LEN=60 "
+                   "PROTO=TCP SPT=40000 DPT=443 SYN UID=994 GID=994 ",
+                   "HFW-OUT-NEW: IN= OUT=wg0-mullvad SRC=10.2.0.2 DST=203.0.113.8 LEN=60 "
+                   "PROTO=TCP SPT=40001 DPT=443 SYN UID=1001 GID=1001 ")
+        snap = self.collect()
+        rows = self.rows(snap)
+        r = rows["? uid 994"]
+        self.assertEqual((r["cells"][0], r["filter"]), ("? chrony", "? 994"))
+        self.assertIn("uid 994 (chrony): 2 programs run as it now: chronyd, other",
+                      self.detail(r)["note"][0])
+        self.assertIn("(session)", self.detail(rows["? uid 1001"])["note"][0])
+        audit = {r["cells"][5]: r for r in self.panel(snap, "audit")["rows"]}
+        self.assertEqual(audit["994"]["cells"][6], "? chrony")
+        d = {it["k"]: it["v"] for it in audit["994"]["detail"]}
+        self.assertEqual(d["uid"], "uid 994 (chrony): 2 programs run as it now: chronyd, other")
+
+    def test_uid_scan_once_per_tick(self):
+        self.procs((700, 994, "/system.slice/chronyd.service"))
+        self.lines(*(TCP_NEW.format(dst=f"203.0.113.{i}", spt=41000 + i).replace(
+            "UID=1000 GID=1000", "UID=994 GID=994") for i in range(3)))
+        calls = []
+        real = fw.procmod.by_uid
+        fw.procmod.by_uid = lambda root: calls.append(root) or real(root)
+        try:
+            self.assertIn("chronyd?", self.rows(self.collect()))
+        finally:
+            fw.procmod.by_uid = real
+        self.assertEqual(calls, [self.proc])
 
     def test_shared_cgroup_from_helper(self):
         self.shell("gnome-shell", "brave", "brave")

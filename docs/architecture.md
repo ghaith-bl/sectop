@@ -69,6 +69,8 @@ Who talks to what, both ways, on the firewall screen.
     `app[-<launcher>]-<ApplicationID>-<RANDOM>.scope`. One word: also fixes `x` for
     "Web Content".
   - not: audit `connect` rule (every unix socket connect matches too -> volume)
+  - flow gone before the poll: guess from the uid when one program runs as it, no uid =
+    (kernel) (2026-11-09, docs/modules/firewall.md)
 - Detail (`enter`): all fields of the log line, rule, verdict meaning.
 - Cancelled 2026-11-02: short `tcpdump` from the detail view (needs capture rights,
   sectop holds none).

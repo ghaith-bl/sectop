@@ -25,6 +25,7 @@ import collections
 import dataclasses
 import ipaddress
 import os
+import pwd
 import re
 import stat
 import time
@@ -106,7 +107,12 @@ APP_OTHER = {
                   "inbound lines: no program (hostfw logs, the firewalld zone decides)"),
     "vm": ("vm", "vm", "forwarded traffic of libvirt VMs"),
     "(forward)": ("(forward)", "fwd_in", "forwarded traffic not from a VM"),
+    "(kernel)": ("(kernel)", "kernel",
+                 "outgoing lines without a socket owner: packets the kernel sends itself "
+                 "(TCP resets, ICMP replies, IGMP / MLD reports)"),
 }
+KERNEL = "(kernel)"         # program of an outgoing line with no UID (no socket owner)
+MAX_GUESSES = 200           # guess notes kept (programs box rows)
 CGNAT = ipaddress.ip_network("100.64.0.0/10")
 ULA = ipaddress.ip_network("fc00::/7")
 CONTEXT_NOTE = {
@@ -208,7 +214,7 @@ class State:
                  mono=time.monotonic, wall=time.time, owner=0,
                  mode_file=MODE_FILE, rollback_file=ROLLBACK_FILE, hms=_hms, stamp=_stamp,
                  uptime_file=UPTIME_FILE, sysnet=SYSNET, users=None,
-                 cgroup_root=procmod.CGROUP_ROOT, proc_root="/proc"):
+                 cgroup_root=procmod.CGROUP_ROOT, proc_root="/proc", getpw=pwd.getpwuid):
         self.tunnel, self.hold = tunnel, hold
         self.run, self.mono, self.wall, self.owner = run, mono, wall, owner
         self.mode_file, self.rollback_file = mode_file, rollback_file
@@ -249,6 +255,9 @@ class State:
         self.cgroup_root, self.proc_root = cgroup_root, proc_root
         self.shared = {}               # this tick: shared cgroup -> stray Counter / None
         self.helper = None             # this tick: socket inode -> userd.Owner (lazy)
+        self.uid_scan = None           # this tick: uid -> Counter program (/proc, lazy)
+        self.getpw = getpw             # uid -> passwd entry (user name next to a uid)
+        self.guesses = {}              # guess key ("chronyd?") -> why, last reason wins
         self.helper_notes = []         # this tick: user helper problems
 
     def users_seen(self) -> bool:
@@ -717,6 +726,9 @@ class Names:
        per tick, only when a UDP line needs it: QUIC)
     3. guess `<name>?`: exactly one program had sockets to the line's peer (now, or
        earlier in the peers box). Shown as a guess, never on a card.
+    4. guess `<name>?`: every process running as the line's uid now belongs to one
+       program (2026-11-09; any proto, ICMP too)
+    5. no uid in the line: (kernel). Else `?`.
     One answer per line and tick (memo): every box shows the same name."""
 
     def __init__(self, st: State, cs: list):
@@ -727,6 +739,7 @@ class Names:
         self.udp = None                               # (proto, port) -> sockets, lazy
         self.udp_err = ""
         self.memo = {}
+        st.uid_scan = None                            # new tick: /proc read again if needed
 
     def _ports(self) -> dict:
         if self.udp is None:
@@ -747,9 +760,22 @@ class Names:
 
     def _name(self, e) -> str:
         f = e.fields
-        proto = f.get("PROTO", "-").lower()
-        if proto not in ("tcp", "udp"):
+        proto, uid = f.get("PROTO", "-").lower(), f.get("UID") or ""
+        if proto in ("tcp", "udp"):
+            name = self._socket(e, proto)
+            if name:
+                return name
+        if not uid:
+            return KERNEL
+        g = _uid_guess(self.st, uid)
+        if g is None:
             return "?"
+        _guessed(self.st, f"{g}?", f"guess: the flow closed before the next ss poll; {g} "
+                 f"is the only program running as uid {uid}{_named(self.st, uid)} now")
+        return f"{g}?"
+
+    def _socket(self, e, proto: str) -> str:
+        """Steps 1-3: socket name, or a guess from the peer. '' = none."""
         src, dst = conns.split(journal.src(e)), conns.split(journal.dst(e))
         names = self.idx.get((proto, *src, *dst), ())
         if not names and proto == "udp" and src[1]:
@@ -761,12 +787,67 @@ class Names:
         if p is not None:
             guess.update(n for n in p.progs if _real(n))
         guess = {n for n in guess if "/" not in n}    # never guess a shared-cgroup process
-        return f"{next(iter(guess))}?" if len(guess) == 1 else "?"
+        if len(guess) != 1:
+            return ""
+        g = next(iter(guess))
+        _guessed(self.st, f"{g}?", f"guess: the flow closed before the next ss poll; {g} "
+                 "was the only program with sockets to its peer")
+        return f"{g}?"
+
+
+def _guessed(st: State, key: str, why: str) -> None:
+    st.guesses.pop(key, None)
+    st.guesses[key] = why                                 # newest at the end
+    while len(st.guesses) > MAX_GUESSES:
+        del st.guesses[next(iter(st.guesses))]
+
+
+def _uid_progs(st: State) -> dict:
+    """uid -> Counter program of its processes now: /proc read once per tick, lazy."""
+    if st.uid_scan is None:
+        st.uid_scan = procmod.by_uid(st.proc_root)
+    return st.uid_scan
+
+
+def _uid_guess(st: State, uid: str) -> str | None:
+    """The one program all processes of this uid belong to, else None (none, two or
+    more, or a process with no program: a session scope)."""
+    progs = _uid_progs(st).get(uid)
+    if not progs or len(progs) != 1:
+        return None
+    name = next(iter(progs))
+    return name if name and _real(name) and "/" not in name else None
+
+
+def _user(st: State, uid: str) -> str:
+    """uid -> user name ('' unknown). Service users name their service (chrony ...)."""
+    try:
+        name = st.getpw(int(uid)).pw_name
+    except (KeyError, ValueError, OverflowError):
+        return ""
+    return name if procmod.NAME_RE.fullmatch(name) else ""
+
+
+def _named(st: State, uid: str) -> str:
+    user = _user(st, uid)
+    return f" ({user})" if user else ""
+
+
+def _uid_note(st: State, uid: str) -> str:
+    """Detail line: who runs as this uid now."""
+    progs = _uid_progs(st).get(uid)
+    if not progs:
+        return f"uid {uid}{_named(st, uid)}: no process runs as it now"
+    named = collections.Counter({(k or "(session)"): v for k, v in progs.items()})
+    return (f"uid {uid}{_named(st, uid)}: {len(named)} program{'s' if len(named) != 1 else ''} "
+            f"run as it now: {procmod.label(named)[:300]}")
 
 
 def _real(name: str) -> bool:
-    """A program name from a socket: not a guess (x?), not unknown (?, org.gnome.Shell/?)."""
-    return bool(name) and not name.endswith("?") and name not in ("-", "vm")
+    """A program name from a socket: not a guess (x?), not unknown (?, org.gnome.Shell/?),
+    not a placeholder ((kernel), (inbound) ...)."""
+    return (bool(name) and not name.endswith("?") and name not in ("-", "vm")
+            and not name.startswith("("))
 
 
 def _prog(e, names) -> tuple:
@@ -839,7 +920,7 @@ def _progs(names) -> list:
     out = []
     for n in names:
         n = n.partition("/")[0]
-        if n.endswith("?") or not PROG_RE.fullmatch(n):
+        if n.endswith("?") or n.startswith("(") or not PROG_RE.fullmatch(n):
             continue
         if n not in out and len(out) < ROW_PROGS:
             out.append(n)
@@ -869,6 +950,9 @@ def _flow_row(st: State, key: tuple, fl: Flow) -> dict:
         prog = ",".join(fl.progs[:MAX_PROGS]) + ("+" if len(fl.progs) > MAX_PROGS else "")
     else:
         prog = {"fwd": "vm" if kind.startswith("fwd_vm") else "-", "in": "-"}.get(d, "?")
+    cell = prog
+    if prog == "?" and uid != "-" and _user(st, uid):
+        cell = f"? {_user(st, uid)}"                 # the user names a service (chrony ...)
     detail = [("count", f"{fl.n} line{'s' if fl.n != 1 else ''}, first {st.stamp(fl.first)}")]
     if fl.ports:
         detail.append((f"{fl.side} ports", " ".join(fl.ports) + ("  (newest first)"
@@ -877,13 +961,20 @@ def _flow_row(st: State, key: tuple, fl: Flow) -> dict:
         detail.append(("programs", ", ".join(fl.progs)))
     if prog == "?":
         detail.append(("why ?", _why_unknown(proto, uid, fl.entry.fields.get("DST", ""))))
+        if uid != "-":
+            detail.append(("uid", _uid_note(st, uid)))
+    for name in fl.progs:
+        if name.endswith("?") and name in st.guesses:
+            detail.append(("guess", st.guesses[name]))
+    if KERNEL in fl.progs:
+        detail.append(("(kernel)", APP_OTHER[KERNEL][2]))
     detail.append(("last line", "fields below"))
     sev = kind_sev(kind) or "ok"
     if kind == "out_leak":
         sev = leak_sev(None, fl.verdict)
         if fl.verdict == "block":
             detail.insert(1, ("blocked", BLOCKED_NOTE))
-    row = {"cells": [_when(fl.last), str(fl.n), d, fl.verdict, proto, uid, prog,
+    row = {"cells": [_when(fl.last), str(fl.n), d, fl.verdict, proto, uid, cell,
                      fl.src, fl.dst, iface],
            "sev": sev, "tone": _tone(fl.verdict),
            "id": "|".join(key), "ref": _ref(key),
@@ -1424,15 +1515,18 @@ def _app_row(st: State, key: str, a: App, socks: list) -> dict:
         prog, pick, note = other
     elif key.startswith("? uid "):
         uid = key[len("? uid "):]
-        prog, pick = "?", ("?" if uid == "-" else f"? {uid}")
+        user = "" if uid == "-" else _user(st, uid)
+        prog, pick = (f"? {user}" if user else "?"), ("?" if uid == "-" else f"? {uid}")
         note = ("program unknown: kernel or no socket owner (no uid in the log line)"
                 if uid == "-" else
-                f"program unknown: uid {uid}, the flow closed before the next ss poll "
-                "(a flow row's detail says why: short flow, discovery, not tcp / udp)")
+                f"program unknown: uid {uid}{_named(st, uid)}, the flow closed before the next "
+                "ss poll (a flow row's detail says why: short flow, discovery, not tcp / "
+                "udp); " + _uid_note(st, uid))
     elif key.endswith("?") and "/" not in key:
         prog, pick = key, key
-        note = (f"guess: the flow closed before the next ss poll; {key[:-1]} was the only "
-                "program with sockets to its peer")
+        note = st.guesses.get(key) or (f"guess: the flow closed before the next ss poll; "
+                                       f"{key[:-1]} was the only program with sockets to "
+                                       "its peer")
     else:
         prog, pick, note = key, key, ""
     shared = _shared_note(st, key, "warn" if socks else "ok")

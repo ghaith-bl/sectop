@@ -136,6 +136,30 @@ class TestShared(unittest.TestCase):
             self.assertIsNone(proc.strays("relative/path", cg, pr))
             self.assertIsNone(proc.strays("/a/../../etc", cg, pr))
 
+    def test_by_uid(self):
+        """uid -> programs now (firewall uid guess, 2026-11-09). Field 5 of Uid: = fsuid."""
+        def put(pr, pid, uid, cgroup):
+            os.makedirs(f"{pr}/{pid}")
+            with open(f"{pr}/{pid}/status", "w") as f:
+                f.write(f"Name:\tx\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n")
+            if cgroup is not None:
+                with open(f"{pr}/{pid}/cgroup", "w") as f:
+                    f.write(f"0::{cgroup}\n")
+        with tempfile.TemporaryDirectory() as pr:
+            self.assertEqual(proc.by_uid(pr + "/missing"), {})
+            put(pr, 2, 0, "/")                                          # kernel thread
+            put(pr, 700, 994, "/system.slice/chronyd.service")
+            put(pr, 701, 994, "/system.slice/chronyd.service")
+            put(pr, 800, 1001, "/user.slice/user-1001.slice/session-c1.scope")  # no unit
+            put(pr, 801, 1001, "/system.slice/sectop.service")
+            put(pr, 900, 1000, None)                                    # gone: no cgroup
+            os.makedirs(f"{pr}/self")                                   # not a pid
+            got = proc.by_uid(pr)
+            self.assertEqual(set(got), {"994", "1001"})
+            self.assertEqual(dict(got["994"]), {"chronyd": 2})
+            self.assertEqual(dict(got["1001"]), {None: 1, "sectop": 1})
+            self.assertEqual(proc.by_uid(pr, limit=0), {})
+
 
 class TestRowProgs(unittest.TestCase):
     def snap(self, progs):

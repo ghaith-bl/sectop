@@ -205,7 +205,7 @@ Title: `programs <rows>  <n> with open sockets`.
 
 | column | value |
 |---|---|
-| prog | program from the socket's cgroup (`ss --cgroup`, see below); `?` = no ss match (one row per uid); `(inbound)`, `vm`, `(forward)` = lines without a program |
+| prog | program from the socket's cgroup (`ss --cgroup`, see below); `<name>?` = guess; `? <user>` / `?` = unknown (one row per uid, the uid's user name when it has one); `(kernel)`, `(inbound)`, `vm`, `(forward)` = lines without a program |
 | uid | UIDs of its lines (OUT rules with `skuid`), max 3 then `+`, else `-` |
 | open | open sockets now |
 | out | allowed lines (new flows, exceptions), out and forward |
@@ -219,7 +219,8 @@ Title: `programs <rows>  <n> with open sockets`.
   kinds (`out_new 12, out_lan 3`), peers by lines (`(socket)` = open, no line yet), uids,
   first / last seen.
 - Row `filter` (keys `f` / `x`, docs/module-interface.md, Screen): the name; `? <uid>` for
-  unknown programs (`?` when no uid); `zone` for (inbound), `vm`, `fwd_in` for (forward).
+  unknown programs; `kernel` for (kernel), `zone` for (inbound), `vm`, `fwd_in` for
+  (forward).
   Only when it is printable ASCII (the filter prompt's chars): else no filter.
 - Same limit as the audit `prog` column: a flow that closes before the next `ss` poll
   has no program. Blocked flows: mostly `?` (a rejected SYN never has a socket). No
@@ -232,12 +233,24 @@ answer per line and tick (every box shows the same):
    from the lazy `ss ... state closed` call (QUIC often sends unconnected)
 3. guess `<name>?`: exactly one program had sockets to the line's peer (now, or earlier
    in the peers box). Own row (`brave?`, note `guess: ...`), never on a card (`progs`),
-   not fed back into the peers box. Two or more programs: `?`.
-4. `?` (row `? uid N`)
+   not fed back into the peers box. Two or more programs: next step.
+4. guess `<name>?` from the uid (2026-11-09, any proto, ICMP too): every process that runs
+   as the line's uid now (fsuid, `/proc/<pid>/status` + `cgroup`, core/proc.py by_uid,
+   read once per tick and only when a line needs it) belongs to one program. Service
+   users: chrony -> `chronyd?`. Not for a uid with two or more programs, or with a
+   process in a login / sudo session scope (no unit). Same rules as step 3 (guess, own
+   row, never on a card); note `guess: ... only program running as uid N (user) now`.
+5. no uid in the line: `(kernel)` (no socket owner: the kernel's own packets, TCP
+   resets, ICMP replies, IGMP / MLD reports, neighbor solicitations). Own programs row,
+   filter `kernel`.
+6. `?` (row `? uid N`, prog cell `? <user>` when the uid has a user name)
    Why `?` (2026-11-07), in the audit row detail `why ?` and the `? uid N` note:
-   not tcp / udp (`ss` lists tcp / udp only: IGMP, ICMP), no uid in the line (kernel,
-   no socket owner), multicast / broadcast destination (discovery: one short send),
-   else a short flow of uid N that closed before the ss poll.
+   not tcp / udp (`ss` lists tcp / udp only: IGMP, ICMP), multicast / broadcast
+   destination (discovery: one short send), else a short flow of uid N that closed
+   before the ss poll. Detail / note `uid`: the programs running as that uid now
+   (`(session)` = a process with no unit).
+   Left: short flows of uid 0 or my own uid (many programs). Not used for them: audit
+   `connect` records (volume), socket destroy events (sock_diag, not tried).
 
 Shared cgroup (2026-11-03): an app GNOME starts can land in GNOME Shell's own unit
 (`org.gnome.Shell@<x>.service`) when its launcher forks before GNOME moves it into its
@@ -417,9 +430,10 @@ Title: `audit <flows> flows  (<lines> lines)`, lines = all since sectop started.
   UID ...), flags (DF, SYN ...).
 - Blocked lines are samples (hostfw rate limit 10/min per rule), allowed new flows
   5/s burst 50. Counters stay exact.
-- Program for blocked flows: mostly `?` (rejected connect closes before the next poll);
-  the row detail says why (`why ?`, see above). Not used: audit `connect` records (every
-  unix socket connect matches too: volume, docs/architecture.md).
+- Program for blocked flows: often `?` (rejected connect closes before the next poll);
+  the uid guess and `(kernel)` name some, the row detail says why for the rest. Not used:
+  audit `connect` records (every unix socket connect matches too: volume,
+  docs/architecture.md).
 - Verdict uses the mode at collect time: lines logged just before a mode switch may show the new mode.
 
 Summary: `enforce | wg0-mullvad up | hs 20s | leak 4`, plus first 3 warn / crit checks.

@@ -44,6 +44,7 @@ MAX_PIDS = 1024          # cgroup.procs entries read per shared cgroup
 MAX_HOPS = 8             # parents walked up out of a session scope
 SLACK = 1.0              # btime has whole seconds; journald time is after the record
 MAX_READ = 64 * 1024
+MAX_SCAN = 4096          # /proc entries read by by_uid()
 
 
 def _unescape(name: str) -> str:
@@ -120,6 +121,33 @@ def strays(cgroup: str, root: str = CGROUP_ROOT, proc_root: str = "/proc"):
         if not own(comm):
             out[comm if NAME_RE.fullmatch(comm) else "?"] += 1
     return out
+
+
+def by_uid(proc_root: str = "/proc", limit: int = MAX_SCAN) -> dict:
+    """fs uid (str) -> Counter program -> processes, now (2026-11-09, firewall uid guess).
+    Program None = a process with no unit (login / sudo session scope). Kernel threads
+    (cgroup /), processes gone or unreadable: skipped. fsuid: the uid a socket gets."""
+    try:
+        pids = [p for p in os.listdir(proc_root) if p.isdigit()][:limit]
+    except OSError:
+        return {}
+    out = collections.defaultdict(collections.Counter)
+    for pid in pids:
+        try:
+            with open(f"{proc_root}/{pid}/status", "rb") as f:
+                status = f.read(MAX_READ).decode("ascii", errors="replace")
+            with open(f"{proc_root}/{pid}/cgroup", "rb") as f:
+                cg = f.read(MAX_READ).decode("utf-8", errors="replace")
+        except OSError:
+            continue
+        uid = next((ln.split()[4:5] for ln in status.splitlines() if ln.startswith("Uid:")),
+                   [])
+        path = next((ln[3:].strip() for ln in cg.splitlines() if ln.startswith("0::")), "")
+        if not uid or not uid[0].isdigit() or path in ("", "/"):
+            continue
+        name = program(path)
+        out[uid[0]][None if name and SESSION_RE.fullmatch(name) else name] += 1
+    return dict(out)
 
 
 def names() -> collections.deque:
