@@ -755,7 +755,10 @@ cells and the module's problem lines (`sev` on a detail pair) in that color, so 
 lands there first. Preview scripts were run in my terminal before (not in the repo).
 Selected line (after the first run with colors, 2026-10-27): one reverse bar the whole
 width, plain, or the row's own color when it has one (severity / tone): a color per
-column made a patchy bar.
+column made a patchy bar. The bar is never dim (2026-11-11, tty3): on the Linux console
+dim swaps the text color for the grey slot and reverse then changes nothing, so a dim
+row (noise counter, its log card, acked alerts) had no visible bar while the arrows did
+move it. `attr()` drops `A_DIM` from a selected line: a dim row's bar is plain reverse.
 
 Text console (2026-11-10): the admin runs the UI on tty3, `TERM=linux`, 8 colors from the
 kernel's VGA palette. There the look was too dark (blue names on black) and harsh (bold =

@@ -328,12 +328,58 @@ class TestBoxes(unittest.TestCase):
         self.assertEqual(part(lay([m], ui=ui), "r2  ")[1], render.SEL + "bold yellow")
 
     def test_attr(self):
-        render._ATTR.update(plain=0, red=1 << 20)
-        self.assertEqual(render.attr("red"), 1 << 20)
+        red = 5 << 8                                     # a color pair (A_COLOR bits)
+        render._ATTR.update(plain=0, red=red)
+        self.assertEqual(render.attr("red"), red)
         self.assertEqual(render.attr("sel bold red"),
-                         (1 << 20) | render.curses.A_REVERSE | render.curses.A_BOLD)
+                         red | render.curses.A_REVERSE | render.curses.A_BOLD)
         self.assertEqual(render.attr("bold plain"), render.curses.A_BOLD)
         self.assertEqual(render.attr("nope"), render.curses.A_NORMAL)
+
+    def test_selected_dim_row_is_not_dim(self):
+        """tty3 2026-11-11: reverse + dim = no visible bar on the Linux console."""
+        render._ATTR.update(dim=render.curses.A_DIM, off=render.curses.A_DIM)
+        self.assertEqual(render.attr("dim"), render.curses.A_DIM)
+        for style in ("sel dim", "sel off", "sel bold dim"):
+            a = render.attr(style)
+            self.assertTrue(a & render.curses.A_REVERSE, style)
+            self.assertFalse(a & render.curses.A_DIM, style)
+
+    def test_noise_log_card_bar_moves(self):
+        """in_noise rows are dim: down moves the bar, the bar is a reverse line."""
+        from core import logs
+        from tests import test_logcard as tl
+        fw = mod()
+        fw["panels"].insert(1, {
+            "id": "counters", "title": "hostfw counters", "type": "table", "sev": "ok",
+            "columns": ["counter", "pkts", "new", "bytes"],
+            "types": ["text", "num", "num", "num"],
+            "rows": [{"cells": ["in_noise", "20", "", "1.3K"], "sev": "ok", "tone": "dim",
+                      "logs": "in_noise", "detail": []}]})
+        ui = UI(len(SCR))
+        ui.focus[0] = "firewall/counters"
+
+        def draw():
+            f = frame([fw], ui=ui, now=1100.0, width=140, height=50)
+            ui.update(f)
+            return f
+        draw()
+        ui.key(10)
+        draw()
+        out = tl.host_lines().replace("HFW-FWD-VM-LAN", "HFW-IN-NOISE")
+        ui.logs_done(ui.logreq, logs.load(ui.logreq, [fw], run=tl.Run(tl.ok(out))))
+
+        def bar(f):
+            return [text(line) for line in f.lines
+                    if any(s.startswith(render.SEL) for _, s in line)]
+        self.assertIn("10.96.0.1:443", bar(draw())[0])
+        ui.key(render.curses.KEY_DOWN)
+        rows = bar(draw())
+        self.assertEqual(len(rows), 1)
+        self.assertIn("1.1.x.x", rows[0])
+        self.assertEqual(part(draw().lines, "1.1.x.x")[1], render.SEL + "dim")
+        render._ATTR.update(dim=render.curses.A_DIM)
+        self.assertFalse(render.attr(render.SEL + "dim") & render.curses.A_DIM)
 
     def test_mask(self):
         lines = lay(feed=[ev()])

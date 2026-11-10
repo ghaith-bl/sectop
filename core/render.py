@@ -1518,12 +1518,16 @@ def setup(stdscr) -> None:
 
 
 def attr(style: str) -> int:
-    extra = curses.A_NORMAL
-    if style.startswith(SEL):
+    """curses attribute of a style. A selected line is never dim: on the Linux console
+    dim swaps the text color for the grey slot and reverse then changes nothing, so a
+    dim row (noise, acked alert) showed no bar at all (tty3, 2026-11-11)."""
+    extra, sel = curses.A_NORMAL, style.startswith(SEL)
+    if sel:
         style, extra = style[len(SEL):], extra | curses.A_REVERSE
     if style.startswith(BOLD):
         style, extra = style[len(BOLD):], extra | curses.A_BOLD
-    return _ATTR.get(style, curses.A_NORMAL) | extra
+    a = _ATTR.get(style, curses.A_NORMAL) | extra
+    return a & ~curses.A_DIM if sel else a
 
 
 def _paint(stdscr, y: int, line: list) -> None:
