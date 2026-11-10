@@ -222,9 +222,10 @@ class TestLogsStep(unittest.TestCase):
 
 
 class TestMain(unittest.TestCase):
-    def run_main(self, argv, cfg=None, euid=1000):
-        cfg = cfg or types.SimpleNamespace(mask_public_ips=True)
-        with mock.patch.object(app.configmod, "load", return_value=cfg), \
+    def run_main(self, argv, cfg=None, euid=1000, term="xterm-256color"):
+        cfg = cfg or types.SimpleNamespace(mask_public_ips=True, console_palette=True)
+        with mock.patch.dict(app.os.environ, {"TERM": term}), \
+             mock.patch.object(app.configmod, "load", return_value=cfg), \
              mock.patch.object(app.os, "geteuid", return_value=euid), \
              mock.patch.object(app, "owner_uid", return_value=990), \
              mock.patch.object(app.locale, "setlocale"), \
@@ -264,7 +265,8 @@ class TestMain(unittest.TestCase):
             self.assertEqual((ui.screen, ui.n_screens, ui.mask), (want, 3, True), argv)
 
     def test_mask_from_config(self):
-        _, wrapper, _, _ = self.run_main([], types.SimpleNamespace(mask_public_ips=False))
+        _, wrapper, _, _ = self.run_main([], types.SimpleNamespace(mask_public_ips=False,
+                                                                 console_palette=True))
         self.assertFalse(wrapper.call_args.args[2].mask)
 
     def test_bad_args(self):
@@ -281,6 +283,35 @@ class TestMain(unittest.TestCase):
         self.assertEqual(rc, 0)
         wrapper.assert_not_called()
         self.assertIn("SCREEN: firewall | security | processes or 1-3", out)
+
+    def test_console_palette(self):
+        """TERM=linux: soft palette before curses, reset after (2026-11-10)."""
+        _, wrapper, out, _ = self.run_main([], term="linux")
+        wrapper.assert_called_once()
+        self.assertTrue(out.startswith("\x1b]P0000000\x1b]P1ff8787"))
+        self.assertTrue(out.endswith("\x1b]R"))
+        self.assertEqual(out.count("\x1b]P"), 16)
+
+    def test_console_palette_reset_on_error(self):
+        with mock.patch.dict(app.os.environ, {"TERM": "linux"}), \
+             mock.patch.object(app.configmod, "load", return_value=types.SimpleNamespace(
+                 mask_public_ips=True, console_palette=True)), \
+             mock.patch.object(app.os, "geteuid", return_value=1000), \
+             mock.patch.object(app, "owner_uid", return_value=990), \
+             mock.patch.object(app.locale, "setlocale"), \
+             mock.patch.object(app.signal, "signal"), \
+             mock.patch("sys.stdout") as out, \
+             mock.patch.object(app.curses, "wrapper", side_effect=RuntimeError("x")):
+            with self.assertRaises(RuntimeError):
+                app.main([])
+        written = "".join(c.args[0] for c in out.write.call_args_list)
+        self.assertTrue(written.endswith("\x1b]R"))
+
+    def test_no_console_palette(self):
+        for term, on in (("xterm-256color", True), ("linux", False)):
+            _, _, out, _ = self.run_main([], types.SimpleNamespace(
+                mask_public_ips=True, console_palette=on), term=term)
+            self.assertNotIn("\x1b]", out, term)
 
     def test_owner_uid(self):
         with mock.patch.object(app.pwd, "getpwnam", side_effect=KeyError("x")):

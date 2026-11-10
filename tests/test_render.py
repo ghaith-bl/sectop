@@ -1033,6 +1033,35 @@ class TestLook(unittest.TestCase):
         self.assertTrue(border(f.lines, "[T]", "/ bb  1 of 4"))
 
 
+class TestConsolePalette(unittest.TestCase):
+    """Linux console palette = the 256 look (docs/architecture.md, Text console)."""
+
+    def rgb(self, xterm):
+        steps = (0, 95, 135, 175, 215, 255)
+        x = xterm - 16
+        return "%02x%02x%02x" % (steps[x // 36], steps[x // 6 % 6], steps[x % 6])
+
+    def test_slots_match_the_256_roles(self):
+        p, c = render.CONSOLE_PALETTE, render.COLORS_256
+        self.assertEqual(len(p), 16)
+        self.assertTrue(all(re.fullmatch("[0-9a-f]{6}", x) for x in p))
+        self.assertEqual(p[4], self.rgb(c["name"]))         # blue: names
+        self.assertEqual(p[12], self.rgb(c["info"]))        # bold blue: info
+        self.assertEqual(p[13], self.rgb(c["title"]))       # bold magenta: titles
+        self.assertEqual(p[5], self.rgb(c["peak"]))         # magenta: peak
+        self.assertEqual(p[6], self.rgb(c["value"]))        # cyan: ok / value
+        self.assertEqual(p[14], self.rgb(c["value"]))       # bold cyan: value
+        self.assertEqual(p[3], self.rgb(c["warn"]))         # yellow: warn
+        self.assertEqual(p[11], self.rgb(c["high"]))        # bold yellow: high
+        self.assertEqual(p[1], self.rgb(c["red"]))          # red: soft red tone
+
+    def test_sequences(self):
+        on = render.console_palette(True)
+        self.assertEqual(on.count("\x1b]P"), 16)
+        self.assertIn("\x1b]PF" + "ffffff", on)
+        self.assertEqual(render.console_palette(False), "\x1b]R")
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -1462,4 +1491,3 @@ class TestColors(unittest.TestCase):
         ui = UI(2)
         ui.hint = "c: no program on this line"
         self.assertEqual(text(lay(ui=ui)[-1]), " c: no program on this line")
-

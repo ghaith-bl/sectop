@@ -238,12 +238,28 @@ def main(argv: list | None = None) -> int:
         return 2
     locale.setlocale(locale.LC_ALL, "")
     signal.signal(signal.SIGTERM, _term)
+    palette = cfg.console_palette and linux_console()
+    if palette:
+        _put(render.console_palette(True))
     try:
         curses.wrapper(_ui, Reader(owner=owner_uid),
                        UI(len(SCREENS), screen=start, mask=cfg.mask_public_ips))
     except (KeyboardInterrupt, Quit):
         pass
+    finally:
+        if palette:
+            _put(render.console_palette(False))
     return 0
+
+
+def linux_console() -> bool:
+    """The Linux text console (soft palette there, core/render.py CONSOLE_PALETTE)."""
+    return os.environ.get("TERM") == "linux" and sys.stdout.isatty()
+
+
+def _put(s: str) -> None:
+    sys.stdout.write(s)
+    sys.stdout.flush()
 
 
 if __name__ == "__main__":

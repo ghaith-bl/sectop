@@ -77,6 +77,24 @@ COLORS_8 = {
     "red": curses.COLOR_RED, "blue": curses.COLOR_CYAN, "yellow": curses.COLOR_YELLOW,
     "green": curses.COLOR_CYAN,
 }
+# Linux text console (TERM=linux, the admin's UI): 8 colors from the kernel's VGA
+# palette; there blue (name) is too dark on black and bold turns a color into the harsh
+# bright set. While sectop runs, the console's 16 palette slots get the soft colors of
+# COLORS_256 (console_codes(4): ESC ] P n rrggbb), so COLORS_8 looks like the 256 look;
+# ESC ] R on exit gives back the console's own palette. Slots 0-7: black red green
+# yellow blue magenta cyan white; 8-15 the same with bold. Tried on tty3 with setvtrgb
+# 2026-11-10: kept. Off: [core] console_palette = false (docs/module-interface.md).
+CONSOLE_PALETTE = (
+    "000000", "ff8787", "87d787", "ffd787", "afafff", "ff87d7", "87d7ff", "d7d7f0",
+    "6c6c6c", "ff5f5f", "afffaf", "ffaf5f", "87afff", "af87ff", "87d7ff", "ffffff",
+)
+
+
+def console_palette(on: bool) -> str:
+    """Escape sequences for the Linux console: set the soft palette, or reset it."""
+    if not on:
+        return "\x1b]R"
+    return "".join(f"\x1b]P{n:X}{rgb}" for n, rgb in enumerate(CONSOLE_PALETTE))
 
 # box drawing, U+2500 block
 BH, BV = "\u2500", "\u2502"

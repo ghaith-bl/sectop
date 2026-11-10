@@ -757,6 +757,26 @@ Selected line (after the first run with colors, 2026-10-27): one reverse bar the
 width, plain, or the row's own color when it has one (severity / tone): a color per
 column made a patchy bar.
 
+Text console (2026-11-10): the admin runs the UI on tty3, `TERM=linux`, 8 colors from the
+kernel's VGA palette. There the look was too dark (blue names on black) and harsh (bold =
+the bright set: purple, cyan, red). Same colors on every screen stays the rule, so the fix
+is the palette, not the roles: while sectop runs it sets the console's 16 slots to the
+256-color look (`CONSOLE_PALETTE` in core/render.py, `ESC ] P n rrggbb`,
+console_codes(4)) and resets them on exit (`ESC ] R`). No root, no host change, only that
+console, only while sectop runs. Tried first as a host-wide `setvtrgb` trial: kept.
+Off: `[core] console_palette = false`. After a crash (palette left): `printf '\e]R'`.
+
+| slot | 0-7 (normal) | 8-15 (bold) |
+|---|---|---|
+| black | 000000 | 6c6c6c |
+| red | ff8787 (soft red, 210) | ff5f5f (crit) |
+| green | 87d787 | afffaf |
+| yellow | ffd787 (warn, 222) | ffaf5f (high, 215) |
+| blue | afafff (name, 147) | 87afff (info, 111) |
+| magenta | ff87d7 (peak, 212) | af87ff (title, 141) |
+| cyan | 87d7ff (ok / value, 117) | 87d7ff |
+| white | d7d7f0 (text, 189) | ffffff (frame) |
+
 ## Phase 4 plan (2026-10-20)
 
 Best practice decides (Red Hat for the host). Fixtures from my host first

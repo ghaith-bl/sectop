@@ -16,7 +16,7 @@ from core.module import MIN_INTERVAL, NAME_RE
 DEFAULT_PATH = "/etc/sectop/config.toml"
 MAX_SIZE = 64 * 1024
 
-CORE_KEYS = {"mask_public_ips"}
+CORE_KEYS = {"mask_public_ips", "console_palette"}
 MODULE_KEYS = {"enabled", "interval"}  # anything else goes to the module as options
 
 
@@ -34,6 +34,7 @@ class ModuleConfig:
 @dataclass(frozen=True)
 class Config:
     mask_public_ips: bool = True
+    console_palette: bool = True       # soft palette on the Linux text console (core/render.py)
     modules: dict = field(default_factory=dict)   # name -> ModuleConfig
 
     def module(self, name: str) -> ModuleConfig:
@@ -130,6 +131,7 @@ def parse(data: bytes, path: str = DEFAULT_PATH) -> Config:
 
     return Config(
         mask_public_ips=_bool(core, "mask_public_ips", "core", True),
+        console_palette=_bool(core, "console_palette", "core", True),
         modules={name: _module(name, t) for name, t in mods.items()},
     )
 

@@ -51,9 +51,14 @@ class TestLoad(TmpConf):
         self.write(GOOD)
         c = load(self.path, owner_uid=UID)
         self.assertFalse(c.mask_public_ips)
+        self.assertTrue(c.console_palette)                   # default
         fw = c.module("firewall")
         self.assertEqual(fw, ModuleConfig(True, 3.0, {"journal_backlog": 50}))
         self.assertIsInstance(fw.interval, float)
+
+    def test_console_palette_off(self):
+        self.write(b"[core]\nconsole_palette = false\n")
+        self.assertFalse(load(self.path, owner_uid=UID).console_palette)
 
     def test_unknown_module_defaults(self):
         self.write(GOOD)
@@ -118,6 +123,7 @@ class TestParse(unittest.TestCase):
 
     def test_types(self):
         self.bad(b'[core]\nmask_public_ips = "yes"\n')
+        self.bad(b"[core]\nconsole_palette = 1\n")
         self.bad(b"core = 1\n")
         self.bad(b"modules = 1\n")
         self.bad(b"[modules]\nfirewall = 1\n")

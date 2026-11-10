@@ -508,9 +508,15 @@ run(argv: list[str], timeout: float = 1.5) -> Result
 - `[modules.<name>]`: `enabled` (bool, default true), `interval` (number >= 1.0,
   default module INTERVAL). Other keys are passed to the module `init()` as `cfg`.
 
+- `[core]`: `mask_public_ips` (bool, default true: public IPs masked until `m`),
+  `console_palette` (bool, default true: on the Linux text console, `TERM=linux`, the
+  console's 16 colors are set to the soft look while sectop runs and reset on exit;
+  core/render.py `CONSOLE_PALETTE`).
+
 ```toml
 [core]
 mask_public_ips = true
+console_palette = true
 
 [modules.firewall]
 enabled = true
