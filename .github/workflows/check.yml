@@ -39,10 +39,12 @@ jobs:
           path: sectop
           persist-credentials: false
 
-      # check-private-info.sh lives in the hardening repo (public)
+      # check-private-info.sh lives in the hardening repo (public), pinned to its release
+      # tag: a change on its main cannot turn this check red or change it unseen
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ghaith-bl/silverblue-cis-hardening
+          ref: v0.1.1
           path: hardening
           persist-credentials: false
 
