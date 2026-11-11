@@ -1,4 +1,5 @@
 import json
+import os
 import unittest
 
 from core import logs
@@ -15,6 +16,11 @@ SVC = ("HFW-FWD-VM-LAN: IN=virbr0 OUT=wlo1 MAC=" + MAC + " SRC=192.168.122.122 "
 NOISE = ("HFW-IN-NOISE: IN=wlo1 OUT= MAC=ff:ff:ff:ff:ff:ff:52:54:00:00:00:03:08:00 "
          "SRC=192.168.8.18 DST=255.255.255.255 LEN=136 TOS=0x00 PREC=0x00 TTL=64 ID=1 "
          "PROTO=UDP SPT=49152 DPT=25860 LEN=116 ")
+# a noise line from a device with a hardware (global) MAC: maker in tests/fixtures/oui.txt
+NOISE_HW = ("HFW-IN-NOISE: IN=wlo1 OUT= MAC=ff:ff:ff:ff:ff:ff:00:00:02:00:00:04:08:00 "
+            "SRC=192.168.8.20 DST=255.255.255.255 LEN=136 TOS=0x00 PREC=0x00 TTL=64 ID=2 "
+            "PROTO=UDP SPT=49152 DPT=25860 LEN=116 ")
+OUI = (os.path.join(os.path.dirname(__file__), "fixtures", "oui.txt"),)
 INFO = {"pkts": "20", "verdict": "block  rejected by hostfw (enforce mode)",
         "meaning": "VM to LAN / outside the tunnel",
         "match": "VM traffic to LAN / uplink (not via the tunnel)",
@@ -50,7 +56,7 @@ def ok(out):
 
 def card(text, info=INFO, rule="fwd_vm_lan"):
     return logcard.card(rule, info, run=Run(ok(text)), hms=lambda ts: f"h{int(ts)}",
-                        stamp=lambda ts: f"s{int(ts)}")
+                        stamp=lambda ts: f"s{int(ts)}", paths=OUI)
 
 
 class TestQuery(unittest.TestCase):
@@ -98,8 +104,10 @@ class TestCard(unittest.TestCase):
         c = card(host_lines())
         rows = c["flows"]["rows"]
         self.assertEqual([r["cells"][2:] for r in rows], [
-            ["17", "tcp", "192.168.122.122", "10.96.0.1:443", "virbr0>wlo1", "vm"],
-            ["3", "icmp 8 echo", "192.168.122.122", "1.1.1.1", "virbr0>wlo1", "vm"]])
+            ["17", "tcp", "192.168.122.122", "10.96.0.1:443", "virbr0>wlo1", "vm",
+             "local mac"],
+            ["3", "icmp 8 echo", "192.168.122.122", "1.1.1.1", "virbr0>wlo1", "vm",
+             "local mac"]])
         self.assertEqual({(r["sev"], r["tone"]) for r in rows}, {("warn", "yellow")})
         self.assertEqual(rows[1]["ip"], "1.1.1.1")             # w = whois of the far side
         self.assertEqual(float(rows[0]["cells"][0]), 1013.6)   # last, first: ages
@@ -131,7 +139,9 @@ class TestCard(unittest.TestCase):
         self.assertTrue(p["detail_only"])
         self.assertEqual(p["head"], [
             ("flow  icmp 8 echo 192.168.122.122 -> 1.1.1.1  virbr0>wlo1  uid vm", "value"),
-            ("3 lines, first s1000, last s1002   (oldest first)", "note")])
+            ("3 lines, first s1000, last s1002   (oldest first)", "note"),
+            ("source mac  52:54:00:00:00:02  local address (random or virtual): no maker",
+             "value")])
         self.assertEqual([r["cells"] for r in p["rows"]][0],
                          ["h1000", "icmp 8 echo", "192.168.122.122", "1.1.1.1", "-", "84",
                           "63", "virbr0>wlo1"])
@@ -155,9 +165,32 @@ class TestCard(unittest.TestCase):
                "PROTO=TCP SPT=33146 DPT=443 SYN UID=1000 GID=1000 ")
         allowed = card(jline("a", 1, new), {**INFO, "verdict": "allow  ..."}, "out_new")
         r = allowed["flows"]["rows"][0]
-        self.assertEqual((r["sev"], r["tone"], r["cells"][-1]), ("ok", "blue", "1000"))
+        self.assertEqual((r["sev"], r["tone"], r["cells"][7:]), ("ok", "blue", ["1000", "-"]))
         fields = allowed["packets"][r["id"]]["rows"][0]["detail"]
         self.assertEqual(fields[1]["style"], "value")           # allowed: safe color
+
+    def test_maker_of_a_noise_device(self):
+        """2026-11-11: which device on the LAN sends the noise: maker from the OUI list."""
+        c = card(jline("n", 2000, NOISE_HW) + jline("m", 2001, NOISE),
+                 {**INFO, "verdict": "zone  ..."}, "in_noise")
+        rows = {r["cells"][4]: r for r in c["flows"]["rows"]}
+        hw, vm = rows["192.168.8.20"], rows["192.168.8.18"]
+        self.assertEqual((hw["cells"][-1], vm["cells"][-1]), ("SAMPLE WIRELESS ELECTRONIC",
+                                                              "local mac"))
+        d = {x["k"]: x["v"] for x in hw["detail"]}
+        self.assertEqual(d["source mac"], "00:00:02:00:00:04  SAMPLE WIRELESS ELECTRONIC CO.,LTD")
+        head = c["packets"][hw["id"]]["head"]
+        self.assertEqual(head[-1], ("source mac  00:00:02:00:00:04  SAMPLE WIRELESS "
+                                    "ELECTRONIC CO.,LTD", "value"))
+        f = {x["k"]: (x["v"], x["style"])
+             for x in c["packets"][hw["id"]]["rows"][0]["detail"] if x["k"]}
+        self.assertEqual(f["  mac source"], ("00:00:02:00:00:04  SAMPLE WIRELESS ELECTRONIC "
+                                             "CO.,LTD", "value"))
+        self.assertEqual(f["  mac destination"],
+                         ("ff:ff:ff:ff:ff:ff  broadcast (every device on the LAN)", "text"))
+        keys = [x["k"] for x in c["packets"][hw["id"]]["rows"][0]["detail"]]
+        i = keys.index("mac (dst:src:type) (MAC)")
+        self.assertEqual(keys[i + 1:i + 3], ["  mac source", "  mac destination"])
 
     def test_leak_colors_by_verdict(self):
         self.assertEqual(logcard.colors("out_leak", "block"), ("warn", "yellow"))   # blocked

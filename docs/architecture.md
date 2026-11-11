@@ -91,6 +91,9 @@ the card opens, never on a tick. An exception to "the UI never collects", on pur
   parser: modules/firewall/journal.py); shown through sanitize.display() like all text
 - not via the collector: the channel stays one-way (the UI never writes to it)
 - Blocks the UI up to 5 s (3000 lines max).
+- MAC makers (2026-11-11): the UI reads the distro's OUI list (a root-owned file in
+  /usr/share, core/oui.py) once per new prefix while the card opens. Offline only, no
+  lookup service: the device list of my LAN never leaves the host.
 
 ## Lookups (whois)
 

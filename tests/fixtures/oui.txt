@@ -1,0 +1,18 @@
+OUI/MA-L			Organization
+company_id			Organization
+				Address
+
+00-00-01   (hex)		Example Maker Co., Ltd.
+000001     (base 16)		Example Maker Co., Ltd.
+				1 Example Road
+				Example City  1000
+				XX
+
+00-00-02   (hex)		SAMPLE WIRELESS ELECTRONIC CO.,LTD
+000002     (base 16)		SAMPLE WIRELESS ELECTRONIC CO.,LTD
+				2 Example Road
+				XX
+
+00-00-03   (hex)		Test Devices Inc.
+000003     (base 16)		Test Devices Inc.
+				XX

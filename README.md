@@ -36,6 +36,8 @@ Public IPs masked (key m), the way the screens start.
   `rpm-ostree`, `systemctl`; the policy (deploy/posture.toml) is my baseline
 - install: git, sudo, systemd-sysusers; `restorecon` if SELinux is on
 - a 256-color terminal (8 basic colors work)
+- optional: the IEEE OUI list for MAC makers in the counter cards (package `hwdata` on
+  Fedora / RHEL / Arch, `ieee-data` on Debian / Ubuntu); read offline, never online
 
 ## Security model
 

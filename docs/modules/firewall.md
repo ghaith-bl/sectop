@@ -346,12 +346,20 @@ order; host 2026-11-04 `fwd_vm_lan 20` needed `journalctl -g` to see what they w
 - Flows (box `logflows`): one row per proto, src, dst, iface, uid (journal.flow(): the
   ephemeral port left out), newest first. Cols: last, first, n, proto (`icmp 8 echo`,
   `icmpv6 135 neighbor solicit`), src, dst, iface (`virbr0>wlo1`), uid (`vm` for VM
-  kinds). Row detail: lines, first, last, source ports seen (first 20).
+  kinds), maker (source MAC's maker, `local mac`, `?` not in the list, `-` no MAC). Row
+  detail: lines, first, last, source ports seen (first 20), source MACs with their maker.
+- Maker (2026-11-11: which LAN device sends the noise): first 3 bytes of the source MAC
+  looked up in the distro's IEEE OUI list, offline (core/oui.py: hwdata
+  `/usr/share/hwdata/oui.txt`, ieee-data `/usr/share/ieee-data/oui.txt`). Never a web
+  lookup service: it would learn every device on my LAN. Read once per new prefix when
+  the card opens, cached. A locally administered MAC (0x02 bit: random Wi-Fi address,
+  VM 52:54:00) has no maker and says so; broadcast / multicast destinations are named.
 - Packets (enter on a flow, box `logpkts`): every line of the flow, oldest first. Head:
-  the flow, count, first / last. Cols: time, proto, src:port, dst:port, TCP flags, len,
+  the flow, count, first / last, source MAC + maker. Cols: time, proto, src:port, dst:port, TCP flags, len,
   ttl, iface.
 - Fields (enter on a packet): rule, verdict, full time, then every field with a label
-  (`source port (SPT)`). Colors: addresses, ports, proto, ifaces, uid in the value color,
+  (`source port (SPT)`); under the MAC field: `mac source` (+ maker) and `mac destination`
+  (+ broadcast / multicast / maker). Colors: addresses, ports, proto, ifaces, uid in the value color,
   flags orange (high), verdict in the rule's severity color (allowed: cyan).
 - Row colors as the counter row: sev = the kind's severity (allowed: ok), tone = the
   verdict (allow blue, block yellow), in_noise dim. Mask on: public IPs masked in the

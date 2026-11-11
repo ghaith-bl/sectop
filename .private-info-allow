@@ -28,6 +28,9 @@ email  *  [\w.:-]+@[\w.-]*\.(?:service|socket|scope|slice|target|timer|mount)
 email  tests/test_lookup.py  abuse@ripe\.net|network-abuse@google\.com
 # Made-up MACs: locally administered 02:..., QEMU 52:54:00:...
 mac-addr  tests/*  02:00:00:00:00:0\d|52:54:00:(?:00:00:0\d|12:34:56|ab:cd:ef)|aa:bb:cc:dd:ee:ff
+# Made-up makers 00:00:0N (tests/fixtures/oui.txt) and fixed group addresses (broadcast,
+# mDNS 01:00:5e:00:00:fb, IPv6 all-nodes 33:33:00:00:00:01): the same on every LAN.
+mac-addr  tests/*  00:00:0\d(?::[0-9a-f]{2}){3}|ff:ff:ff:ff:ff:ff|01:00:5e:00:00:fb|33:33:00:00:00:01
 # Made-up UUIDs.
 uuid  tests/*  01234567-89ab-4cde-8f01-23456789abcd|0a0a0a0a-0000-4000-8000-000000000001|0b0b0b0b-0000-4000-8000-000000000002|11111111-2222-[34]333-[48]444-555555555555|12345678-9abc-def0-1234-56789abcdef0|123e4567-e89b-12d3-a456-426614174000|aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee
 # Fixed GUIDs, the same on every machine: EFI global variables; Intel MEI HDCP

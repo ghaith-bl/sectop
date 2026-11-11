@@ -11,6 +11,8 @@ Three levels:
            journal.flow()), count, first, last
   packets  every logged line of one flow, oldest first, with its own ports and flags
   fields   every field of one line (enter on a packet), the main ones in the value color
+Maker: the source MAC's maker from the distro's offline OUI list (core/oui.py), in the
+flows table, the packets head and the fields (2026-11-11).
 
 Counted vs logged: the counter is exact (since the hostfw table load), lines are what
 hostfw logged (rate-limited, this boot). The card head says both.
@@ -20,6 +22,7 @@ Pure except load() (one command).
 import re
 import time
 
+from core import oui
 from core.run import run as _run
 from modules import firewall as fw
 from modules.firewall import journal
@@ -30,9 +33,9 @@ MAX_LINES = 3000              # newest lines read per card
 TIMEOUT = 5.0
 OUT_LIMIT = 4 * 1024 * 1024   # bytes: MAX_LINES json lines with MESSAGE only fit
 
-FLOW_COLUMNS = ["last", "first", "n", "proto", "src", "dst", "iface", "uid"]
-FLOW_TYPES = ["age", "age", "num", "text", "text", "text", "text", "text"]
-FLOW_ROLES = ["note", "note", "value", "text", "name", "value", "text", "text"]
+FLOW_COLUMNS = ["last", "first", "n", "proto", "src", "dst", "iface", "uid", "maker"]
+FLOW_TYPES = ["age", "age", "num", "text", "text", "text", "text", "text", "text"]
+FLOW_ROLES = ["note", "note", "value", "text", "name", "value", "text", "text", "text"]
 PACKET_COLUMNS = ["time", "proto", "src", "dst", "flags", "len", "ttl", "iface"]
 PACKET_TYPES = ["text", "text", "text", "text", "text", "num", "num", "text"]
 PACKET_ROLES = ["note", "text", "name", "value", "high", "text", "text", "text"]
@@ -146,6 +149,22 @@ def _remote(e) -> str | None:
         return None
 
 
+def mac_src(e) -> str | None:
+    """Source MAC of a logged line (kernel MAC field dst:src:type), None without one."""
+    p = oui.parts(e.fields.get("MAC", ""))
+    return p[1] if p else None
+
+
+def makers(es, paths=oui.PATHS) -> list:
+    """Source MACs of a flow's lines with what they say, newest MAC first."""
+    seen = {}
+    for e in reversed(es):
+        m = mac_src(e)
+        if m and m not in seen:
+            seen[m] = oui.describe(m, paths)
+    return list(seen.items())
+
+
 def _hms(ts: float) -> str:
     return time.strftime("%H:%M:%S", time.localtime(ts))
 
@@ -154,7 +173,8 @@ def _stamp(ts: float) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
 
 
-def flows_panel(entries, sev: str = "ok", tone: str = "plain", stamp=_stamp) -> dict:
+def flows_panel(entries, sev: str = "ok", tone: str = "plain", stamp=_stamp,
+                paths=oui.PATHS) -> dict:
     rows = []
     for key, es in group(entries):
         last, first = es[-1], es[0]
@@ -165,7 +185,10 @@ def flows_panel(entries, sev: str = "ok", tone: str = "plain", stamp=_stamp) -> 
         if src_ports:
             shown = " ".join(src_ports[:20]) + (" ..." if len(src_ports) > 20 else "")
             detail.append({"k": "source ports", "v": shown})
-        row = {"cells": [repr(last.ts), repr(first.ts), str(len(es)), *key],
+        for mac, what in makers(es, paths):
+            detail.append({"k": "source mac", "v": f"{mac}  {what}"})
+        row = {"cells": [repr(last.ts), repr(first.ts), str(len(es)), *key,
+                         oui.cell(mac_src(last), paths)],
                "sev": sev, "tone": tone, "id": flow_id(key), "detail": detail}
         ip = _remote(last)
         if ip:
@@ -176,7 +199,8 @@ def flows_panel(entries, sev: str = "ok", tone: str = "plain", stamp=_stamp) -> 
             "roles": list(FLOW_ROLES), "rows": rows}
 
 
-def packet_fields(e, rule_line: str, verdict_line: str, sev: str, stamp=_stamp) -> list:
+def packet_fields(e, rule_line: str, verdict_line: str, sev: str, stamp=_stamp,
+                  paths=oui.PATHS) -> list:
     """Every field of one line: main ones (addresses, ports, proto, ifaces, uid) in the
     value color, the verdict in the rule's severity color."""
     hot = sev if sev in ("info", "warn", "crit") else "value"
@@ -189,13 +213,19 @@ def packet_fields(e, rule_line: str, verdict_line: str, sev: str, stamp=_stamp) 
             continue
         label = LABELS.get(k, k.lower())
         out.append({"k": f"{label} ({k})", "v": v, "style": "value" if k in MAIN else "text"})
+        p = oui.parts(v) if k == "MAC" else None
+        if p:
+            out.append({"k": "  mac source", "v": f"{p[1]}  {oui.describe(p[1], paths)}",
+                        "style": "value"})
+            out.append({"k": "  mac destination", "v": f"{p[0]}  {oui.describe(p[0], paths)}",
+                        "style": "text"})
     if e.flags:
         out.append({"k": "flags", "v": " ".join(e.flags), "style": "high"})
     return out
 
 
 def packets_panel(entries, rule_line: str, verdict_line: str, sev: str = "ok",
-                  tone: str = "plain", hms=_hms, stamp=_stamp) -> dict:
+                  tone: str = "plain", hms=_hms, stamp=_stamp, paths=oui.PATHS) -> dict:
     rows = []
     for i, e in enumerate(entries):
         f = e.fields
@@ -203,7 +233,7 @@ def packets_panel(entries, rule_line: str, verdict_line: str, sev: str = "ok",
                          f.get("LEN", "-"), f.get("TTL") or f.get("HOPLIMIT") or "-",
                          iface(e)],
                "sev": sev, "tone": tone, "id": f"{e.cursor or i}",
-               "detail": packet_fields(e, rule_line, verdict_line, sev, stamp)}
+               "detail": packet_fields(e, rule_line, verdict_line, sev, stamp, paths)}
         ip = _remote(e)
         if ip:
             row["ip"] = ip
@@ -256,7 +286,8 @@ def head(rule: str, info: dict, lines: int, note: str, sev: str) -> list:
     return out
 
 
-def card(rule: str, info: dict, run=_run, hms=_hms, stamp=_stamp) -> dict:
+def card(rule: str, info: dict, run=_run, hms=_hms, stamp=_stamp,
+         paths=oui.PATHS) -> dict:
     """Everything the card shows, built once when it opens (core/logs.py).
     info: the counter row (pkts cell, its detail: verdict, meaning, match, log)."""
     entries, note = load(rule, run)
@@ -267,14 +298,17 @@ def card(rule: str, info: dict, run=_run, hms=_hms, stamp=_stamp) -> dict:
     packets, names = {}, {}
     for key, es in group(entries):
         fid = flow_id(key)
-        packets[fid] = packets_panel(es, rule_line, verdict_line, sev, tone, hms, stamp)
+        packets[fid] = packets_panel(es, rule_line, verdict_line, sev, tone, hms, stamp,
+                                     paths)
         p, src, dst, ifc, who = key
         names[fid] = f"{p} {src} -> {dst}  {ifc}  uid {who}"
         packets[fid]["head"] = [
             (f"flow  {names[fid]}", "value"),
             (f"{len(es)} line{'s' if len(es) != 1 else ''}, first {stamp(es[0].ts)}, "
              f"last {stamp(es[-1].ts)}   (oldest first)", "note")]
-    flows = flows_panel(entries, sev, tone, stamp)
+        for mac, what in makers(es, paths):
+            packets[fid]["head"].append((f"source mac  {mac}  {what}", "value"))
+    flows = flows_panel(entries, sev, tone, stamp, paths)
     flows["head"] = head(rule, info, len(entries), note, sev)
     return {"rule": rule, "code": code(rule), "lines": len(entries), "flows": flows,
             "packets": packets, "names": names}
