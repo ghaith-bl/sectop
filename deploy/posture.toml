@@ -67,8 +67,8 @@ units = { "auditd.service" = "active" }
 id = "audit-rules"
 kind = "audit-rules"
 sev = "warn"
-why = "audit rules loaded (verification.md: ~73)"
-want = 73
+why = "audit rules loaded (verification.md: ~75)"
+want = 75
 
 [[check]]
 id = "journald-audit"
@@ -233,6 +233,15 @@ why = "kernel sysctls of 90-hardening.conf"
 # net.core.bpf_jit_harden: root-only file (0600), not checked
 values = { "kernel.dmesg_restrict" = "1", "kernel.kptr_restrict" = "2", "kernel.yama.ptrace_scope" = "2", "kernel.randomize_va_space" = "2", "kernel.kexec_load_disabled" = "1", "kernel.unprivileged_bpf_disabled" = "1", "fs.suid_dumpable" = "0", "fs.protected_hardlinks" = "1", "fs.protected_symlinks" = "1" }
 
+# Attack surface for unprivileged programs (silverblue-cis-hardening sysctl, KSPP,
+# 2026-11-16). vm.mmap_rnd_bits / vm.mmap_rnd_compat_bits: root-only files (0600), not checked.
+[[check]]
+id = "sysctl-kspp"
+kind = "sysctl"
+sev = "warn"
+why = "KSPP sysctls of 90-hardening.conf (io_uring off, ldisc, FIFO / file, SysRq, limits)"
+values = { "kernel.io_uring_disabled" = "2", "dev.tty.ldisc_autoload" = "0", "fs.protected_fifos" = "2", "fs.protected_regular" = "2", "kernel.sysrq" = "0", "kernel.warn_limit" = "100", "kernel.oops_limit" = "100" }
+
 [[check]]
 id = "sysctl-ipv4"
 kind = "sysctl"
@@ -302,6 +311,14 @@ kind = "cmdline"
 sev = "warn"
 why = "DMA unmapped at once, no lazy IOTLB flush (kernel arg)"
 want = ["iommu.strict=1"]
+
+# KSPP kernel args (silverblue-cis-hardening kargs, 2026-11-16)
+[[check]]
+id = "kspp-kargs"
+kind = "cmdline"
+sev = "warn"
+why = "KSPP kernel args: hashed pointers, no forced mem writes, signed modules, IOMMU, no debugfs / mounted-disk writes"
+want = ["hash_pointers=always", "proc_mem.force_override=never", "module.sig_enforce=1", "intel_iommu=on", "debugfs=off", "bdev_allow_write_mounted=0"]
 
 # Secure Boot on since step 9 (2026-10-26). Off again = switched off in the firmware
 # setup (admin password): crit. Lockdown follows it: warn, one alert is enough.
@@ -427,8 +444,9 @@ kind = "listeners"
 sev = "crit"
 why = "nothing listens outside loopback but the allowlist"
 # libvirt default network (virbr0): dnsmasq DNS for the VMs on the bridge address, DHCP
-# bound to virbr0 (/proc/net shows 0.0.0.0:67). Loopback (resolved, chronyd): always ok.
-allow = ["udp 192.168.122.1:53", "tcp 192.168.122.1:53", "udp 0.0.0.0:67"]
+# bound to virbr0 (/proc/net shows 0.0.0.0:67). Same for network browse (virbr-browse,
+# silverblue-cis-hardening browsevm, 2026-11-14). Loopback (resolved, chronyd): always ok.
+allow = ["udp 192.168.122.1:53", "tcp 192.168.122.1:53", "udp 192.168.123.1:53", "tcp 192.168.123.1:53", "udp 0.0.0.0:67"]
 # WireGuard wg0-mullvad (Mullvad): the port can change on every connect: its udp 0.0.0.0 /
 # [::] port is taken from `wg show wg0-mullvad listen-port` (net unit), not a glob here.
 wireguard = "wg0-mullvad"

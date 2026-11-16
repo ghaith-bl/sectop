@@ -104,30 +104,33 @@ without `..`.
 
 From silverblue-cis-hardening (harden-workstation.sh, docs/deviations.md,
 docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agreed
-2026-10-26. 63 checks.
+2026-10-26. 65 checks.
 
     crit  SELinux enforcing now; audit=1 + backlog in kernel args; audit not switched
           off; auditd, firewalld running; firewalld zone drop; only root UID 0; wheel =
           the admin; /var on LUKS; system image not unlocked; ostree remotes verify; listeners;
           Secure Boot on; no hardware MAC on a link that is up; hostname localhost
-    warn  SELinux config enforcing + targeted; audit rules >= 73; audit locked (-e 2); journald audit
+    warn  SELinux config enforcing + targeted; audit rules >= 75; audit locked (-e 2); journald audit
           socket; su closed (sugroup empty, pam_wheel); faillock 5 / 900 s; pwquality 14
           / 4 classes; shadow, gshadow, passwd, group perms; sysctls of
-          90-hardening.conf (kernel, IPv4, IPv6); no taint; CIS module blocks;
+          90-hardening.conf (kernel, KSPP, IPv4, IPv6); no taint; CIS module blocks;
           lockdown integrity; crypto policy not LEGACY; masked units;
           no failed units; core dumps off; journal persistent; GNOME locks; wifi IPv6
           off; booted system <= 14 days; random MAC config; dhcp-send-hostname 0 on
           every Wi-Fi / cable profile; LLMNR + mDNS off; fallback hostname kernel arg;
           DNS servers only on the tunnel; no DNS in Wi-Fi / cable profiles; Mullvad
           socket only for group mullvad; sectop, sectop-feed, mullvad groups; kernel
-          args (AF_ALG off, page shuffle, no initrd shell, init_on_free, iommu.strict);
+          args (AF_ALG off, page shuffle, no initrd shell, init_on_free, iommu.strict,
+          KSPP: hash_pointers, proc_mem, module.sig_enforce, intel_iommu, debugfs,
+          bdev_allow_write_mounted);
           chronyd running; chrony NTS only (authselectmode require, minsources 2)
     info  update staged, waiting for a reboot
 
 - hostfw mode / boot mode: not here, the firewall screen checks them (alerts there).
 - Listeners (host 2026-10-26, `ss -Htuln`): loopback only for resolved (127.0.0.53 /
   .54:53) and chronyd (:323); libvirt default network dnsmasq on 192.168.122.1:53 (tcp,
-  udp) and DHCP 0.0.0.0:67 bound to virbr0; the VPN tunnel's WireGuard (wg0-mullvad)
+  udp) and DHCP 0.0.0.0:67 bound to virbr0; network browse (2026-11-14) the same on
+  192.168.123.1:53 and 0.0.0.0:67 bound to virbr-browse; the VPN tunnel's WireGuard (wg0-mullvad)
   on 0.0.0.0 / [::] with a port that can change on every connect (`wg show all
   listen-port`): allowed by the port the net unit reads, not by a port glob (a glob
   would let any program on any UDP port pass). Not by "kernel socket" either: checked
