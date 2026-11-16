@@ -80,7 +80,7 @@ Summary `pass <n> | fail <n> | unknown <n> | accepted <n>`.
 | luks | path | the mount's device-mapper device (or one under it: LVM) has uuid `CRYPT-LUKS*`. Matched by dm name (`/sys/block/dm-*/dm/name`): the sandbox has no `/dev/mapper` (PrivateDevices) |
 | secureboot | - | efivar SecureBoot value 1 (4 bytes attributes, then the value) |
 | lockdown | want | `/sys/kernel/security/lockdown` `[mode]` in want |
-| audit-rules | want (number) | add_rule - remove_rule this boot >= want |
+| audit-rules | want (number), setuid_key? | add_rule - remove_rule this boot >= want. With setuid_key: rules of the other keys >= want, and the rules with that key = the setuid / setgid files under /usr (regular files, one file system, like `find /usr -xdev -type f -perm /6000`; scanned once per sectop start, /usr only changes with a new deployment = a reboot). Detail: counts, a fix hint, the files. /usr not readable: unknown |
 | audit-enabled | - | no `audit_enabled=0` this boot |
 | audit-locked | - | last `audit_enabled` set this boot is `2` (`-e 2`) |
 | uid0 | want (list) | the accounts with UID 0 (`/etc/passwd`) = want |
@@ -95,6 +95,7 @@ Summary `pass <n> | fail <n> | unknown <n> | accepted <n>`.
 | nm-props | types (list), props (table property = want) | every NetworkManager profile of these types has each property in want (`a|b`, `""` = empty). One `nmcli -g` per profile. UUIDs in the detail |
 | mac-local | - | every physical link that is up (`/sys/class/net/<if>/device`, type 1, operstate up) has a locally administered MAC (bit 0x02 of the first byte). The address is never shown |
 | dns-servers | allow (list of links) | `resolvectl status`: DNS servers only on the allowed links, none global (`DNS=`), no fallback list. No server anywhere (tunnel down): pass. No `Global` section: unknown |
+| fwupd-reports | path (directory) | no `*.conf` in it has an active `ReportURI` / `SecurityReportURI` or `AutomaticReports` / `AutomaticSecurityReports` = true. No directory (no fwupd): pass |
 | hostname | want | `hostnamectl --json=short`: Hostname, StaticHostname, DefaultHostname = want, PrettyHostname empty. Not `/proc/sys/kernel/hostname`: sectop.service has `ProtectHostname=yes` (its own copy from its start) |
 
 Limits: 100 checks, 64 items per list / table, paths `A-Z a-z 0-9 _ . @ % + : / -`
@@ -104,13 +105,15 @@ without `..`.
 
 From silverblue-cis-hardening (harden-workstation.sh, docs/deviations.md,
 docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agreed
-2026-10-26. 65 checks.
+2026-10-26. 67 checks.
 
     crit  SELinux enforcing now; audit=1 + backlog in kernel args; audit not switched
           off; auditd, firewalld running; firewalld zone drop; only root UID 0; wheel =
           the admin; /var on LUKS; system image not unlocked; ostree remotes verify; listeners;
-          Secure Boot on; no hardware MAC on a link that is up; hostname localhost
-    warn  SELinux config enforcing + targeted; audit rules >= 75; audit locked (-e 2); journald audit
+          Secure Boot on; no hardware MAC on a link that is up; hostname localhost; fwupd
+          sends no reports
+    warn  SELinux config enforcing + targeted; audit rules >= 47 + 1 per setuid file; audit locked
+          (-e 2); firmware metadata once a day; journald audit
           socket; su closed (sugroup empty, pam_wheel); faillock 5 / 900 s; pwquality 14
           / 4 classes; shadow, gshadow, passwd, group perms; sysctls of
           90-hardening.conf (kernel, KSPP, IPv4, IPv6); no taint; CIS module blocks;
@@ -179,6 +182,18 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
   (setuid root, mullvad-vpn, installed after the count of 70). The check is a floor
   (`>= want`): a package that adds a setuid file passes, one that removes it fails
   until `want` follows. Split tunneling itself: watch rule `split-tunnel` (warn).
+- Audit rules follow the setuid list (2026-11-16): `/usr/bin/userhelper` left the image,
+  the host had 74 rules (27 setuid) and `>= 75` failed although nothing was missing.
+  Now `want = 47` (every other key) and `setuid_key = "privileged"`: exactly one rule
+  per setuid / setgid file sectop finds under /usr. A new setuid program without a rule
+  fails (that is the point: it runs as root and nothing logs it), and so do rules for
+  programs that left (the `audit-rules` section was not run again). The scan: ~0.5 s
+  for 166k entries, once per start. Files under a directory user sectop cannot read
+  are missed (the detail counts such directories).
+- fwupd (2026-11-16, silverblue-cis-hardening `autoupdate` `FIRMWARE_REPORTS=no`):
+  `fwupd-no-reports` (fwupd-reports, crit: a report address back means a refresh may
+  upload again; lvfs.conf had `AutomaticReports=true`) and `fwupd-daily` (file: the
+  drop-in `OnCalendar=daily`, warn).
 - Kernel args 2026-11-01 (silverblue-cis-hardening `kargs`, ideas from secureblue):
   `page-shuffle` (`page_alloc.shuffle=1`) and `initrd-no-shell` (`rd.shell=0
   rd.emergency=halt`), both cmdline, warn: missing = less hardening, not a hole. The

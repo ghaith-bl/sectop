@@ -63,12 +63,16 @@ sev = "crit"
 why = "auditd running"
 units = { "auditd.service" = "active" }
 
+# silverblue-cis-hardening audit-rules: one "privileged" rule per setuid / setgid program,
+# so the total follows the image (2026-11-16: 47 + 27). sectop counts the programs under
+# /usr once per start and wants exactly one rule each, plus >= want rules of other keys.
 [[check]]
 id = "audit-rules"
 kind = "audit-rules"
 sev = "warn"
-why = "audit rules loaded (verification.md: ~75)"
-want = 75
+why = "audit rules loaded, one per setuid program (verification.md)"
+want = 47
+setuid_key = "privileged"
 
 [[check]]
 id = "journald-audit"
@@ -370,6 +374,23 @@ id = "ostree-staged"
 kind = "ostree-staged"
 sev = "info"
 why = "no update waiting for a reboot"
+
+# silverblue-cis-hardening autoupdate: FIRMWARE_REPORTS=no, firmware metadata once a day
+[[check]]
+id = "fwupd-no-reports"
+kind = "fwupd-reports"
+sev = "crit"
+why = "fwupd sends no reports to LVFS (no report address, nothing automatic)"
+path = "/etc/fwupd/remotes.d"
+
+[[check]]
+id = "fwupd-daily"
+kind = "file"
+sev = "warn"
+why = "firmware metadata once a day (Fedora's timer: every hour)"
+path = "/etc/systemd/system/fwupd-refresh.timer.d/50-once-a-day.conf"
+key = "OnCalendar"
+want = "daily"
 
 [[check]]
 id = "crypto-policy"

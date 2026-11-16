@@ -16,6 +16,7 @@ Row sev: fail = the check's sev, unknown = warn, accepted / pass = ok (accepted 
 Alert (decided 2026-10-25: red only): a crit fail without ref -> check <id>.
 """
 
+import collections
 import json
 import time
 
@@ -44,6 +45,7 @@ RANK = {("fail", "crit"): 0, ("fail", "warn"): 1, ("fail", "info"): 2, ("unknown
 class Audit:
     def __init__(self):
         self.added = self.removed = 0
+        self.keys = collections.Counter()   # net rules per audit key (add - remove)
         self.enabled = None            # last audit_enabled value set this boot
         self.err = ""                  # boot scan failed: audit checks unknown
         self.cursors = set()           # seen by the scan
@@ -59,6 +61,7 @@ class State:
         self.stamp = stamp or (lambda ts: time.strftime("%H:%M:%S", time.localtime(ts)))
         self.audit = Audit()
         self.ostree = {}               # rpm-ostree status cache (checks.py)
+        self.setuid = {}               # setuid / setgid files under /usr, once (checks.py)
         self.units = sorted({u for c in self.checks if c.kind == "units" for u, _ in c.units})
 
 
@@ -67,10 +70,13 @@ def config_change(a: Audit, message: str) -> None:
     f = fields(message)
     if f.get("res") not in ("1", "success"):
         return
+    key = (f.get("key") or "").strip("\"'")
     if f.get("op") == "add_rule":
         a.added += 1
+        a.keys[key] += 1
     elif f.get("op") == "remove_rule":
         a.removed += 1
+        a.keys[key] -= 1
     elif "audit_enabled" in f:
         a.enabled = f["audit_enabled"]
 
@@ -147,7 +153,7 @@ def _row(c, res, checked: str) -> tuple:
 def collect(st: State, ctx) -> dict:
     now = st.wall()
     follow(st, ctx.journal, now)
-    cx = kinds.Cx(st.host, now, audit=st.audit, ostree=st.ostree)
+    cx = kinds.Cx(st.host, now, audit=st.audit, ostree=st.ostree, setuid=st.setuid)
     out, alerts = [], []
     counts = dict.fromkeys(("pass", "fail", "unknown", "accepted"), 0)
     checked = st.stamp(now)

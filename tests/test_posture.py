@@ -130,6 +130,8 @@ class FakeHost(kinds.Host):
                      "/sys/class/net": ["eth0", "lo", "virbr0", "wg0-mullvad", "wlan0"],
                      "/sys/class/net/eth0/device": [], "/sys/class/net/wlan0/device": []}
         self.stats = {"/etc/shadow": (0o100000, 0, 0), "/etc/passwd": (0o100644, 0, 0)}
+        self.setuid = [f"/usr/bin/s{i:02d}" for i in range(27)]   # host 2026-11-16: 27
+        self.setuid_unread = 0
         self.denied = {"/proc/sys/net/core/bpf_jit_harden"}
         self.sysctl = {"kernel.kptr_restrict": "2", "kernel.dmesg_restrict": "1",
                        "net.ipv4.conf.all.rp_filter": "2"}
@@ -188,6 +190,12 @@ class FakeHost(kinds.Host):
             raise FileNotFoundError(2, "No such file or directory")
         return list(self.dirs[path])
 
+    def setuid_files(self, root=kinds.SETUID_ROOT):
+        self.calls.append(["setuid_files", root])
+        if isinstance(self.setuid, OSError):
+            raise self.setuid
+        return list(self.setuid), self.setuid_unread
+
     def run(self, argv, timeout=kinds.TIMEOUT):
         self.calls.append(argv)
         line = " ".join(os.path.basename(a) if i == 0 else a for i, a in enumerate(argv))
@@ -217,8 +225,9 @@ def chk(**kw):
     return policy.Check(**base)
 
 
-def cx(host=None, now=NOW, audit=None, ostree=None):
-    return kinds.Cx(host or FakeHost(), now, audit=audit, ostree={} if ostree is None else ostree)
+def cx(host=None, now=NOW, audit=None, ostree=None, setuid=None):
+    return kinds.Cx(host or FakeHost(), now, audit=audit, ostree={} if ostree is None else ostree,
+                    setuid=setuid)
 
 
 def res(c, host=None, **kw):
@@ -641,6 +650,96 @@ class TestKinds(unittest.TestCase):
         a.err = "journal scan: x"
         self.assertEqual(res(chk(kind="audit-enabled"), audit=a), ("unknown", "journal scan: x"))
 
+    def test_audit_setuid_key(self):
+        """2026-11-16: 47 rules of other keys + one "privileged" rule per setuid program."""
+        c = chk(kind="audit-rules", want=47, setuid_key="privileged")
+        a = pos.Audit()
+        a.added, a.keys["privileged"] = 74, 27
+        h = FakeHost()
+        cache = {}
+        r = kinds.check(c, cx(h, audit=a, setuid=cache), [])
+        self.assertEqual((r.status, r.have), ("pass", "74 rules, setuid 27/27"))
+        self.assertEqual(r.lines[:3], [("other rules", "47 (want >= 47)"),
+                                       ("privileged rules", "27"), ("setuid files", "27")])
+        self.assertEqual(r.lines[3], ("setuid", "/usr/bin/s00"))
+        self.assertEqual(len(r.lines), kinds.MAX_LINES)
+        kinds.check(c, cx(h, audit=a, setuid=cache), [])                 # cached: one scan
+        self.assertEqual([x for x in h.calls if x[0] == "setuid_files"], [["setuid_files", "/usr"]])
+        # userhelper gone from the image, old rules file still loaded: 28 rules, 27 programs
+        a.added, a.keys["privileged"] = 75, 28
+        r = kinds.check(c, cx(h, audit=a), [])
+        self.assertEqual((r.status, r.have), ("fail", "75 rules, setuid 28/27"))
+        self.assertIn(("fix", "rules for programs no longer here: harden-workstation.sh "
+                              "audit-rules, then reboot"), r.lines)
+        # a new setuid program without a rule
+        h.setuid.append("/usr/bin/new")
+        a.added, a.keys["privileged"] = 74, 27
+        r = kinds.check(c, cx(h, audit=a), [])
+        self.assertEqual((r.status, r.have), ("fail", "74 rules, setuid 27/28"))
+        self.assertEqual(r.lines[3][0], "fix")
+        # other keys short
+        h.setuid.pop()
+        a.added = 73
+        self.assertEqual(res(c, h, audit=a), ("fail", "73 rules, setuid 27/27"))
+        # dirs not readable: shown; /usr not readable: unknown
+        a.added, h.setuid_unread = 74, 2
+        r = kinds.check(c, cx(h, audit=a), [])
+        self.assertEqual(r.lines[2], ("setuid files", "27 (2 dirs not readable)"))
+        h.setuid = PermissionError(13, "Permission denied")
+        self.assertEqual(res(c, h, audit=a), ("unknown", "/usr: Permission denied"))
+        self.assertEqual(kinds.want_text(c), ">= 47 + 1 per setuid file")
+        self.assertEqual(kinds.want_text(chk(kind="audit-rules", want=70)), ">= 70")
+
+    def test_setuid_files_real(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "bin", "sub"))
+            paths = {n: os.path.join(d, "bin", n) for n in ("su", "plain", "grp")}
+            paths["deep"] = os.path.join(d, "bin", "sub", "deep")
+            for n, p in paths.items():
+                with open(p, "w"):
+                    pass
+            os.chmod(paths["su"], 0o4755)
+            os.chmod(paths["grp"], 0o2755)
+            os.chmod(paths["deep"], 0o4711)
+            os.symlink(paths["su"], os.path.join(d, "bin", "link"))     # links: not counted
+            files, unread = kinds.Host().setuid_files(d)
+            self.assertEqual(files, sorted([paths["deep"], paths["grp"], paths["su"]]))
+            self.assertEqual(unread, 0)
+            if os.geteuid() != 0:                                    # root reads 000 dirs
+                os.chmod(os.path.join(d, "bin", "sub"), 0)
+                try:
+                    files, unread = kinds.Host().setuid_files(d)
+                finally:
+                    os.chmod(os.path.join(d, "bin", "sub"), 0o755)
+                self.assertEqual((len(files), unread), (2, 1))
+        with self.assertRaises(OSError):
+            kinds.Host().setuid_files("/nonexistent-sectop-test")
+
+    def test_fwupd_reports(self):
+        c = chk(kind="fwupd-reports", path="/etc/fwupd/remotes.d")
+        h = FakeHost()
+        self.assertEqual(res(c, h), ("pass", "no fwupd remotes"))           # no fwupd at all
+        on = ("[fwupd Remote]\nEnabled=true\nReportURI=https://fwupd.org/lvfs/firmware/report\n"
+              "AutomaticReports=true\nAutomaticSecurityReports=true\n")
+        off = ("[fwupd Remote]\nEnabled=true\n#ReportURI=https://fwupd.org/lvfs/firmware/report\n"
+               "AutomaticReports=false\nAutomaticSecurityReports=false\n")
+        h.dirs["/etc/fwupd/remotes.d"] = ["lvfs.conf", "vendor-directory.conf", "README"]
+        h.files["/etc/fwupd/remotes.d/lvfs.conf"] = off
+        h.files["/etc/fwupd/remotes.d/vendor-directory.conf"] = "[fwupd Remote]\nKind=directory\n"
+        self.assertEqual(res(c, h), ("pass", "2 remotes, no report address"))
+        h.files["/etc/fwupd/remotes.d/lvfs.conf"] = on
+        r = kinds.check(c, cx(h), [])
+        self.assertEqual((r.status, r.have), ("fail", "3 report settings on"))
+        self.assertEqual(r.lines, [("on", "lvfs.conf: ReportURI set"),
+                                   ("on", "lvfs.conf: AutomaticReports=true"),
+                                   ("on", "lvfs.conf: AutomaticSecurityReports=true")])
+        h.files["/etc/fwupd/remotes.d/lvfs.conf"] = off.replace("#ReportURI", "ReportURI")
+        self.assertEqual(res(c, h), ("fail", "1 report settings on"))   # address alone: fail
+        h.files["/etc/fwupd/remotes.d/lvfs.conf"] = off
+        h.denied.add("/etc/fwupd/remotes.d/vendor-directory.conf")
+        self.assertEqual(res(c, h)[0], "unknown")
+        self.assertEqual(kinds.want_text(c), "no report address")
+
     def test_audit_locked(self):
         a = pos.Audit()
         self.assertEqual(res(chk(kind="audit-locked"), audit=a), ("fail", "not locked this boot"))
@@ -683,6 +782,7 @@ class TestAuditJournal(unittest.TestCase):
         pos.follow(st, [change("c2", ADD), change("c3", REMOVE), change("c4", FAILED),
                         change("c5", OFF), {"_TRANSPORT": "kernel", "MESSAGE": ADD}], NOW + 1)
         self.assertEqual((st.audit.added, st.audit.removed, st.audit.enabled), (3, 1, "0"))
+        self.assertEqual(st.audit.keys, {"identity": 2})                 # 3 added, 1 removed
         pos.follow(st, [], NOW + pos.SCAN_KEEP + 1)
         self.assertEqual(st.audit.cursors, set())                       # overlap over
 
@@ -720,7 +820,7 @@ class TestModule(unittest.TestCase):
         self.assertEqual(crit, {"selinux-enforcing", "audit-boot", "audit-enabled",
                                 "auditd-active", "firewalld-active", "firewalld-zone", "uid0",
                                 "wheel", "luks-var", "ostree-locked", "ostree-gpg", "listeners",
-                                "secure-boot", "mac-random", "hostname"})
+                                "secure-boot", "mac-random", "hostname", "fwupd-no-reports"})
         refs = {c.id for c in checks if c.ref}
         self.assertEqual(refs, set())                                    # step 9 done
         self.assertEqual(set(policy.KINDS) - {c.kind for c in checks}, set())   # all used
@@ -757,7 +857,15 @@ class TestModule(unittest.TestCase):
 })
         self.assertTrue(allow)
         st = pos.State(checks=checks, host=h, wall=lambda: NOW, stamp=lambda ts: "12:00:00")
-        st.audit.added = 75   # 70 CIS + 2 af-alg + 2 io-uring + mullvad-exclude
+        st.audit.added = 74   # 2026-11-16: 47 + one per setuid program (27)
+        st.audit.keys["privileged"] = 27
+        h.dirs["/etc/fwupd/remotes.d"] = ["lvfs.conf", "lvfs-testing.conf"]
+        for n in h.dirs["/etc/fwupd/remotes.d"]:
+            h.files[f"/etc/fwupd/remotes.d/{n}"] = (
+                "[fwupd Remote]\n#ReportURI=https://fwupd.org/lvfs/firmware/report\n"
+                "AutomaticReports=false\nAutomaticSecurityReports=false\n")
+        h.files["/etc/systemd/system/fwupd-refresh.timer.d/50-once-a-day.conf"] = (
+            "# x\n[Timer]\nOnCalendar=\nOnCalendar=daily\n")
         st.audit.enabled = "2"   # -e 2 at boot
         snap = validate(pos.collect(st, Context((), True, "")))
         got = {r["cells"][0]: r["cells"][1] for r in snap["panels"][0]["rows"]}
@@ -850,6 +958,13 @@ class TestModule(unittest.TestCase):
                b'allow = ["wg0 mullvad"]\n',
                b'[[check]]\nid = "x"\nkind = "nm-props"\nsev = "warn"\nwhy = "w"\n'
                b'types = ["802-11-wireless"]\nprops = { "ipv4.dns" = "\\u00e9" }\n',
+               b'[[check]]\nid = "x"\nkind = "audit-rules"\nsev = "warn"\nwhy = "w"\nwant = 47\n'
+               b'setuid_key = "a b"\n',
+               b'[[check]]\nid = "x"\nkind = "audit-rules"\nsev = "warn"\nwhy = "w"\nwant = 47\n'
+               b'setuid_key = 1\n',
+               b'[[check]]\nid = "x"\nkind = "fwupd-reports"\nsev = "warn"\nwhy = "w"\n',
+               b'[[check]]\nid = "x"\nkind = "file"\nsev = "warn"\nwhy = "w"\npath = "/a"\n'
+               b'want = "1"\nsetuid_key = "privileged"\n',
                b'[[nope]]\n']
         for data in bad:
             with self.subTest(data=data), self.assertRaises(ConfigError):

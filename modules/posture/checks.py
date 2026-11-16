@@ -15,6 +15,7 @@ import json
 import os
 import pwd
 import re
+import stat
 import time
 from dataclasses import dataclass, field
 
@@ -54,6 +55,7 @@ UUID_RE = re.compile(r"[0-9a-f-]{36}")
 HOSTNAMES = ("Hostname", "StaticHostname", "DefaultHostname")   # hostnamectl --json
 MAX_LINES = 12                     # detail lines per check
 MAX_READ = 1024 * 1024
+SETUID_ROOT = "/usr"             # audit-rules setuid_key: scanned once (immutable per boot)
 KV_RE = r"^\s*{}\s*=\s*(.*?)\s*$"
 CGROUP_RE = re.compile(r"(?:^|\s)cgroup:(\S+)")
 WILD_UDP = ("udp 0.0.0.0:", "udp [::]:")
@@ -89,6 +91,31 @@ class Host:
     def listdir(self, path: str) -> list:
         return sorted(os.listdir(path))
 
+    def setuid_files(self, root: str = SETUID_ROOT) -> tuple:
+        """Regular files with the setuid or setgid bit under root, one file system
+        (`find root -xdev -type f -perm /6000`). -> (sorted paths, dirs not readable)."""
+        found, unread = [], 0
+        dev = os.lstat(root).st_dev                    # OSError: the check says unknown
+        stack = [root]
+        while stack:
+            try:
+                it = os.scandir(stack.pop())
+            except OSError:
+                unread += 1
+                continue
+            with it:
+                for e in it:
+                    try:
+                        st = e.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if stat.S_ISDIR(st.st_mode):
+                        if st.st_dev == dev:
+                            stack.append(e.path)
+                    elif stat.S_ISREG(st.st_mode) and st.st_mode & (stat.S_ISUID | stat.S_ISGID):
+                        found.append(e.path)
+        return sorted(found), unread
+
     def run(self, argv: list, timeout: float = TIMEOUT):
         return core_run(argv, timeout=timeout)
 
@@ -116,10 +143,11 @@ class Host:
 class Cx:
     """One collect: the host, the time, audit counts and caches shared by checks."""
 
-    def __init__(self, host: Host, now: float, audit=None, ostree=None):
+    def __init__(self, host: Host, now: float, audit=None, ostree=None, setuid=None):
         self.host, self.now = host, now
         self.audit = audit                     # State audit counts (posture __init__)
         self.ostree = ostree                   # dict: cached rpm-ostree status (ts, res)
+        self.setuid = setuid if setuid is not None else {}   # dict: one /usr scan (files, unread)
         self._units = None
 
     def units(self, names: list) -> dict | str:
@@ -825,14 +853,80 @@ def k_listeners(c, cx: Cx) -> Res:
 
 # --- audit (journal CONFIG_CHANGE, counted in __init__) -------------------------
 
+def _setuid(cx: Cx):
+    """(files, dirs not readable) of SETUID_ROOT, scanned on the first use only: /usr
+    changes with a new deployment, i.e. a reboot (and sectop starts again)."""
+    if "files" not in cx.setuid:
+        cx.setuid["files"], cx.setuid["unread"] = cx.host.setuid_files(SETUID_ROOT)
+    return cx.setuid["files"], cx.setuid["unread"]
+
+
 def k_audit_rules(c, cx: Cx) -> Res:
+    """Rules loaded this boot >= want. With setuid_key: rules of the other keys >= want,
+    and one setuid_key rule per setuid / setgid file under /usr (the list changes with
+    image updates: a fixed total breaks)."""
     a = cx.audit
     src = "journal CONFIG_CHANGE this boot (add_rule - remove_rule)"
     if a is None or a.err:
         return Res("unknown", (a.err if a else "no journal scan") or "?", source=src)
     n = a.added - a.removed
-    res = Res("pass" if n >= c.want else "fail", f"{n} rules", source=src)
-    res.lines = [("added", str(a.added)), ("removed", str(a.removed))]
+    if not c.setuid_key:
+        res = Res("pass" if n >= c.want else "fail", f"{n} rules", source=src)
+        res.lines = [("added", str(a.added)), ("removed", str(a.removed))]
+        return res
+    src += f", setuid / setgid files under {SETUID_ROOT}"
+    try:
+        files, unread = _setuid(cx)
+    except OSError as e:
+        return Res("unknown", f"{SETUID_ROOT}: {_err(e)}", source=src)
+    k = a.keys.get(c.setuid_key, 0)
+    other = n - k
+    ok = other >= c.want and k == len(files)
+    res = Res("pass" if ok else "fail", f"{n} rules, setuid {k}/{len(files)}", source=src)
+    res.lines = [("other rules", f"{other} (want >= {c.want})"),
+                 (f"{c.setuid_key} rules", str(k)),
+                 ("setuid files", str(len(files))
+                  + (f" ({unread} dirs not readable)" if unread else ""))]
+    if k < len(files):
+        res.lines.append(("fix", "a setuid program has no rule: harden-workstation.sh "
+                                 "audit-rules, then reboot"))
+    elif k > len(files):
+        res.lines.append(("fix", "rules for programs no longer here: harden-workstation.sh "
+                                 "audit-rules, then reboot"))
+    res.lines += [("setuid", p) for p in files]
+    res.lines = res.lines[:MAX_LINES]
+    return res
+
+
+# --- fwupd (silverblue-cis-hardening FIRMWARE_REPORTS=no) ------------------------
+
+REPORT_KEYS = ("ReportURI", "SecurityReportURI")
+AUTO_KEYS = ("AutomaticReports", "AutomaticSecurityReports")
+
+
+def k_fwupd_reports(c, cx: Cx) -> Res:
+    """No remote may send reports: no ReportURI, nothing automatic."""
+    try:
+        names = [n for n in cx.host.listdir(c.path) if n.endswith(".conf")]
+    except FileNotFoundError:
+        return Res("pass", "no fwupd remotes", source=c.path)
+    except OSError as e:
+        return Res("unknown", _err(e), source=c.path)
+    bad, unread = [], []
+    for name in names:
+        try:
+            text = cx.host.read(f"{c.path}/{name}")
+        except OSError as e:
+            unread.append(f"{name}: {_err(e)}")
+            continue
+        bad += [f"{name}: {k} set" for k in REPORT_KEYS if _value(text, k)]
+        bad += [f"{name}: {k}=true" for k in AUTO_KEYS
+                if (_value(text, k) or "").lower() == "true"]
+    status = "fail" if bad else ("unknown" if unread else "pass")
+    have = (f"{len(bad)} report settings on" if bad
+            else f"{len(names)} remotes, no report address")
+    res = Res(status, have, source=c.path)
+    res.lines = ([("on", b) for b in bad] + [("unread", u) for u in unread])[:MAX_LINES]
     return res
 
 
@@ -868,6 +962,7 @@ KINDS = {
     "ostree-staged": k_ostree_staged, "ostree-age": k_ostree_age, "ostree-gpg": k_ostree_gpg,
     "firewalld-zone": k_firewalld_zone, "wifi-ipv6": k_wifi_ipv6, "nm-props": k_nm_props,
     "mac-local": k_mac_local, "hostname": k_hostname, "dns-servers": k_dns_servers,
+    "fwupd-reports": k_fwupd_reports,
 }
 
 
@@ -888,7 +983,7 @@ def want_text(c) -> str:
     if k == "taint":
         return f"only {c.want}" if c.want.strip() else "none"
     if k == "audit-rules":
-        return f">= {c.want}"
+        return f">= {c.want} + 1 per setuid file" if c.setuid_key else f">= {c.want}"
     if k == "perms":
         return f"{c.mode:o} {c.owner}"
     if k == "ostree-age":
@@ -908,7 +1003,8 @@ def want_text(c) -> str:
     return {"luks": "CRYPT-LUKS", "secureboot": "on", "audit-enabled": "not 0",
             "audit-locked": "audit_enabled=2",
             "ostree-unlocked": "locked", "ostree-staged": "none",
-            "ostree-gpg": "all verify", "mac-local": "local MAC"}.get(k, "-")
+            "ostree-gpg": "all verify", "mac-local": "local MAC",
+            "fwupd-reports": "no report address"}.get(k, "-")
 
 
 def check(c, cx: Cx, unit_names: list) -> Res:

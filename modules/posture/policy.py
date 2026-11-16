@@ -26,6 +26,7 @@ from core.netd import IFACE_RE
 
 DEFAULT_PATH = "/etc/sectop/posture.toml"
 SEVS = ("info", "warn", "crit")
+AUDIT_KEY_RE = re.compile(r"[A-Za-z0-9_-]{1,31}")
 OPS = ("=", "!=", ">=", "<=", "in")
 UNIT_STATES = ("active", "inactive", "failed", "masked", "enabled", "disabled", "static")
 COMMON = {"id", "kind", "sev", "why", "ref"}
@@ -42,7 +43,7 @@ KINDS = {
     "luks": ({"path"}, set()),
     "secureboot": (set(), set()),
     "lockdown": ({"want"}, set()),
-    "audit-rules": ({"want"}, set()),
+    "audit-rules": ({"want"}, {"setuid_key"}),
     "audit-enabled": (set(), set()),
     "audit-locked": (set(), set()),
     "uid0": ({"want"}, set()),
@@ -58,6 +59,7 @@ KINDS = {
     "mac-local": (set(), set()),
     "hostname": ({"want"}, set()),
     "dns-servers": ({"allow"}, set()),
+    "fwupd-reports": ({"path"}, set()),
 }
 MAX_CHECKS = 100
 MAX_ITEMS = 64                      # values / units / lines / allow / want lists
@@ -95,6 +97,7 @@ class Check:
     tunnel_owner: str = ""          # listeners: program of a userspace tunnel's socket
     types: tuple = ()               # nm-props: NetworkManager profile types
     props: tuple = ()               # nm-props: ((property, want "a|b"), ...), "" = empty
+    setuid_key: str = ""            # audit-rules: key of the one-rule-per-setuid-program rules
 
 
 def _text(v, w: str, most: int = MAX_TEXT, empty: bool = False) -> str:
@@ -166,6 +169,10 @@ def _check(t, i: int, path: str, seen: set) -> Check:
         if type(n) is not int or not 0 <= n <= 100000:
             raise ConfigError(f"{w}.want: whole number 0..100000 required")
         args["want"] = n
+        sk = t.get("setuid_key", "")
+        if not isinstance(sk, str) or (sk and not AUDIT_KEY_RE.fullmatch(sk)):
+            raise ConfigError(f"{w}.setuid_key: audit key of 1..31 of a-z A-Z 0-9 _ - required")
+        args["setuid_key"] = sk
     if kind == "sysctl":
         vals = []
         for k, v in _table(t["values"], f"{w}.values").items():
