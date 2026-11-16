@@ -864,8 +864,8 @@ class TestModule(unittest.TestCase):
             h.files[f"/etc/fwupd/remotes.d/{n}"] = (
                 "[fwupd Remote]\n#ReportURI=https://fwupd.org/lvfs/firmware/report\n"
                 "AutomaticReports=false\nAutomaticSecurityReports=false\n")
-        h.files["/etc/systemd/system/fwupd-refresh.timer.d/50-once-a-day.conf"] = (
-            "# x\n[Timer]\nOnCalendar=\nOnCalendar=daily\n")
+        h.files["/etc/systemd/system/fwupd-refresh.timer.d/50-schedule.conf"] = (
+            "# x\n[Timer]\nOnCalendar=\nOnCalendar=*-*-1/2\n")
         st.audit.enabled = "2"   # -e 2 at boot
         snap = validate(pos.collect(st, Context((), True, "")))
         got = {r["cells"][0]: r["cells"][1] for r in snap["panels"][0]["rows"]}

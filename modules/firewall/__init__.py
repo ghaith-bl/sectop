@@ -80,15 +80,15 @@ SEV = {
     "out_dns": "warn", "in_lan": "warn", "in_vpn": "warn", "out_noscope": "warn",
     "fwd_vm_lan": "warn", "fwd_in": "warn",
     "out_disco": "info", "out_share": "info", "out_lan": "info",
-    "in_noise": None,
+    "in_noise": None, "in_disco": None,
 }
 # allowed traffic: counted, never raises status
 ALLOWED = {"out_dns_vpn", "out_wg", "out_vpn_api", "out_router_admin", "out_lan_allow",
            "out_new", "fwd_vm_new"}
 AUDIT_ONLY = {"out_new", "fwd_vm_new"}          # every new flow: audit box, no event
 LOG_ONLY = {"in_noise", "in_lan", "in_vpn"}     # hostfw logs, firewalld zone decides
-# rejected in every mode: their deny chain has its own reject, no jump enforce
-ALWAYS_BLOCK = {"out_split"}
+# blocked in every mode: their chain has its own reject / drop, no jump enforce
+ALWAYS_BLOCK = {"out_split", "in_disco"}
 AUDIT_COLUMNS = ["last", "n", "dir", "verdict", "proto", "uid", "prog", "src", "dst", "iface"]
 LEAK_COLUMNS = ["age", "uid", "proto", "dst", "iface", "context"]
 PEER_COLUMNS = ["peer", "open", "new", "drop", "prog", "last"]
@@ -152,6 +152,8 @@ MATCH = {
     "fwd_vm_lan": "VM traffic to LAN / uplink (not via the tunnel)",
     "fwd_in": "new forwarded traffic not from a VM",
     "in_noise": "LAN broadcast / multicast to the host (not via the tunnel)",
+    "in_disco": "udp 137 138 1900 3702 5351 5353 5355 27036, tcp 5355 5357 5358 27036 27037 "
+                "to the host (the out_disco ports), any interface: dropped in every mode",
     "in_lan": "new inbound from the uplink",
     "in_vpn": "new inbound from the tunnel",
 }

@@ -113,7 +113,7 @@ Log kind = counter name: `HFW-OUT-LEAK` -> `out_leak`, `HFW-FWD-VM-LAN` -> `fwd_
 | crit | out_leak (warn when blocked: enforce, 2026-11-04), out_split (always blocked, still crit) |
 | warn | out_dns, in_lan, in_vpn, fwd_vm_lan, fwd_in, out_noscope |
 | info | out_disco, out_share, out_lan, unknown kinds |
-| hidden | in_noise (counter only, no event, no audit row) |
+| hidden | in_noise (counter only, no event, no audit row); in_disco (hostfw drops it in every mode, not logged: counter only, 2026-11-16) |
 | ok | out_dns_vpn, out_wg, out_vpn_api, out_router_admin, out_lan_allow, out_new, fwd_vm_new (allowed) |
 
 - Alerts come from counter deltas, not totals: totals since boot include the

@@ -375,7 +375,7 @@ kind = "ostree-staged"
 sev = "info"
 why = "no update waiting for a reboot"
 
-# silverblue-cis-hardening autoupdate: FIRMWARE_REPORTS=no, firmware metadata once a day
+# silverblue-cis-hardening autoupdate: FIRMWARE_REPORTS=no, firmware metadata every second day
 [[check]]
 id = "fwupd-no-reports"
 kind = "fwupd-reports"
@@ -384,13 +384,13 @@ why = "fwupd sends no reports to LVFS (no report address, nothing automatic)"
 path = "/etc/fwupd/remotes.d"
 
 [[check]]
-id = "fwupd-daily"
+id = "fwupd-schedule"
 kind = "file"
 sev = "warn"
-why = "firmware metadata once a day (Fedora's timer: every hour)"
-path = "/etc/systemd/system/fwupd-refresh.timer.d/50-once-a-day.conf"
+why = "firmware metadata every second day (Fedora's timer: every hour)"
+path = "/etc/systemd/system/fwupd-refresh.timer.d/50-schedule.conf"
 key = "OnCalendar"
-want = "daily"
+want = "*-*-1/2"
 
 [[check]]
 id = "crypto-policy"

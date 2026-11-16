@@ -113,7 +113,7 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
           Secure Boot on; no hardware MAC on a link that is up; hostname localhost; fwupd
           sends no reports
     warn  SELinux config enforcing + targeted; audit rules >= 47 + 1 per setuid file; audit locked
-          (-e 2); firmware metadata once a day; journald audit
+          (-e 2); firmware metadata every second day; journald audit
           socket; su closed (sugroup empty, pam_wheel); faillock 5 / 900 s; pwquality 14
           / 4 classes; shadow, gshadow, passwd, group perms; sysctls of
           90-hardening.conf (kernel, KSPP, IPv4, IPv6); no taint; CIS module blocks;
@@ -192,8 +192,9 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
   are missed (the detail counts such directories).
 - fwupd (2026-11-16, silverblue-cis-hardening `autoupdate` `FIRMWARE_REPORTS=no`):
   `fwupd-no-reports` (fwupd-reports, crit: a report address back means a refresh may
-  upload again; lvfs.conf had `AutomaticReports=true`) and `fwupd-daily` (file: the
-  drop-in `OnCalendar=daily`, warn).
+  upload again; lvfs.conf had `AutomaticReports=true`) and `fwupd-schedule` (file: the
+  drop-in `50-schedule.conf` `OnCalendar=*-*-1/2`, every second day, warn; first
+  `fwupd-daily` on `50-once-a-day.conf`, same day).
 - Kernel args 2026-11-01 (silverblue-cis-hardening `kargs`, ideas from secureblue):
   `page-shuffle` (`page_alloc.shuffle=1`) and `initrd-no-shell` (`rd.shell=0
   rd.emergency=halt`), both cmdline, warn: missing = less hardening, not a hole. The

@@ -699,7 +699,8 @@ class TestCollect(Base):
 
     def test_severity_kinds(self):
         for name, sev in (("out_dns", "warn"), ("in_vpn", "warn"), ("out_lan", "info"),
-                          ("in_noise", "ok"), ("out_wg", "ok"), ("out_vpn_api", "ok"),
+                          ("in_noise", "ok"), ("in_disco", "ok"), ("out_wg", "ok"),
+                          ("out_vpn_api", "ok"),
                           ("out_new", "ok"), ("fwd_vm_new", "ok")):
             with self.subTest(name=name):
                 self.setUp()
@@ -764,6 +765,19 @@ class TestCollect(Base):
         self.assertEqual(self.items(s, "hostfw")["noscope"], ("enforce", "ok"))
         self.assertEqual(fw._verdict("out_noscope", "observe", "enforce"), "block")
         self.assertEqual(fw._verdict("out_leak", "observe", "enforce"), "pass")
+
+    def test_disco_in_dropped_hidden(self):
+        """in_disco (hostfw 2026-11-16): discovery ports to the host, dropped in every
+        mode, not logged: blocked verdict, no status change (LAN chatter), described."""
+        for live in ("observe", "enforce", "?"):
+            self.assertEqual(fw._verdict("in_disco", live), "block", live)
+        self.assertIsNone(fw.kind_sev("in_disco"))
+        self.assertIn("dropped in every mode", fw.MATCH["in_disco"])
+        self.add_counters("in_disco")
+        self.collect()
+        self.tick()
+        self.bump("in_disco", 40)
+        self.assertEqual(self.collect()["status"], "ok")
 
     def test_split_always_blocked(self):
         """out_split (hostfw 2026-11-05): split tunneling (mullvad-exclude, setuid) off the
