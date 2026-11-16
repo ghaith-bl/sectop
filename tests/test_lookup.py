@@ -114,6 +114,9 @@ class TestRdap(unittest.TestCase):
         doc, calls = self.run_main("10.2.0.1", {})
         self.assertEqual((doc, calls), ({"ok": False,
                                          "error": "ValueError: not a public address"}, []))
+        doc, calls = self.run_main("224.0.0.22", {})                  # is_global, multicast
+        self.assertEqual((doc, calls), ({"ok": False,
+                                         "error": "ValueError: not a public address"}, []))
         doc, _ = self.run_main("x", {})
         self.assertFalse(doc["ok"])
         err = urllib.error.URLError("Tunnel connection failed")
@@ -170,7 +173,38 @@ class TestLookup(unittest.TestCase):
 
     def test_private_not_asked(self):
         pairs, calls = self.go(ok({}), ip="10.2.0.1")
-        self.assertEqual((pairs, calls), ([("whois", "not a public address: no whois")], []))
+        self.assertEqual((pairs, calls), ([("address", "10.2.0.1"),
+                                           ("kind", "private network (RFC 1918)"),
+                                           ("whois", "no owner in any registry: named here, "
+                                                     "nothing looked up")], []))
+        pairs, calls = self.go(ok({}), ip="not-an-ip")
+        self.assertEqual((pairs, calls), ([("whois", "not an IP address: no whois")], []))
+
+    def test_special_named_here(self):
+        """2026-11-16: w on 224.0.0.22 went to RDAP (is_global is True for it) and failed."""
+        for ip, kind in (("224.0.0.22", "multicast: IGMPv3 reports (a program joined a "
+                                        "multicast group)"),
+                         ("224.0.0.251", "multicast: mDNS (local names and service discovery)"),
+                         ("224.0.0.99", "multicast: local network control, never routed"),
+                         ("239.255.255.250", "multicast: SSDP / UPnP discovery"),
+                         ("230.1.2.3", "multicast"),
+                         ("255.255.255.255", "broadcast: every device on this network"),
+                         ("192.168.8.1", "private network (RFC 1918)"),
+                         ("100.64.0.7", "shared address space, carrier-grade NAT (RFC 6598)"),
+                         ("169.254.1.1", "link-local: no DHCP answer (RFC 3927)"),
+                         ("240.0.0.1", "reserved"),
+                         ("ff02::fb", "multicast: mDNS (local names and service discovery)"),
+                         ("ff02::1:ff12:3456", "multicast: solicited-node (neighbor discovery)"),
+                         ("ff05::2", "multicast"),
+                         ("fe80::1", "link-local"),
+                         ("fd12::1", "unique local, private (ULA)")):
+            with self.subTest(ip=ip):
+                self.assertFalse(lookup.public(ip))
+                pairs, calls = self.go(ok({}), ip=ip)
+                self.assertEqual(calls, [])
+                self.assertEqual(pairs[:2], [("address", ip), ("kind", kind)])
+        for ip in ("8.8.8.8", "2607:6bc0::10", "x"):
+            self.assertIsNone(lookup.special(ip), ip)
 
     def test_errors(self):
         cases = (

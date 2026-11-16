@@ -322,9 +322,12 @@ A condition that is not true any more is left out.
   match (`BoxInfo.mark`, a pair index: stable when the width changes). Max 60 chars.
 - whois (`w`, `core/lookup.py`, `core/rdap.py`): on a line with `ip` (or in its detail)
   opens the detail and looks the address up with RDAP (RFC 9224 bootstrap from IANA,
-  RFC 9083 answer), the modern WHOIS. Public addresses only. Detail shows `whois` then
+  RFC 9083 answer), the modern WHOIS. Public addresses only (`is_global` and not
+  multicast: Python calls most multicast global). Detail shows `whois` then
   name, handle, range, cidr, type, country, parent, org, abuse, dates, remark, whois
-  server, source URL, or the error.
+  server, source URL, or the error. A special-purpose address (multicast with its
+  well-known groups, broadcast, private, CGNAT, link-local, loopback, ULA, documentation,
+  reserved) is named by `core/lookup.py` itself: `address`, `kind`, nothing sent.
   - Socket service, never my user: the UI connects to `/run/sectop-whois.sock`
     (root:sectop 0660), sends the IP line, reads one JSON line (max 64 KiB, max 20
     fields, values cut to 200). systemd starts one `sectop-whois@.service` per connection

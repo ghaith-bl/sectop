@@ -158,7 +158,7 @@ def main(argv=None, get=fetch, stdin=None) -> int:
     try:
         text = argv[0] if argv else request(stdin or sys.stdin.buffer)
         ip = ipaddress.ip_address(text)
-        if not ip.is_global:
+        if not ip.is_global or ip.is_multicast:       # is_global: True for most multicast
             raise ValueError("not a public address")
         base = base_url(get(BOOT[ip.version]), ip)
         if base is None:

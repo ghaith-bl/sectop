@@ -8,6 +8,9 @@ the IP, read the one JSON line back, check it. It goes out via the tunnel
 like any program (audit shows it). Only on key press, one lookup per address
 per session (cache in core/ui.py). Blocks the UI up to TIMEOUT (core/app.py,
 the UI).
+
+Special-purpose addresses (multicast, broadcast, private, link-local, ...) have no
+owner in any registry: special() names them here, nothing is sent anywhere.
 """
 
 import ipaddress
@@ -22,9 +25,74 @@ MAX_VALUE = 200
 MAX_ANSWER = 65536
 
 
+# Most specific first: the first network that holds the address wins (IANA
+# special-purpose registries, RFC 6890; multicast: IANA multicast address space).
+SPECIAL = tuple((ipaddress.ip_network(n), what) for n, what in (
+    ("224.0.0.1/32", "multicast: all hosts on this network"),
+    ("224.0.0.2/32", "multicast: all routers on this network"),
+    ("224.0.0.22/32", "multicast: IGMPv3 reports (a program joined a multicast group)"),
+    ("224.0.0.251/32", "multicast: mDNS (local names and service discovery)"),
+    ("224.0.0.252/32", "multicast: LLMNR (local name lookup)"),
+    ("239.255.255.250/32", "multicast: SSDP / UPnP discovery"),
+    ("224.0.0.0/24", "multicast: local network control, never routed"),
+    ("239.0.0.0/8", "multicast: organization-local scope"),
+    ("224.0.0.0/4", "multicast"),
+    ("255.255.255.255/32", "broadcast: every device on this network"),
+    ("0.0.0.0/8", "this network / unspecified"),
+    ("10.0.0.0/8", "private network (RFC 1918)"),
+    ("100.64.0.0/10", "shared address space, carrier-grade NAT (RFC 6598)"),
+    ("127.0.0.0/8", "loopback: this machine"),
+    ("169.254.0.0/16", "link-local: no DHCP answer (RFC 3927)"),
+    ("172.16.0.0/12", "private network (RFC 1918)"),
+    ("192.0.0.0/24", "IETF protocol assignments"),
+    ("192.0.2.0/24", "documentation (TEST-NET-1)"),
+    ("192.168.0.0/16", "private network (RFC 1918)"),
+    ("198.18.0.0/15", "benchmarking (RFC 2544)"),
+    ("198.51.100.0/24", "documentation (TEST-NET-2)"),
+    ("203.0.113.0/24", "documentation (TEST-NET-3)"),
+    ("240.0.0.0/4", "reserved"),
+    ("ff02::1/128", "multicast: all nodes on this link"),
+    ("ff02::2/128", "multicast: all routers on this link"),
+    ("ff02::16/128", "multicast: MLDv2 reports (a program joined a multicast group)"),
+    ("ff02::fb/128", "multicast: mDNS (local names and service discovery)"),
+    ("ff02::1:2/128", "multicast: DHCPv6 servers and relays"),
+    ("ff02::1:3/128", "multicast: LLMNR (local name lookup)"),
+    ("ff02::1:ff00:0/104", "multicast: solicited-node (neighbor discovery)"),
+    ("ff02::/16", "multicast: this link only"),
+    ("ff00::/8", "multicast"),
+    ("::/128", "unspecified"),
+    ("::1/128", "loopback: this machine"),
+    ("::ffff:0:0/96", "IPv4-mapped IPv6 address"),
+    ("64:ff9b::/96", "NAT64 (IPv4 behind IPv6)"),
+    ("2001:db8::/32", "documentation"),
+    ("fc00::/7", "unique local, private (ULA)"),
+    ("fe80::/10", "link-local"),
+))
+
+
+def special(ip: str) -> list | None:
+    """Detail pairs for a special-purpose address, None for a public (or bad) one."""
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    what = next((w for n, w in SPECIAL if a.version == n.version and a in n), None)
+    if what is None:
+        if _public(a):
+            return None
+        what = "special-purpose address"
+    return [("address", str(a)), ("kind", what),
+            ("whois", "no owner in any registry: named here, nothing looked up")]
+
+
+def _public(a) -> bool:
+    # is_global is True for most multicast (224.0.0.22 too): no registry owns those
+    return a.is_global and not a.is_multicast
+
+
 def public(ip: str) -> bool:
     try:
-        return ipaddress.ip_address(ip).is_global
+        return _public(ipaddress.ip_address(ip))
     except ValueError:
         return False
 
@@ -78,7 +146,7 @@ def ask(path: str, ip: str, timeout: float = TIMEOUT, clock=time.monotonic) -> s
 def lookup(ip: str, ask=ask, path: str = SOCKET) -> list:
     """-> [(key, value)] for the detail view. A problem comes back as one 'whois' pair."""
     if not public(ip):
-        return _err("not a public address: no whois")
+        return special(ip) or _err("not an IP address: no whois")
     try:
         out = ask(path, ip, TIMEOUT)
     except FileNotFoundError:
