@@ -230,8 +230,9 @@ id = "sysctl-kernel"
 kind = "sysctl"
 sev = "warn"
 why = "kernel sysctls of 90-hardening.conf"
-# net.core.bpf_jit_harden: root-only file (0600), not checked
-values = { "kernel.dmesg_restrict" = "1", "kernel.kptr_restrict" = "2", "kernel.yama.ptrace_scope" = "2", "kernel.randomize_va_space" = "2", "kernel.kexec_load_disabled" = "1", "kernel.unprivileged_bpf_disabled" = "1", "fs.suid_dumpable" = "0", "fs.protected_hardlinks" = "1", "fs.protected_symlinks" = "1" }
+# net.core.bpf_jit_harden: root-only file (0600), not checked. ptrace_scope 3 (PTRACE_SCOPE,
+# 2026-11-16): no ptrace attach for anyone; sectop reads /proc only, never attaches.
+values = { "kernel.dmesg_restrict" = "1", "kernel.kptr_restrict" = "2", "kernel.yama.ptrace_scope" = "3", "kernel.randomize_va_space" = "2", "kernel.kexec_load_disabled" = "1", "kernel.unprivileged_bpf_disabled" = "1", "fs.suid_dumpable" = "0", "fs.protected_hardlinks" = "1", "fs.protected_symlinks" = "1" }
 
 # Attack surface for unprivileged programs (silverblue-cis-hardening sysctl, KSPP,
 # 2026-11-16). vm.mmap_rnd_bits / vm.mmap_rnd_compat_bits: root-only files (0600), not checked.
