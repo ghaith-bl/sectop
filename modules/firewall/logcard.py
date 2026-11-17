@@ -115,7 +115,7 @@ def iface(e) -> str:
 
 def uid(e) -> str:
     if e.kind.startswith("fwd_vm"):
-        return "vm"
+        return journal.vm_name(e)
     return e.fields.get("UID") or "-"
 
 

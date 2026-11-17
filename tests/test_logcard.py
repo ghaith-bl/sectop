@@ -116,6 +116,11 @@ class TestCard(unittest.TestCase):
         self.assertTrue(ports.startswith("40000 40001"))
         self.assertEqual(c["lines"], 20)
 
+    def test_browsevm_bridge_uid(self):
+        line = SVC.format(i=1, spt=40001).replace("IN=virbr0", "IN=virbr-browse")
+        rows = card(jline("c1", 1001, line))["flows"]["rows"]
+        self.assertEqual(rows[0]["cells"][6:8], ["virbr-browse>wlo1", "browsevm"])
+
     def test_head_counted_vs_logged(self):
         head = card(host_lines())["flows"]["head"]
         self.assertEqual(head[0][0], "HFW-FWD-VM-LAN   counted 20 packets (since the hostfw "

@@ -205,7 +205,7 @@ Title: `programs <rows>  <n> with open sockets`.
 
 | column | value |
 |---|---|
-| prog | program from the socket's cgroup (`ss --cgroup`, see below); `<name>?` = guess; `? <user>` / `?` = unknown (one row per uid, the uid's user name when it has one); `(kernel)`, `(inbound)`, `vm`, `(forward)` = lines without a program |
+| prog | program from the socket's cgroup (`ss --cgroup`, see below); `<name>?` = guess; `? <user>` / `?` = unknown (one row per uid, the uid's user name when it has one); `(kernel)`, `(inbound)`, `vm` / `browsevm`, `(forward)` = lines without a program (VM names: below) |
 | uid | UIDs of its lines (OUT rules with `skuid`), max 3 then `+`, else `-` |
 | open | open sockets now |
 | out | allowed lines (new flows, exceptions), out and forward |
@@ -219,8 +219,12 @@ Title: `programs <rows>  <n> with open sockets`.
   kinds (`out_new 12, out_lan 3`), peers by lines (`(socket)` = open, no line yet), uids,
   first / last seen.
 - Row `filter` (keys `f` / `x`, docs/module-interface.md, Screen): the name; `? <uid>` for
-  unknown programs; `kernel` for (kernel), `zone` for (inbound), `vm`, `fwd_in` for
-  (forward).
+  unknown programs; `kernel` for (kernel), `zone` for (inbound), `vm` / `browsevm`, `fwd_in`
+  for (forward).
+- VM names (`journal.VM_NAMES`): forwarded VM lines (`fwd_vm_*`) from bridge `virbr-browse`
+  (silverblue-cis-hardening browsevm, network `browse`) are `browsevm`, from any other bridge
+  (`virbr0`: lab VMs) `vm`. Same name in the audit `prog`, the log card's `uid` and the
+  programs row; never a program for the program card.
   Only when it is printable ASCII (the filter prompt's chars): else no filter.
 - Same limit as the audit `prog` column: a flow that closes before the next `ss` poll
   has no program. Blocked flows: mostly `?` (a rejected SYN never has a socket). No
@@ -345,7 +349,7 @@ order; host 2026-11-04 `fwd_vm_lan 20` needed `journalctl -g` to see what they w
   N < M: table reloaded this boot), verdict (rule's severity color), meaning, match.
 - Flows (box `logflows`): one row per proto, src, dst, iface, uid (journal.flow(): the
   ephemeral port left out), newest first. Cols: last, first, n, proto (`icmp 8 echo`,
-  `icmpv6 135 neighbor solicit`), src, dst, iface (`virbr0>wlo1`), uid (`vm` for VM
+  `icmpv6 135 neighbor solicit`), src, dst, iface (`virbr0>wlo1`), uid (`vm` / `browsevm` for VM
   kinds), maker (source MAC's maker, `local mac`, `?` not in the list, `-` no MAC). Row
   detail: lines, first, last, source ports seen (first 20), source MACs with their maker.
 - Maker (2026-11-11: which LAN device sends the noise): first 3 bytes of the source MAC
@@ -427,7 +431,7 @@ Title: `audit <flows> flows  (<lines> lines)`, lines = all since sectop started.
 | verdict | allow (allowed kinds), zone (in_*: hostfw logs, firewalld zone decides), block / pass (deny kinds, live mode enforce / observe) |
 | proto | PROTO, lower case |
 | uid | UID (OUT rules with `skuid`), else `-` |
-| prog | out: every process seen with `ss` for a line of the flow (same proto + src + dst, open flows only), max 3 then `+`, else `?`; fwd_vm_*: `vm`; in: `-` |
+| prog | out: every process seen with `ss` for a line of the flow (same proto + src + dst, open flows only), max 3 then `+`, else `?`; fwd_vm_*: `vm`, `browsevm` from `virbr-browse`; in: `-` |
 | src, dst | address[:port], IPv6 compressed (`[v6]:port`) |
 | iface | out: OUT, in: IN, fwd: IN>OUT |
 

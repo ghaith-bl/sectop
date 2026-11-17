@@ -105,6 +105,17 @@ def parse(text: str) -> tuple:
     return out, cursor, bad
 
 
+# a VM bridge with its own name: its forwarded lines show it instead of "vm" (prog / uid
+# cells, programs row). silverblue-cis-hardening browsevm: network browse on virbr-browse.
+VM_NAMES = {"virbr-browse": "browsevm"}
+VM_LABELS = frozenset({"vm", *VM_NAMES.values()})
+
+
+def vm_name(e: Entry) -> str:
+    """Name of a forwarded VM line (fwd_vm_*): its bridge's own name, else vm."""
+    return VM_NAMES.get(e.fields.get("IN") or "", "vm")
+
+
 def _addr(a: str) -> str:
     try:
         return str(ipaddress.ip_address(a))      # compress kernel's full v6 form

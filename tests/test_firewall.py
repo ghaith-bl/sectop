@@ -956,6 +956,32 @@ class TestCollect(Base):
                          "(a flow row's detail says why: short flow, discovery, not tcp / udp); "
                          "uid 1000: no process runs as it now")
 
+    def test_browsevm_bridge_named(self):
+        """Forwarded lines from virbr-browse are browsevm (2026-11-17), virbr0 stays vm."""
+        browse = ('{"__CURSOR": "s=1;i=99;b=0;m=0;t=0;x=0", "__REALTIME_TIMESTAMP": '
+                  '"1792410760000000", "MESSAGE": "HFW-FWD-VM-NEW: IN=virbr-browse '
+                  'OUT=wg0-mullvad MAC=52:54:00:00:00:01:52:54:00:00:00:03:08:00 '
+                  'SRC=192.168.123.11 DST=198.51.100.30 LEN=60 TOS=0x00 PREC=0x00 TTL=63 '
+                  'ID=21 DF PROTO=TCP SPT=41000 DPT=443 WINDOW=64240 RES=0x00 SYN URGP=0 "}\n')
+        self.host.set("nft list table", ok(table("nft-enforce.json")))
+        self.host.set("journalctl", ok(fix("journal-audit.json") + browse))
+        self.st.hms = lambda ts: f"t{int(ts) % 100}"
+        self.st.stamp = lambda ts: f"T{ts:.3f}"
+        s = self.collect()
+        audit = [lab(r["cells"]) for r in self.panel(s, "audit")["rows"]]
+        self.assertEqual(audit[0], ["t60", "1", "fwd", "allow", "tcp", "-", "browsevm",
+                                    "192.168.123.11", "198.51.100.30:443",
+                                    "virbr-browse>wg0-mullvad"])
+        self.assertEqual([r[6] for r in audit if r[2] == "fwd"], ["browsevm", "vm", "vm"])
+        rows = {r["id"]: r for r in self.panel(s, "programs")["rows"]}
+        self.assertEqual(rows["browsevm"]["cells"][:4], ["browsevm", "-", "0", "1"])
+        self.assertEqual(rows["browsevm"]["filter"], "browsevm")
+        self.assertNotIn("progs", rows["browsevm"])                  # never a program card
+        self.assertEqual({it["k"]: it["v"] for it in rows["browsevm"]["detail"]}["note"],
+                         "forwarded traffic of the VM on bridge virbr-browse")
+        self.assertEqual(rows["vm"]["cells"][3:5], ["1", "1"])        # lab VM lines unchanged
+        self.assertFalse(fw._real("browsevm"))
+
     def test_programs_keep_and_limit(self):
         self.audit()
         self.host.set("journalctl", ok(""))

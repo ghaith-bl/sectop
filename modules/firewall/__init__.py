@@ -106,6 +106,8 @@ APP_OTHER = {
     "(inbound)": ("(inbound)", "zone",
                   "inbound lines: no program (hostfw logs, the firewalld zone decides)"),
     "vm": ("vm", "vm", "forwarded traffic of libvirt VMs"),
+    **{n: (n, n, f"forwarded traffic of the VM on bridge {b}")
+       for b, n in journal.VM_NAMES.items()},
     "(forward)": ("(forward)", "fwd_in", "forwarded traffic not from a VM"),
     "(kernel)": ("(kernel)", "kernel",
                  "outgoing lines without a socket owner: packets the kernel sends itself "
@@ -848,12 +850,12 @@ def _uid_note(st: State, uid: str) -> str:
 def _real(name: str) -> bool:
     """A program name from a socket: not a guess (x?), not unknown (?, org.gnome.Shell/?),
     not a placeholder ((kernel), (inbound) ...)."""
-    return (bool(name) and not name.endswith("?") and name not in ("-", "vm")
-            and not name.startswith("("))
+    return (bool(name) and not name.endswith("?") and name != "-"
+            and name not in journal.VM_LABELS and not name.startswith("("))
 
 
 def _prog(e, names) -> tuple:
-    """-> (program or '?' / 'vm' / '-', iface) of one log line. names: Names (a dict
+    """-> (program or '?' / VM name / '-', iface) of one log line. names: Names (a dict
     5-tuple -> programs works too: no port match, no guess)."""
     f = e.fields
     proto = f.get("PROTO", "-").lower()
@@ -865,7 +867,7 @@ def _prog(e, names) -> tuple:
             prog = names(e)
         return prog, f.get("OUT") or "-"
     if e.dir == "fwd":
-        return ("vm" if e.kind.startswith("fwd_vm") else "-"), \
+        return (journal.vm_name(e) if e.kind.startswith("fwd_vm") else "-"), \
             f"{f.get('IN') or '-'}>{f.get('OUT') or '-'}"
     return "-", f.get("IN") or "-"
 
@@ -904,7 +906,8 @@ def _audit(st: State, entries: list, names, live: str) -> dict:
         fl.n += 1
         fl.last, fl.entry, fl.verdict = e.ts, e, _verdict(e.kind, live, st.noscope)
         for name in prog.split(","):
-            if name not in ("?", "-", "vm", "") and name not in fl.progs:
+            if name not in ("?", "-", "") and name not in journal.VM_LABELS \
+                    and name not in fl.progs:
                 fl.progs.append(name)
         if port and port not in fl.ports:
             fl.ports.appendleft(port)
@@ -951,7 +954,8 @@ def _flow_row(st: State, key: tuple, fl: Flow) -> dict:
     if fl.progs:
         prog = ",".join(fl.progs[:MAX_PROGS]) + ("+" if len(fl.progs) > MAX_PROGS else "")
     else:
-        prog = {"fwd": "vm" if kind.startswith("fwd_vm") else "-", "in": "-"}.get(d, "?")
+        vm = journal.VM_NAMES.get(iface.partition(">")[0], "vm")
+        prog = {"fwd": vm if kind.startswith("fwd_vm") else "-", "in": "-"}.get(d, "?")
     cell = prog
     if prog == "?" and uid != "-" and _user(st, uid):
         cell = f"? {_user(st, uid)}"                 # the user names a service (chrony ...)
@@ -1455,11 +1459,11 @@ class App:
 
 def _app_keys(e, prog: str) -> list:
     """Program keys of one log line: names from ss, '? uid N' when not matched,
-    (inbound) / vm / (forward) for lines without a program."""
+    (inbound) / vm or the bridge's VM name / (forward) for lines without a program."""
     if e.dir == "in":
         return ["(inbound)"]
     if e.dir == "fwd":
-        return ["vm" if e.kind.startswith("fwd_vm") else "(forward)"]
+        return [journal.vm_name(e) if e.kind.startswith("fwd_vm") else "(forward)"]
     names = [n for n in prog.split(",") if n not in ("?", "-", "")]
     return names or [f"? uid {e.fields.get('UID') or '-'}"]
 
