@@ -288,6 +288,13 @@ unit of the socket's cgroup (`conns.program()`):
   (`NetworkManager`, `chronyd`, `getty`, `session`). `\xNN` escapes decoded.
 - terminal commands: the tab's scope, `vte-spawn` (not `curl`): the price of no ptrace.
 - `cgroup:unreachable:<id>` or no unit -> no program (`?` row).
+- a line from a systemd dynamic user (uid 61184-65519, `DynamicUser=`): the user's name,
+  live, or the last name seen for that uid (the user is gone with its unit), or sectop's
+  own `sectop-whois` by the uid systemd hashes from that name (core/dynuser.py: SipHash-2-4
+  with systemd's key, = 65258; a uid that resolves to another name wins). Its processes
+  are hidden from other users (`ProtectProc=invisible`): `ss` and /proc never show them.
+  2026-11-17: whois lookups showed as `? 65258`. A dynamic uid with no name: `?`, its
+  note says what such a uid is.
 - `-e`: `ino:<n>` (socket inode) kept with the cgroup: the user helper names sockets of
   the shared cgroup by inode.
 

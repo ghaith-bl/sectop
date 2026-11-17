@@ -31,6 +31,7 @@ import stat
 import time
 
 from core import alerts as alertsmod
+from core import dynuser
 from core import netd
 from core import proc as procmod
 from core import userd
@@ -114,6 +115,14 @@ APP_OTHER = {
                  "(TCP resets, ICMP replies, IGMP / MLD reports)"),
 }
 KERNEL = "(kernel)"         # program of an outgoing line with no UID (no socket owner)
+# systemd DynamicUser= range (systemd.exec): a service's own user, made at its start and
+# gone at its end, named after the unit or its User= (sectop-whois). Its processes are
+# often invisible to other users (ProtectProc=invisible): name from the user, not /proc.
+DYNAMIC_UIDS = range(dynuser.DYNAMIC_MIN, dynuser.DYNAMIC_MAX + 1)
+# sectop's own dynamic user and the uid systemd gives it while free (core/dynuser.py):
+# named even when no line was read while it ran
+OWN_DYNAMIC = {str(dynuser.hashed_uid(n)): n for n in ("sectop-whois",)}
+MAX_UID_NAMES = 256         # uid -> user name seen (dynamic users vanish with their unit)
 MAX_GUESSES = 200           # guess notes kept (programs box rows)
 CGNAT = ipaddress.ip_network("100.64.0.0/10")
 ULA = ipaddress.ip_network("fc00::/7")
@@ -261,6 +270,8 @@ class State:
         self.helper = None             # this tick: socket inode -> userd.Owner (lazy)
         self.uid_scan = None           # this tick: uid -> Counter program (/proc, lazy)
         self.getpw = getpw             # uid -> passwd entry (user name next to a uid)
+        self.uid_names = {}            # uid -> last user name seen (a dynamic user is gone
+                                       # with its unit: the line's name stays)
         self.guesses = {}              # guess key ("chronyd?") -> why, last reason wins
         self.helper_notes = []         # this tick: user helper problems
 
@@ -732,7 +743,9 @@ class Names:
        earlier in the peers box). Shown as a guess, never on a card.
     4. guess `<name>?`: every process running as the line's uid now belongs to one
        program (2026-11-09; any proto, ICMP too)
-    5. no uid in the line: (kernel). Else `?`.
+    5. no uid in the line: (kernel).
+    6. a systemd dynamic user (DYNAMIC_UIDS) with a name, now or seen before: that name
+       (one unit owns it: sectop-whois, 2026-11-17). Else `?`.
     One answer per line and tick (memo): every box shows the same name."""
 
     def __init__(self, st: State, cs: list):
@@ -771,6 +784,9 @@ class Names:
                 return name
         if not uid:
             return KERNEL
+        d = _dynamic(self.st, uid)
+        if d:
+            return d
         g = _uid_guess(self.st, uid)
         if g is None:
             return "?"
@@ -824,12 +840,30 @@ def _uid_guess(st: State, uid: str) -> str | None:
 
 
 def _user(st: State, uid: str) -> str:
-    """uid -> user name ('' unknown). Service users name their service (chrony ...)."""
+    """uid -> user name ('' unknown). Service users name their service (chrony ...).
+    A name once seen stays (st.uid_names): a dynamic user is gone with its unit."""
     try:
         name = st.getpw(int(uid)).pw_name
     except (KeyError, ValueError, OverflowError):
+        return st.uid_names.get(uid, "") or OWN_DYNAMIC.get(uid, "")
+    if not procmod.NAME_RE.fullmatch(name):
         return ""
-    return name if procmod.NAME_RE.fullmatch(name) else ""
+    st.uid_names.pop(uid, None)
+    st.uid_names[uid] = name                                 # newest at the end
+    while len(st.uid_names) > MAX_UID_NAMES:
+        del st.uid_names[next(iter(st.uid_names))]
+    return name
+
+
+def _dynamic(st: State, uid: str) -> str:
+    """Program of a dynamic user's line: its user name ('' not dynamic / no name)."""
+    try:
+        if int(uid) not in DYNAMIC_UIDS:
+            return ""
+    except ValueError:
+        return ""
+    name = _user(st, uid)
+    return name if name and _real(name) and "/" not in name else ""
 
 
 def _named(st: State, uid: str) -> str:
@@ -841,6 +875,10 @@ def _uid_note(st: State, uid: str) -> str:
     """Detail line: who runs as this uid now."""
     progs = _uid_progs(st).get(uid)
     if not progs:
+        if uid.isdigit() and int(uid) in DYNAMIC_UIDS:
+            return (f"uid {uid}{_named(st, uid)}: a systemd dynamic user (a service's own user, "
+                    "made at its start, gone at its end; its processes are hidden from "
+                    "other users)")
         return f"uid {uid}{_named(st, uid)}: no process runs as it now"
     named = collections.Counter({(k or "(session)"): v for k, v in progs.items()})
     return (f"uid {uid}{_named(st, uid)}: {len(named)} program{'s' if len(named) != 1 else ''} "

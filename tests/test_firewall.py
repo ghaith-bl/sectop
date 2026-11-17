@@ -986,6 +986,37 @@ class TestCollect(Base):
         self.assertEqual(rows["vm"]["cells"][3:5], ["1", "1"])        # lab VM lines unchanged
         self.assertFalse(fw._real("browsevm"))
 
+    def test_dynamic_user_named(self):
+        """sectop-whois runs as a dynamic user: invisible processes, user gone after the
+        lookup (host 2026-11-17: `? 65258`). Named from its hashed uid, a name seen while
+        it ran, or the live name; another dynamic uid without a name stays `?`."""
+        def line(i, uid, dst):
+            return ('{"__CURSOR": "s=1;i=%d;b=0;m=0;t=0;x=0", "__REALTIME_TIMESTAMP": '
+                    '"17924107%02d000000", "MESSAGE": "HFW-OUT-NEW: IN= OUT=wg0-mullvad '
+                    'SRC=10.2.0.2 DST=%s LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=1 DF PROTO=TCP '
+                    'SPT=4%04d DPT=443 WINDOW=64240 RES=0x00 SYN URGP=0 UID=%s GID=%s "}\n'
+                    % (i, i, dst, i, uid, uid))
+        self.host.set("nft list table", ok(table("nft-enforce.json")))
+        self.host.set("journalctl", ok(line(80, "65258", "198.51.100.41")
+                                       + line(81, "62000", "198.51.100.40")))
+        self.st.hms = lambda ts: f"t{int(ts) % 100}"
+        self.st.stamp = lambda ts: f"T{ts:.3f}"
+        s = self.collect()
+        rows = {r["id"]: r for r in self.panel(s, "programs")["rows"]}
+        self.assertEqual(rows["sectop-whois"]["cells"][:4], ["sectop-whois", "65258", "0", "1"])
+        self.assertEqual(rows["? uid 62000"]["cells"][0], "?")
+        note = {it["k"]: it["v"] for it in rows["? uid 62000"]["detail"]}["note"]
+        self.assertIn("uid 62000: a systemd dynamic user", note)
+        audit = [lab(r["cells"]) for r in self.panel(s, "audit")["rows"]]
+        self.assertEqual([r[6] for r in audit[:2]], ["?", "sectop-whois"])
+        # a name read while the unit ran stays after it is gone
+        self.pw[62000] = "systemd-foo"
+        self.assertEqual(fw._user(self.st, "62000"), "systemd-foo")
+        del self.pw[62000]
+        self.assertEqual(fw._user(self.st, "62000"), "systemd-foo")
+        self.assertEqual(fw._dynamic(self.st, "62000"), "systemd-foo")
+        self.assertEqual(fw._dynamic(self.st, "1000"), "")      # not a dynamic uid
+
     def test_programs_keep_and_limit(self):
         self.audit()
         self.host.set("journalctl", ok(""))

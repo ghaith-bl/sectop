@@ -12,6 +12,9 @@ StandardInput=socket
 StandardOutput=socket
 StandardError=journal
 DynamicUser=yes
+# one name for every instance: the firewall screen names its lines sectop-whois, and
+# systemd tries the uid hashed from this name first (the same uid each time)
+User=sectop-whois
 RuntimeMaxSec=15
 UMask=0077
 

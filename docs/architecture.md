@@ -614,7 +614,7 @@ Design (least privilege: NIST SP 800-53 / 800-171 AC-6, systemd.exec(5), capabil
 
     sectop-net.service   user sectop-net, CAP_NET_ADMIN only -> /run/sectop-net/
     sectop.service       user sectop, journal group, no caps -> /run/sectop/state.json
-    sectop-whois.socket  one sectop-whois@.service per lookup, DynamicUser, RDAP only
+    sectop-whois.socket  one sectop-whois@.service per lookup, DynamicUser (sectop-whois), RDAP only
     sectop-user@<daily>  desktop user, group sectop-feed, no caps, no network
                          -> /run/sectop-user/<daily>/
     sectop (UI)          admin user, no sudo, group sectop: reads /run/sectop/state.json
