@@ -951,10 +951,10 @@ def _why_unknown(proto: str, uid: str, dst: str) -> str:
 
 def _flow_row(st: State, key: tuple, fl: Flow) -> dict:
     kind, d, proto, uid, _src, _dst, iface = key
+    vm = journal.VM_NAMES.get(iface.partition(">")[0], "vm")
     if fl.progs:
         prog = ",".join(fl.progs[:MAX_PROGS]) + ("+" if len(fl.progs) > MAX_PROGS else "")
     else:
-        vm = journal.VM_NAMES.get(iface.partition(">")[0], "vm")
         prog = {"fwd": vm if kind.startswith("fwd_vm") else "-", "in": "-"}.get(d, "?")
     cell = prog
     if prog == "?" and uid != "-" and _user(st, uid):
@@ -991,6 +991,8 @@ def _flow_row(st: State, key: tuple, fl: Flow) -> dict:
         row["ip"] = ip
     if _progs(fl.progs):
         row["progs"] = _progs(fl.progs)
+    elif d == "fwd" and kind.startswith("fwd_vm") and vm != "vm":
+        row["progs"] = [vm]            # c = card: the VM's domain (its QEMU, unit, flows)
     return row
 
 
@@ -1565,6 +1567,8 @@ def _app_row(st: State, key: str, a: App, socks: list) -> dict:
         row["filter"] = pick                                # f follow / x hide (core/ui.py)
     if not other and not key.startswith("? uid ") and _progs([key]):
         row["progs"] = _progs([key])                        # c = program card
+    elif key in journal.VM_NAMES.values():
+        row["progs"] = [key]            # the domain: its QEMU process, unit, flows
     return row
 
 

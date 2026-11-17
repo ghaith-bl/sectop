@@ -224,7 +224,11 @@ Title: `programs <rows>  <n> with open sockets`.
 - VM names (`journal.VM_NAMES`): forwarded VM lines (`fwd_vm_*`) from bridge `virbr-browse`
   (silverblue-cis-hardening browsevm, network `browse`) are `browsevm`, from any other bridge
   (`virbr0`: lab VMs) `vm`. Same name in the audit `prog`, the log card's `uid` and the
-  programs row; never a program for the program card.
+  programs row. `browsevm` rows (programs row, its audit flows) carry `progs` =
+  `browsevm`, the domain's name: `c` shows them with the VM's QEMU process (processes
+  screen, scope `machine-qemu-<id>-browsevm`) and its unit `browsevm@<browser>`
+  (core/proc.py program(): a libvirt scope is its domain). `vm` rows: no card (which lab
+  VM is not in the line).
   Only when it is printable ASCII (the filter prompt's chars): else no filter.
 - Same limit as the audit `prog` column: a flow that closes before the next `ss` poll
   has no program. Blocked flows: mostly `?` (a rejected SYN never has a socket). No

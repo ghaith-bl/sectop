@@ -345,7 +345,9 @@ class TestCgroup(unittest.TestCase):
             app + "xdg-document-portal.service": "xdg-document-portal",
             "/system.slice/system-getty.slice/getty@tty1.service": "getty",
             "/user.slice/user-1000.slice/session-3.scope": "session",
-            "/machine.slice/machine-qemu\\x2d1\\x2dlab.scope/libvirt": "machine-qemu-1-lab",
+            "/machine.slice/machine-qemu\\x2d1\\x2dlab.scope/libvirt": "lab",        # domain name
+            "/machine.slice/machine-qemu\\x2d12\\x2dbackup\\x2dlab.scope/libvirt/emulator": "backup-lab",
+            "/system.slice/system-browsevm.slice/browsevm@mullvad.service": "browsevm",
             "/x/libpod-" + "a" * 64 + ".scope/container": "libpod",
             "unreachable:1f": None, "/": None, "/user.slice": None, "": None,
         }
@@ -976,7 +978,9 @@ class TestCollect(Base):
         rows = {r["id"]: r for r in self.panel(s, "programs")["rows"]}
         self.assertEqual(rows["browsevm"]["cells"][:4], ["browsevm", "-", "0", "1"])
         self.assertEqual(rows["browsevm"]["filter"], "browsevm")
-        self.assertNotIn("progs", rows["browsevm"])                  # never a program card
+        self.assertEqual(rows["browsevm"]["progs"], ["browsevm"])     # c = card of the domain
+        self.assertEqual(self.panel(s, "audit")["rows"][0]["progs"], ["browsevm"])
+        self.assertNotIn("progs", rows["vm"])                          # which lab VM: unknown
         self.assertEqual({it["k"]: it["v"] for it in rows["browsevm"]["detail"]}["note"],
                          "forwarded traffic of the VM on bridge virbr-browse")
         self.assertEqual(rows["vm"]["cells"][3:5], ["1", "1"])        # lab VM lines unchanged

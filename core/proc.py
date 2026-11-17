@@ -3,8 +3,11 @@ Program card). Shared by the firewall (ss --cgroup) and the security module (aud
 
 Desktop apps run in app[-<launcher>]-<ApplicationID>-<RANDOM>.scope or
 app[-<launcher>]-<ApplicationID>[@<RANDOM>].service (systemd.io DESKTOP_ENVIRONMENTS):
-the program is the ApplicationID. Other units: the unit name without suffix and random
-part. Moved here from modules/firewall/conns.py 2026-10-26.
+the program is the ApplicationID. A libvirt VM's QEMU (systemd-machined scope
+machine-qemu-<id>-<domain>.scope): the domain name, the same at every start (2026-11-17:
+browsevm's card joins its QEMU process, its unit browsevm@<browser> and its firewall
+rows). Other units: the unit name without suffix and random part. Moved here from
+modules/firewall/conns.py 2026-10-26.
 
 Reader.program(pid, ts): an audit record names a pid; sectop reads /proc up to a few
 seconds later, when the pid may belong to another process. The process must have
@@ -34,6 +37,7 @@ _UNIT_SUFFIXES = (".service", ".scope")
 _RANDOM_RE = re.compile(
     r"-(?:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|[0-9a-f]{32,64}|[0-9]+)$")
 _ESC_RE = re.compile(r"\\x([0-9a-fA-F]{2})")
+_MACHINE_RE = re.compile(r"machine-qemu-[0-9]+-(.+)")       # unescaped scope base
 NAME_RE = re.compile(r"[\x21-\x7e]{1,64}")        # row "progs" (core/module.py)
 SESSION_RE = re.compile(r"session(-c?\d+)?")
 SHELL_UNIT_RE = re.compile(r"org\.gnome\.Shell@[A-Za-z0-9_.:-]{1,64}\.service")
@@ -66,6 +70,10 @@ def program(cgroup: str) -> str | None:
             rest = rest.rpartition("-")[0] or rest      # drop -<RANDOM>
         # escaped: a dash inside the ApplicationID is \x2d, so the last part is the id
         return _unescape(rest.rsplit("-", 1)[-1]) or None
+    if kind == "scope":
+        m = _MACHINE_RE.fullmatch(_unescape(base))
+        if m:
+            return m.group(1)
     return _unescape(_RANDOM_RE.sub("", base) if kind == "scope" else base) or None
 
 
