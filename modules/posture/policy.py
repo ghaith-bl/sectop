@@ -28,11 +28,12 @@ DEFAULT_PATH = "/etc/sectop/posture.toml"
 SEVS = ("info", "warn", "crit")
 AUDIT_KEY_RE = re.compile(r"[A-Za-z0-9_-]{1,31}")
 OPS = ("=", "!=", ">=", "<=", "in")
+SEPS = ("=", "space")               # file: `key = v` / login.defs `KEY v`
 UNIT_STATES = ("active", "inactive", "failed", "masked", "enabled", "disabled", "static")
 COMMON = {"id", "kind", "sev", "why", "ref"}
 # kind -> (required keys, optional keys)
 KINDS = {
-    "file": ({"path", "want"}, {"key", "op"}),
+    "file": ({"path", "want"}, {"key", "op", "sep"}),
     "lines": ({"path", "want"}, set()),
     "sysctl": ({"values"}, set()),
     "cmdline": ({"want"}, set()),
@@ -85,6 +86,7 @@ class Check:
     path: str = ""
     key: str = ""
     op: str = "="
+    sep: str = "="                  # file: "=" or "space" (login.defs)
     want: object = None             # str, int or tuple of str (per kind)
     values: tuple = ()              # sysctl: ((key, want), ...)
     units: tuple = ()               # units: ((unit, state), ...)
@@ -156,6 +158,12 @@ def _check(t, i: int, path: str, seen: set) -> Check:
         if t["op"] not in OPS:
             raise ConfigError(f"{w}.op: one of {' '.join(OPS)} required")
         args["op"] = t["op"]
+    if "sep" in t:
+        if t["sep"] not in SEPS:
+            raise ConfigError(f"{w}.sep: one of {' '.join(SEPS)} required")
+        if not args.get("key"):
+            raise ConfigError(f"{w}.sep: needs key")
+        args["sep"] = t["sep"]
     if kind in ("file", "taint", "lockdown", "firewalld-zone", "wifi-ipv6", "hostname"):
         args["want"] = _text(t["want"], f"{w}.want", 120, empty=kind == "taint")
         if kind == "hostname" and not HOST_RE.fullmatch(args["want"]):

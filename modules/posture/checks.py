@@ -57,6 +57,7 @@ MAX_LINES = 12                     # detail lines per check
 MAX_READ = 1024 * 1024
 SETUID_ROOT = "/usr"             # audit-rules setuid_key: scanned once (immutable per boot)
 KV_RE = r"^\s*{}\s*=\s*(.*?)\s*$"
+WS_RE = r"^\s*{}\s+(.*?)\s*$"   # login.defs: KEY, spaces / tabs, value
 CGROUP_RE = re.compile(r"(?:^|\s)cgroup:(\S+)")
 WILD_UDP = ("udp 0.0.0.0:", "udp [::]:")
 LINK_RE = re.compile(r"Link \d+ \(([^)]{1,15})\)")       # resolvectl status section
@@ -185,10 +186,11 @@ def _want(c) -> str:
     return c.want if c.op == "=" else f"{c.op} {c.want}"
 
 
-def _value(text: str, key: str) -> str | None:
-    """`key = value` / `KEY=value` (last one wins, # ; comments), or the first line."""
+def _value(text: str, key: str, sep: str = "=") -> str | None:
+    """`key = value` / `KEY=value`, sep "space": `KEY value` (last one wins, # ; comments),
+    or the first line."""
     found = None
-    rx = re.compile(KV_RE.format(re.escape(key))) if key else None
+    rx = re.compile((WS_RE if sep == "space" else KV_RE).format(re.escape(key))) if key else None
     for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith(("#", ";")):
@@ -211,7 +213,7 @@ def k_file(c, cx: Cx) -> Res:
         return Res("fail", "missing", source=src)
     except OSError as e:
         return Res("unknown", _err(e), source=src)
-    v = _value(text, c.key)
+    v = _value(text, c.key, c.sep)
     if v is None:
         return Res("fail", "not set", source=src)
     return Res("pass" if compare(v, c.op, c.want) else "fail", v[:60], source=src)

@@ -69,7 +69,7 @@ Summary `pass <n> | fail <n> | unknown <n> | accepted <n>`.
 
 | kind | keys | pass when |
 |---|---|---|
-| file | path, want, key?, op? | value of `key = v` / `KEY=v` (last wins, `#` `;` comments) or the first line, op `=` `!=` `>=` `<=` `in` (want `a` or `b` written `a|b`). Missing file: fail |
+| file | path, want, key?, op?, sep? | value of `key = v` / `KEY=v` (last wins, `#` `;` comments), with sep `"space"` (needs key) of `KEY v` (login.defs), or the first line, op `=` `!=` `>=` `<=` `in` (want `a` or `b` written `a|b`). Missing file: fail |
 | lines | path, want (list) | every line is in the file (spaces folded, `#` lines not counted) |
 | sysctl | values (table) | every `/proc/sys` value = want. Unreadable: unknown |
 | cmdline | want (list) | every word in `/proc/cmdline` |
@@ -105,7 +105,7 @@ without `..`.
 
 From silverblue-cis-hardening (harden-workstation.sh, docs/deviations.md,
 docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agreed
-2026-10-26. 67 checks.
+2026-10-26. 68 checks.
 
     crit  SELinux enforcing now; audit=1 + backlog in kernel args; audit not switched
           off; auditd, firewalld running; firewalld zone drop; only root UID 0; wheel =
@@ -114,8 +114,9 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
           sends no reports
     warn  SELinux config enforcing + targeted; audit rules >= 47 + 1 per setuid file; audit locked
           (-e 2); firmware metadata every second day; journald audit
-          socket; su closed (sugroup empty, pam_wheel); faillock 5 / 900 s; pwquality 14
-          / 4 classes; shadow, gshadow, passwd, group perms; sysctls of
+          socket; su closed (sugroup empty, pam_wheel); faillock 5 / 900 s; pwquality 15
+          / 4 classes; login.defs min age >= 1 (new accounts: existing ones are in
+          /etc/shadow, root only); shadow, gshadow, passwd, group perms; sysctls of
           90-hardening.conf (kernel, KSPP, IPv4, IPv6); no taint; CIS module blocks;
           lockdown integrity; crypto policy not LEGACY; masked units;
           no failed units; core dumps off; journal persistent; GNOME locks; wifi IPv6

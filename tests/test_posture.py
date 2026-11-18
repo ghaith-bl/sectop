@@ -101,7 +101,9 @@ class FakeHost(kinds.Host):
                              "module.sig_enforce=1 intel_iommu=on debugfs=off "
                              "bdev_allow_write_mounted=0\n",
             "/etc/security/faillock.conf": "# deny = 3\ndeny = 5\nunlock_time = 900\n",
-            "/etc/security/pwquality.conf": "minlen = 14\nminclass = 4\nenforce_for_root\n",
+            "/etc/security/pwquality.conf": "minlen = 15\nminclass = 4\nenforce_for_root\n",
+            "/etc/login.defs": "#\tPASS_MIN_DAYS\tMinimum number of days allowed\n"
+                               "PASS_MAX_DAYS\t365\nPASS_MIN_DAYS\t1\nPASS_WARN_AGE\t14\n",
             "/proc/sys/kernel/tainted": "12288\n",
             "/proc/self/mountinfo": MOUNTINFO,
             "/sys/block/dm-0/dm/name": "luks-1234\n",
@@ -247,7 +249,7 @@ class TestKinds(unittest.TestCase):
         self.assertEqual(res(chk(path="/etc/security/faillock.conf", key="deny", op="<=",
                                  want="4")), ("fail", "5"))
         self.assertEqual(res(chk(path="/etc/security/pwquality.conf", key="minlen", op=">=",
-                                 want="14")), ("pass", "14"))
+                                 want="15")), ("pass", "15"))
         self.assertEqual(res(chk(path="/etc/crypto-policies/config", op="!=", want="LEGACY")),
                          ("pass", "DEFAULT"))
         self.assertEqual(res(chk(path="/etc/crypto-policies/config", op="in",
@@ -259,6 +261,22 @@ class TestKinds(unittest.TestCase):
         h.denied.add("/etc/selinux/config")
         self.assertEqual(res(chk(path="/etc/selinux/config", key="SELINUX", want="x"), h),
                          ("unknown", "Permission denied"))
+
+    def test_file_sep_space(self):
+        """login.defs: KEY, spaces / tabs, value (2026-11-18, pwage min age)."""
+        c = chk(path="/etc/login.defs", key="PASS_MIN_DAYS", sep="space", op=">=", want="1")
+        self.assertEqual(res(c), ("pass", "1"))                         # comment line skipped
+        self.assertEqual(res(chk(path="/etc/login.defs", key="PASS_MIN_DAYS", op=">=",
+                                 want="1")), ("fail", "not set"))       # sep "=": no match
+        h = FakeHost()
+        h.files["/etc/login.defs"] = "PASS_MIN_DAYS 1\nPASS_MIN_DAYS   0\n"
+        self.assertEqual(res(c, h), ("fail", "0"))                       # last one wins
+        h.files["/etc/login.defs"] = "PASS_MIN_DAYS = 1\n"
+        self.assertEqual(res(c, h), ("fail", "= 1"))                     # not login.defs syntax
+        h.files["/etc/login.defs"] = "PASS_MIN_DAYSX\t1\nPASS_MIN_DAYS\n"
+        self.assertEqual(res(c, h), ("fail", "not set"))
+        self.assertEqual(res(chk(path="/etc/security/pwquality.conf", key="minlen", sep="space",
+                                 want="15")), ("fail", "= 15"))         # `=` file: fail
 
     def test_compare(self):
         self.assertTrue(kinds.compare("5", "<=", "5"))
@@ -965,6 +983,12 @@ class TestModule(unittest.TestCase):
                b'[[check]]\nid = "x"\nkind = "fwupd-reports"\nsev = "warn"\nwhy = "w"\n',
                b'[[check]]\nid = "x"\nkind = "file"\nsev = "warn"\nwhy = "w"\npath = "/a"\n'
                b'want = "1"\nsetuid_key = "privileged"\n',
+               b'[[check]]\nid = "x"\nkind = "file"\nsev = "warn"\nwhy = "w"\npath = "/a"\n'
+               b'want = "1"\nkey = "K"\nsep = "tab"\n',
+               b'[[check]]\nid = "x"\nkind = "file"\nsev = "warn"\nwhy = "w"\npath = "/a"\n'
+               b'want = "1"\nsep = "space"\n',
+               b'[[check]]\nid = "x"\nkind = "lines"\nsev = "warn"\nwhy = "w"\npath = "/a"\n'
+               b'want = ["a"]\nsep = "space"\n',
                b'[[nope]]\n']
         for data in bad:
             with self.subTest(data=data), self.assertRaises(ConfigError):

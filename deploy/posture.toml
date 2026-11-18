@@ -175,11 +175,11 @@ want = "900"
 id = "pwquality-minlen"
 kind = "file"
 sev = "warn"
-why = "passwords 14 chars or more"
+why = "passwords 15 chars or more"
 path = "/etc/security/pwquality.conf"
 key = "minlen"
 op = ">="
-want = "14"
+want = "15"
 
 [[check]]
 id = "pwquality-minclass"
@@ -190,6 +190,18 @@ path = "/etc/security/pwquality.conf"
 key = "minclass"
 op = ">="
 want = "4"
+
+# New accounts only: the min age of existing ones is in /etc/shadow (root only).
+[[check]]
+id = "pass-min-days"
+kind = "file"
+sev = "warn"
+why = "password min age 1 day for new accounts (pwhistory counts)"
+path = "/etc/login.defs"
+key = "PASS_MIN_DAYS"
+sep = "space"
+op = ">="
+want = "1"
 
 [[check]]
 id = "shadow-perms"
