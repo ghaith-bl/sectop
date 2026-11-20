@@ -465,12 +465,24 @@ want = ["/org/gnome/desktop/media-handling/automount", "/org/gnome/desktop/media
 
 # ---- network ----
 
+# IPv6 off on Wi-Fi + cable (silverblue-privacy-hardening netprivacy UPLINK_IPV6=off,
+# 2026-11-20): NetworkManager makes new profiles auto, netprivacy's dispatcher hook turns
+# it off on the first connect. Fails = the hook did not run (or an older hardening).
+
 [[check]]
 id = "wifi-ipv6"
 kind = "wifi-ipv6"
 sev = "warn"
-why = "IPv6 off on every wifi profile (NetworkManager makes new ones auto)"
+why = "IPv6 off on every wifi profile (a new one: netprivacy hook, first connect)"
 want = "disabled"
+
+[[check]]
+id = "cable-ipv6"
+kind = "nm-props"
+sev = "warn"
+why = "IPv6 off on every cable profile (a new one: netprivacy hook, first connect)"
+types = ["802-3-ethernet"]
+props = { "ipv6.method" = "disabled" }
 
 [[check]]
 id = "listeners"
@@ -491,8 +503,9 @@ tunnel_owner = "mullvad-daemon"
 
 # ---- network identity (silverblue-cis-hardening netprivacy, 2026-10-27) ----
 # Random MAC on every connect, no hostname on any network, LLMNR + mDNS off.
-# A new network makes a new profile: dhcp-no-hostname fails (warn) until
-# `sudo ./harden-workstation.sh netprivacy` runs again; the generic hostname covers it.
+# A new network makes a new profile: netprivacy's dispatcher hook sets
+# dhcp-send-hostname no on its first connect (2026-11-20); the generic hostname covers
+# the first DHCP. Fails until then: the hook did not run (or an older hardening).
 
 [[check]]
 id = "mac-random"
@@ -542,6 +555,16 @@ want = ["LLMNR=no", "MulticastDNS=no"]
 # (static in a profile, or from DHCP on a new network) is where resolved goes while the
 # tunnel has none (connect / reconnect): seen 2026-10-31, uid 990 to port 53 on the
 # uplink, blocked by hostfw (out_dns). warn: hostfw blocks it, not a leak.
+# Since 2026-11-20 NetworkManager hands resolved no DNS at all (nm-dns-off: dns=none
+# alone still sends it, systemd-resolved=false too); Mullvad sets its own link itself.
+
+[[check]]
+id = "nm-dns-off"
+kind = "lines"
+sev = "warn"
+why = "NetworkManager hands systemd-resolved no network's DNS (a new one included)"
+path = "/etc/NetworkManager/conf.d/90-privacy.conf"
+want = ["dns=none", "systemd-resolved=false"]
 
 [[check]]
 id = "dns-tunnel-only"

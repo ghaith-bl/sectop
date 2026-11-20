@@ -859,11 +859,13 @@ class TestModule(unittest.TestCase):
             f"Id={u}\nLoadState=loaded\nActiveState={want[u] if want[u] == 'active' else 'inactive'}"
             f"\nUnitFileState={want[u] if want[u] != 'active' else 'enabled'}"
             for u in argv[argv.index("--") + 1:]), "")
+        by_lines = set()
         for c in checks:
             if c.kind == "sysctl":
                 h.sysctl.update(dict(c.values))
-            if c.kind == "lines" and c.path not in h.files:
-                h.files[c.path] = "\n".join(c.want) + "\n"
+            if c.kind == "lines" and (c.path not in h.files or c.path in by_lines):
+                h.files[c.path] = h.files.get(c.path, "") + "\n".join(c.want) + "\n"
+                by_lines.add(c.path)                # 90-privacy.conf: two checks
             if c.kind == "perms":
                 h.stats[c.path] = (0o100000 | c.mode, 0, GIDS[c.owner.split(":")[1]])
             if c.kind == "listeners":

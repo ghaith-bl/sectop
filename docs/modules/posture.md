@@ -105,7 +105,7 @@ without `..`.
 
 From silverblue-cis-hardening (harden-workstation.sh, docs/deviations.md,
 docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agreed
-2026-10-26. 68 checks.
+2026-10-26. 70 checks.
 
     crit  SELinux enforcing now; audit=1 + backlog in kernel args; audit not switched
           off; auditd, firewalld running; firewalld zone drop; only root UID 0; wheel =
@@ -119,10 +119,11 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
           /etc/shadow, root only); shadow, gshadow, passwd, group perms; sysctls of
           90-hardening.conf (kernel, KSPP, IPv4, IPv6); no taint; CIS module blocks;
           lockdown integrity; crypto policy not LEGACY; masked units;
-          no failed units; core dumps off; journal persistent; GNOME locks; wifi IPv6
-          off; booted system <= 14 days; random MAC config; dhcp-send-hostname 0 on
-          every Wi-Fi / cable profile; LLMNR + mDNS off; fallback hostname kernel arg;
-          DNS servers only on the tunnel; no DNS in Wi-Fi / cable profiles; Mullvad
+          no failed units; core dumps off; journal persistent; GNOME locks; IPv6 off
+          on every wifi and cable profile; booted system <= 14 days; random MAC config;
+          dhcp-send-hostname 0 on every Wi-Fi / cable profile; LLMNR + mDNS off;
+          fallback hostname kernel arg; DNS servers only on the tunnel; NetworkManager
+          hands resolved no DNS; no DNS in Wi-Fi / cable profiles; Mullvad
           socket only for group mullvad; sectop, sectop-feed, mullvad groups; kernel
           args (AF_ALG off, page shuffle, no initrd shell, init_on_free, iommu.strict,
           KSPP: hash_pointers, proc_mem, module.sig_enforce, intel_iommu, debugfs,
@@ -146,14 +147,18 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
 - wifi IPv6: NetworkManager makes every new wifi profile `ipv6.method auto`, and
   NetworkManager.conf(5) `[connection]` defaults cannot change that (ipv6.method is not
   in its list). Host 2026-10-26: 4 of 6 profiles were auto (fixed with nmcli); the
-  check catches the next new network.
+  check catches the next new network. Since 2026-11-20 silverblue-privacy-hardening
+  `netprivacy` turns it off on Wi-Fi and cable, a new profile on its first connect (NM
+  dispatcher hook): `wifi-ipv6` + `cable-ipv6` (nm-props) fail only if the hook did not
+  run. Host 2026-11-18: the one cable profile was auto.
 - Network identity (2026-10-27, silverblue-cis-hardening `netprivacy`). Host checks
   (sandbox, user sectop): config files readable; links `type=1`, the one that is up has
   bit 0x02 set, the hardware one (down) not; `hostnamectl --json=short` gives the names,
   PrettyHostname `null`; `nmcli -g ipv4.dhcp-send-hostname` prints `0` for no, `-1` for
   the default. NetworkManager 1.56.1 ignores the global dhcp-send-hostname default (tested
   with tcpdump), so a new network's profile (-1) fails `dhcp-no-hostname` (warn, no
-  alert: hostname `localhost` is not sent at all) until netprivacy runs again. crit only
+  alert: hostname `localhost` is not sent at all) until netprivacy's dispatcher hook
+  fixes it on the first connect (2026-11-20; before: until netprivacy ran again). crit only
   where a network could see me: hardware MAC, a real hostname.
 - Secure Boot, lockdown, taint: step 9 done 2026-10-26 (silverblue-cis-hardening:
   akmod-nvidia removed, akmods MOK key deleted, Secure Boot on, lockdown integrity,
@@ -166,7 +171,10 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
   used the uplink server while the tunnel had none (reconnect): uid 990 to port 53 on
   the uplink, blocked by hostfw (`out_dns`). Two checks: `dns-tunnel-only` (live, what
   resolved uses now) and `nm-no-dns` (every profile, also networks not joined now; a new
-  network fails until netprivacy runs again). warn: hostfw blocks it. `resolvectl
+  network: fixed by netprivacy's dispatcher hook on its first connect). warn: hostfw
+  blocks it. 2026-11-20: `nm-dns-off` = NetworkManager hands resolved no DNS at all
+  (`dns=none` + `systemd-resolved=false`: `dns=none` alone still sends it,
+  NetworkManager.conf(5)); Mullvad sets its link through resolved itself. `resolvectl
   status` as user sectop in the sandbox: not checked on the host yet. "Current DNS
   Server:" and "Fallback DNS Servers:" lines are not indented.
 - Time (2026-10-31, silverblue-cis-hardening `time`): chrony NTS only, Netnod + PTB.
