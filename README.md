@@ -6,7 +6,7 @@ hardening baseline still holds. Like btop, but for security. Python 3 stdlib onl
 (curses, tomllib), no third-party packages, nothing runs as root.
 
 > **Status: v0.1, built for one machine.** It reads what
-> [silverblue-cis-hardening](https://github.com/ghaith-bl/silverblue-cis-hardening) sets
+> [silverblue-Privacy-hardening](https://github.com/ghaith-bl/silverblue-privacy-hardening) sets
 > up on my laptop: its audit rule keys, its nftables table `hostfw`, its posture
 > baseline, Mullvad VPN. On another host many boxes stay empty and many posture checks
 > fail. Other distros, no VPN, no hostfw: not supported (maybe later). Read-only: it changes nothing
