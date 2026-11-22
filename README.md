@@ -33,7 +33,7 @@ Public IPs masked (key m), the way the screens start.
 - firewall screen: nftables (`nft`), iproute2 (`ss`, `ip`), hostfw from
   silverblue-cis-hardening (firewall/), WireGuard tunnel (`wg`, kernel or userspace)
 - posture checks call, if present: `firewall-cmd`, `nmcli`, `resolvectl`, `hostnamectl`,
-  `rpm-ostree`, `systemctl`; the policy (deploy/posture.toml) is my baseline
+  `rpm-ostree`, `systemctl`, `journalctl`; the policy (deploy/posture.toml) is my baseline
 - install: git, sudo, systemd-sysusers; `restorecon` if SELinux is on
 - a 256-color terminal (8 basic colors work)
 - optional: the IEEE OUI list for MAC makers in the counter cards (package `hwdata` on
@@ -146,6 +146,7 @@ terminal, else the 8 basic colors.
     sudo ./install.sh            # git HEAD -> /usr/local/lib/sectop, users, units
     sudo ./install.sh --desktop-user <daily user>   # admin + daily account
     sudo ./install.sh --remove
+    sudo ./install.sh --setuid-accept   # new setuid / setgid programs seen: on my list
 
 First install: log out and in once (the sudo user joins group sectop).
 

@@ -21,7 +21,10 @@ Security posture.
   sectop (core/run.py): `systemctl show` (one call for all units), `systemctl
   list-units --state=failed`, `firewall-cmd --get-default-zone`, `nmcli` (1 + one per
   profile, max 32, per check), `hostnamectl --json=short`, `resolvectl status
-  --no-pager`, `rpm-ostree status --json` (once a day, cached). WireGuard
+  --no-pager`, `rpm-ostree status --json` (once a day, cached), `journalctl -b -o json
+  --output-fields=MESSAGE -n 400 _SYSTEMD_UNIT=<unit>` (audit-rules.service,
+  auditd.service: the unit's own lines this boot; `_SYSTEMD_UNIT` is set by journald, a
+  process outside the unit cannot write such a line). WireGuard
   listen-port: the net unit's file (`wg show <tunnel> listen-port`, every 1 s).
 - Audit counts: journal CONFIG_CHANGE (1305) of this boot. One scan in init
   (`journalctl -b _TRANSPORT=audit _AUDIT_TYPE=1305`, 5 s), then core's follower:
@@ -97,6 +100,10 @@ Summary `pass <n> | fail <n> | unknown <n> | accepted <n>`.
 | dns-servers | allow (list of links) | `resolvectl status`: DNS servers only on the allowed links, none global (`DNS=`), no fallback list. No server anywhere (tunnel down): pass. No `Global` section: unknown |
 | fwupd-reports | path (directory) | no `*.conf` in it has an active `ReportURI` / `SecurityReportURI` or `AutomaticReports` / `AutomaticSecurityReports` = true. No directory (no fwupd): pass |
 | hostname | want | `hostnamectl --json=short`: Hostname, StaticHostname, DefaultHostname = want, PrettyHostname empty. Not `/proc/sys/kernel/hostname`: sectop.service has `ProtectHostname=yes` (its own copy from its start) |
+| audit-load | - | audit-rules.service ran this boot (`ExecMainStartTimestampMonotonic` not 0), `Result=success`, `ExecMainStatus=0`, and none of its own journal lines this boot has the word `error`. Detail: result, the error lines (time + text), a fix hint |
+| auditd-logging | - | auditd.service's own journal lines this boot: no `suspending logging` / `logging suspended` / `Could not reopen a log after resume` after the last `Init complete, auditd` or `resume logging` line. Detail: the space / write-error lines |
+| setuid-known | path | every setuid / setgid file under /usr (the `audit-rules` scan, once per start) is on the list in path (root-owned, not group / other writable, no symlink: core/config.py `read_file`; one path per line, `#` comments; read every collect). Not on it: fail, `new` lines + fix hint. On it, not under /usr: `gone` lines only. No list: fail. Unsafe list: unknown |
+| free-space | path, min_mb | `statvfs(path)`: free blocks for users (`f_bavail`) x `f_frsize` >= min_mb MiB. Search on the parent folders is enough (`/var/log/audit` itself is root 0700) |
 
 Limits: 100 checks, 64 items per list / table, paths `A-Z a-z 0-9 _ . @ % + : / -`
 without `..`.
@@ -105,15 +112,16 @@ without `..`.
 
 From silverblue-cis-hardening (harden-workstation.sh, docs/deviations.md,
 docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agreed
-2026-10-26. 70 checks.
+2026-10-26. 74 checks.
 
     crit  SELinux enforcing now; audit=1 + backlog in kernel args; audit not switched
-          off; auditd, firewalld running; firewalld zone drop; only root UID 0; wheel =
+          off; auditd, firewalld running; auditd not suspended; firewalld zone drop; only root UID 0; wheel =
           the admin; /var on LUKS; system image not unlocked; ostree remotes verify; listeners;
           Secure Boot on; no hardware MAC on a link that is up; hostname localhost; fwupd
           sends no reports
     warn  SELinux config enforcing + targeted; audit rules >= 53 + 2 per setuid file; audit locked
-          (-e 2); firmware metadata every second day; journald audit
+          (-e 2); audit rules loaded without an error; >= 2 GiB free on /var; no setuid
+          / setgid program I have not seen; firmware metadata every second day; journald audit
           socket; su closed (sugroup empty, pam_wheel); faillock 5 / 900 s; pwquality 15
           / 4 classes; login.defs min age >= 1 (new accounts: existing ones are in
           /etc/shadow, root only); shadow, gshadow, passwd, group perms; sysctls of
@@ -226,3 +234,28 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
 - Kernel args 2026-11-07 (silverblue-cis-hardening `kargs`, after a 4-day trial):
   `init-on-free` (`init_on_free=1`) and `iommu-strict` (`iommu.strict=1`), cmdline,
   warn: missing = less hardening, not a hole.
+- Audit load and auditd suspend (2026-11-22, review 2026-11-17 L-2 / L-4; no root
+  needed, so not in the root check of D-U1). `audit-load` (warn): with `-c`
+  (01-continue.rules) a refused rule is skipped, the others load, auditctl exits 1 and
+  audit-rules.service fails (auditctl.c: `continue_error`); the rule is missing until
+  the next boot (`-e 2`). `failed-units` showed the unit only; this row names the line.
+  An error line stays a fail until the next boot even after a later successful run of
+  the unit (with `-e 2` nothing could load it). Line format of the host's boot: admin
+  script 46. `auditd-logging` (crit, alert): silverblue-privacy-hardening `auditd` sets
+  SUSPEND at `admin_space_left`, a full disk and a write error (not HALT); auditd then
+  writes nothing to `/var/log/audit` until `auditctl --signal resume` or a restart
+  (auditd-event.c `resume_logging`). The kernel still sends records to the journal
+  (journald-audit.socket), so the security screen goes on; `ausearch` and the scanner
+  see a gap. A full disk can stop the journal too: `audit-space` (warn, `free-space`
+  /var/log/audit >= 2048 MiB) warns long before (the log ring alone can grow to 40 x 32
+  MiB; /var also holds the homes). auditd.conf (0640 root) is not readable for user
+  sectop: its thresholds stay out of the check.
+- Setuid list at boot (2026-11-22, silverblue-privacy-hardening
+  `audit-privileged-sync.service`, before audit-rules.service): the `audit-rules` fix
+  hint is a reboot now; a failed sync keeps the old list (row `failed-units`).
+- New setuid programs (2026-11-22, asked by me with L-1): since the setuid list is written
+  at boot, a new setuid program gets its audit rules by itself and `audit-rules` stays
+  green: nothing showed it. `setuid-known` (warn) compares the programs with
+  `/etc/sectop/setuid-known.txt` and stays yellow until I accept it: `sudo ./install.sh
+  --setuid-accept` (shows each new one with its package, owner, mode; y = the list is
+  /usr now). The first install writes the list from /usr; an update never does.

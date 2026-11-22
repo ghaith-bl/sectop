@@ -4,7 +4,7 @@ Each takes the check (policy.Check) and the collect context (Cx: host access, th
 audit counts, per-collect caches) and returns a Res: pass / fail / unknown, what was
 found (`have`, one short line) and detail lines. Reads files where a file exists;
 commands only where there is no file (systemctl, firewall-cmd, nmcli, rpm-ostree,
-hostnamectl, ss for socket owners, resolvectl),
+hostnamectl, ss for socket owners, resolvectl, journalctl for two units' own lines),
 fixed argv, run as user sectop. Nothing here changes the host.
 """
 
@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass, field
 
 from core import netd
+from core.config import ConfigError, read_file
 from core.proc import program
 from core.run import Result
 from core.run import run as core_run
@@ -31,6 +32,7 @@ NMCLI = "/usr/bin/nmcli"
 RPM_OSTREE = "/usr/bin/rpm-ostree"
 HOSTNAMECTL = "/usr/bin/hostnamectl"
 RESOLVECTL = "/usr/bin/resolvectl"
+JOURNALCTL = "/usr/bin/journalctl"
 SS = netd.bin_path("ss")
 TIMEOUT = 5.0                      # per command; a whole collect stays well under INTERVAL
 OSTREE_TIMEOUT = 15.0
@@ -119,6 +121,15 @@ class Host:
 
     def run(self, argv: list, timeout: float = TIMEOUT):
         return core_run(argv, timeout=timeout)
+
+    def statvfs(self, path: str):
+        return os.statvfs(path)
+
+    def read_owned(self, path: str) -> str | None:
+        """A root-owned list (not group / other writable, no symlink, its folder too):
+        core/config.py read_file. None = missing; ConfigError = not safe."""
+        data = read_file(path, 0)
+        return None if data is None else data.decode("utf-8", errors="replace")
 
     def wg_listen_port(self, tunnel: str):
         """The net unit's last `wg show <tunnel> listen-port` (core/netd.py Reader)."""
@@ -863,6 +874,9 @@ def _setuid(cx: Cx):
     return cx.setuid["files"], cx.setuid["unread"]
 
 
+FIX_SYNC = "reboot (audit-privileged-sync.service writes the list at boot)"
+
+
 def k_audit_rules(c, cx: Cx) -> Res:
     """Rules loaded this boot >= want. With setuid_key: rules of the other keys >= want,
     and setuid_rules setuid_key rules per setuid / setgid file under /usr (2: one per
@@ -891,15 +905,172 @@ def k_audit_rules(c, cx: Cx) -> Res:
                   + (f" ({c.setuid_rules} per file)" if c.setuid_rules > 1 else "")),
                  ("setuid files", str(len(files))
                   + (f" ({unread} dirs not readable)" if unread else ""))]
+    # silverblue-privacy-hardening since 2026-11-22: the list is written at every boot
+    # (audit-privileged-sync.service, before audit-rules.service; failed: failed units)
     if k < need:
-        res.lines.append(("fix", "a setuid program has no rule: harden-workstation.sh "
-                                 "audit-rules, then reboot"))
+        res.lines.append(("fix", f"a setuid program has no rule: {FIX_SYNC}"))
     elif k > need:
-        res.lines.append(("fix", "rules for programs no longer here: harden-workstation.sh "
-                                 "audit-rules, then reboot"))
+        res.lines.append(("fix", f"rules for programs no longer here: {FIX_SYNC}"))
     res.lines += [("setuid", p) for p in files]
     res.lines = res.lines[:MAX_LINES]
     return res
+
+
+# --- audit-rules.service and auditd's own lines (review 2026-11-17, L-2 / L-4) ------
+# The units' own journal lines this boot (_SYSTEMD_UNIT: set by journald, a process
+# outside the unit cannot fake it). sectop has the journal group, no root needed.
+
+AUDIT_RULES_UNIT = "audit-rules.service"
+AUDITD_UNIT = "auditd.service"
+UNIT_LINES = 400                   # last lines per unit and collect
+LOAD_ERR_RE = re.compile(r"\berror\b", re.I)    # auditctl: "Error sending add rule data
+#                                    request (...)", "There was an error in line N of <file>"
+LOAD_PROPS = "Result,ExecMainStatus,ExecMainStartTimestampMonotonic"
+# auditd 4 (auditd-event.c, auditd.c): suspended until a resume or a new start
+AUDITD_START = "Init complete, auditd"
+AUDITD_SUSPEND = re.compile(r"suspending logging|logging suspended|"
+                            r"Could not reopen a log after resume")
+AUDITD_RESUME = re.compile(r"attempting to resume logging|resumed logging")
+AUDITD_SPACE = re.compile(r"low on disk space|no space left on logging partition|"
+                          r"error writing an event|write error")
+PRINTABLE = re.compile(r"[^\x20-\x7e]")
+
+
+def unit_lines(cx: Cx, unit: str) -> list | str:
+    """-> [(time HH:MM:SS, message)] of the unit's own lines this boot; str = error."""
+    res = cx.host.run([JOURNALCTL, "-b", "-q", "--no-pager", "-o", "json",
+                       "--output-fields=MESSAGE", "-n", str(UNIT_LINES), f"_SYSTEMD_UNIT={unit}"])
+    if res.timed_out or res.truncated or (res.rc != 0 and (res.out.strip() or res.err.strip())):
+        return _fail_run(res)
+    out = []
+    for line in res.out.splitlines():                # rc 1 without output: no entries
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        msg = e.get("MESSAGE") if isinstance(e, dict) else None
+        if not isinstance(msg, str):
+            continue                                 # binary (a list of bytes): not ours
+        try:
+            ts = time.strftime("%H:%M:%S", time.localtime(int(e["__REALTIME_TIMESTAMP"]) / 1e6))
+        except (KeyError, TypeError, ValueError, OverflowError):
+            ts = "?"
+        out.append((ts, PRINTABLE.sub("?", msg.strip())[:160]))
+    return out
+
+
+def k_audit_load(c, cx: Cx) -> Res:
+    """audit-rules.service ran this boot, ended with success, printed no error line.
+    With -c (01-continue.rules) auditctl loads the other rules and exits 1: the unit
+    fails, the rule in the error line is missing until the next boot (-e 2)."""
+    src = f"systemctl show {AUDIT_RULES_UNIT}, its journal lines this boot"
+    res = cx.host.run([SYSTEMCTL, "show", "--no-pager", "-p", LOAD_PROPS, "--", AUDIT_RULES_UNIT])
+    if res.rc != 0 or res.timed_out:
+        return Res("unknown", _fail_run(res), source=src)
+    p = dict(ln.split("=", 1) for ln in res.out.splitlines() if "=" in ln)
+    lines = unit_lines(cx, AUDIT_RULES_UNIT)
+    if isinstance(lines, str):
+        return Res("unknown", f"journal: {lines}", source=src)
+    errors = [(t, m) for t, m in lines if LOAD_ERR_RE.search(m)]
+    ran = p.get("ExecMainStartTimestampMonotonic", "0") not in ("", "0")
+    result, code = p.get("Result", "?"), p.get("ExecMainStatus", "?")
+    if not ran:
+        out = Res("fail", "not run this boot", source=src)
+    elif errors or result != "success" or code != "0":
+        n = sum(1 for _, m in errors if "error in line" in m)
+        out = Res("fail", f"{result}, exit {code}, {n} rule(s) not loaded", source=src)
+    else:
+        return Res("pass", "loaded, no error", [("result", f"{result}, exit {code}")], source=src)
+    out.lines = [("result", f"{result}, exit {code}")]
+    out.lines += [("error", f"{t} {m}") for t, m in errors][:MAX_LINES - 2]
+    out.lines.append(("fix", "the line in /etc/audit/rules.d (augenrules order), then reboot "
+                             "(rules locked: -e 2)"))
+    return out
+
+
+def k_auditd_logging(c, cx: Cx) -> Res:
+    """auditd writes its log: no suspend since its last start or resume this boot
+    (auditd.conf admin_space_left / disk_full / disk_error action SUSPEND, or a log it
+    could not reopen). The kernel still sends records to the journal; auditd's own log
+    (ausearch, the scanner's checks) has a gap."""
+    src = f"{AUDITD_UNIT} journal lines this boot"
+    lines = unit_lines(cx, AUDITD_UNIT)
+    if isinstance(lines, str):
+        return Res("unknown", lines, source=src)
+    state, since, space = "logging", "", []
+    for t, m in lines:
+        if m.startswith(AUDITD_START):
+            state, since, space = "logging", "", []
+        elif AUDITD_SUSPEND.search(m):
+            state, since = "suspended", t
+            space.append((t, m))
+        elif AUDITD_RESUME.search(m):
+            state, since = "logging", ""
+            space.append((t, m))
+        elif AUDITD_SPACE.search(m):
+            space.append((t, m))
+    if state == "suspended":
+        out = Res("fail", f"suspended since {since}", source=src)
+        out.lines = [("line", f"{t} {m}") for t, m in space][-(MAX_LINES - 1):]
+        out.lines.append(("fix", "free space on /var, then: sudo auditctl --signal resume"))
+        return out
+    out = Res("pass", "logging" + (f", {len(space)} space line(s)" if space else ""), source=src)
+    out.lines = [("line", f"{t} {m}") for t, m in space][-MAX_LINES:]
+    return out
+
+
+def k_free_space(c, cx: Cx) -> Res:
+    """Free space for unprivileged users (f_bavail) on the file system of path. statvfs
+    needs search on the parent folders only (/var/log/audit itself is root 0700)."""
+    src = f"statvfs {c.path}"
+    try:
+        st = cx.host.statvfs(c.path)
+    except OSError as e:
+        return Res("unknown", _err(e), source=src)
+    free = st.f_bavail * st.f_frsize // (1024 * 1024)
+    size = st.f_blocks * st.f_frsize // (1024 * 1024)
+    out = Res("pass" if free >= c.min_mb else "fail", f"{_mib(free)} free", source=src)
+    out.lines = [("free", f"{free} MiB of {size} MiB"), ("want", f">= {c.min_mb} MiB")]
+    return out
+
+
+def _mib(n: int) -> str:
+    return f"{n / 1024:.1f} GiB" if n >= 1024 else f"{n} MiB"
+
+
+def k_setuid_known(c, cx: Cx) -> Res:
+    """Every setuid / setgid file under /usr is on my list of seen programs (review
+    2026-11-22, with L-1). silverblue-privacy-hardening writes an audit rule for a new one
+    at the next boot by itself, so the audit-rules row stays green: this row stays yellow
+    until I accept it (install.sh --setuid-accept). A program that left: detail only."""
+    src = f"{c.path}, setuid / setgid files under {SETUID_ROOT}"
+    try:
+        text = cx.host.read_owned(c.path)
+    except (ConfigError, OSError) as e:
+        return Res("unknown", (str(e) if isinstance(e, ConfigError) else _err(e))[:120], source=src)
+    if text is None:
+        res = Res("fail", "no list", source=src)
+        res.lines = [("fix", ACCEPT)]
+        return res
+    known = {ln.strip() for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")}
+    try:
+        files, unread = _setuid(cx)
+    except OSError as e:
+        return Res("unknown", f"{SETUID_ROOT}: {_err(e)}", source=src)
+    new = [p for p in files if p not in known]
+    gone = sorted(known - set(files))
+    if new:
+        res = Res("fail", f"{len(new)} new: {new[0]}" + (" ..." if len(new) > 1 else ""), source=src)
+    else:
+        res = Res("pass", f"{len(files)} known" + (f", {len(gone)} gone" if gone else ""), source=src)
+    lines = ([("new", p) for p in new] + [("gone", p) for p in gone]
+             + ([("not readable", f"{unread} dirs under {SETUID_ROOT}")] if unread else []))
+    tail = [("fix", f"seen and wanted: {ACCEPT}")] if new else []
+    res.lines = lines[:MAX_LINES - len(tail)] + tail
+    return res
+
+
+ACCEPT = "sudo ./install.sh --setuid-accept (the admin's sectop clone)"
 
 
 # --- fwupd (silverblue-cis-hardening FIRMWARE_REPORTS=no) ------------------------
@@ -966,7 +1137,9 @@ KINDS = {
     "ostree-staged": k_ostree_staged, "ostree-age": k_ostree_age, "ostree-gpg": k_ostree_gpg,
     "firewalld-zone": k_firewalld_zone, "wifi-ipv6": k_wifi_ipv6, "nm-props": k_nm_props,
     "mac-local": k_mac_local, "hostname": k_hostname, "dns-servers": k_dns_servers,
-    "fwupd-reports": k_fwupd_reports,
+    "fwupd-reports": k_fwupd_reports, "audit-load": k_audit_load,
+    "auditd-logging": k_auditd_logging, "free-space": k_free_space,
+    "setuid-known": k_setuid_known,
 }
 
 
@@ -992,6 +1165,8 @@ def want_text(c) -> str:
         return f"{c.mode:o} {c.owner}"
     if k == "ostree-age":
         return f"<= {c.max_days} days"
+    if k == "free-space":
+        return f">= {_mib(c.min_mb)} free"
     if k == "listeners":
         return "allowlist"
     if k == "failed-units":
@@ -1008,7 +1183,9 @@ def want_text(c) -> str:
             "audit-locked": "audit_enabled=2",
             "ostree-unlocked": "locked", "ostree-staged": "none",
             "ostree-gpg": "all verify", "mac-local": "local MAC",
-            "fwupd-reports": "no report address"}.get(k, "-")
+            "fwupd-reports": "no report address", "audit-load": "loaded, no error",
+            "auditd-logging": "not suspended",
+            "setuid-known": "none new"}.get(k, "-")
 
 
 def check(c, cx: Cx, unit_names: list) -> Res:

@@ -76,6 +76,44 @@ want = 53
 setuid_key = "privileged"
 setuid_rules = 2
 
+# audit-rules.service (audit 4 loads the rules there, augenrules --load): with -c
+# (01-continue.rules) a bad rule is skipped, the others load, the unit fails. The rule
+# is missing until the next boot (-e 2). Review 2026-11-17 L-2.
+[[check]]
+id = "audit-load"
+kind = "audit-load"
+sev = "warn"
+why = "audit rules loaded at boot without an error"
+
+# silverblue-privacy-hardening auditd: SUSPEND, not HALT, at admin_space_left, a full
+# disk and a write error: auditd's log stops, the laptop goes on. /var also holds the
+# homes (Steam games): the disk can fill. Review 2026-11-17 L-4.
+[[check]]
+id = "auditd-logging"
+kind = "auditd-logging"
+sev = "crit"
+why = "auditd writes its log (not suspended)"
+
+# a new setuid / setgid program after an update: silverblue-privacy-hardening gives it
+# audit rules at the next boot by itself (audit-privileged-sync.service), so audit-rules
+# stays green. This row stays yellow until I have seen it: install.sh --setuid-accept
+# (install.sh writes the first list when there is none). Review 2026-11-22.
+[[check]]
+id = "setuid-known"
+kind = "setuid-known"
+sev = "warn"
+why = "every setuid / setgid program under /usr seen and accepted"
+path = "/etc/sectop/setuid-known.txt"
+
+# warn long before auditd's own limits: the log ring can still grow to 40 x 32 MiB
+[[check]]
+id = "audit-space"
+kind = "free-space"
+sev = "warn"
+why = "room on /var for the audit log ring (1280 MiB) and more"
+path = "/var/log/audit"
+min_mb = 2048
+
 [[check]]
 id = "journald-audit"
 kind = "units"

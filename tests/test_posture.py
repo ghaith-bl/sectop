@@ -81,6 +81,19 @@ Current DNS Server: 10.2.0.1
         DNS Domain: ~.
      Default Route: yes
 """
+# journalctl -o json --output-fields=MESSAGE lines of one unit (review 2026-11-17 L-2 / L-4).
+# auditd texts from auditd 4 (auditd.c, auditd-event.c); augenrules / auditctl lines as
+# auditctl prints them (the host's boot lines: admin script 46 shows them).
+def jl(*msgs, t0=1792899000):
+    return "".join(json.dumps({"__CURSOR": f"s={i}", "__REALTIME_TIMESTAMP": str((t0 + i) * 10**6),
+                               "MESSAGE": m}) + "\n" for i, m in enumerate(msgs))
+
+
+JOURNAL_ARGS = "journalctl -b -q --no-pager -o json --output-fields=MESSAGE -n 400 _SYSTEMD_UNIT="
+LOAD_OK = jl("No rules", "enabled 1", "failure 1", "pid 0", "rate_limit 0",
+             "backlog_limit 8192", "lost 0", "backlog 0", "enabled 2", "failure 1")
+AUDITD_OK = jl("No plugins found, not dispatching events",
+               "Init complete, auditd 4.1.2 listening for events (startup state enable)")
 MOUNTINFO = ("1 0 0:30 / / ro,relatime shared:1 - overlay composefs ro,lowerdir=x\n"
              "60 1 0:39 /var /var rw,relatime shared:4 - btrfs /dev/mapper/luks-1234 rw\n"
              "61 1 0:40 /boot /boot rw shared:5 - ext4 /dev/nvme0n1p2 rw\n")
@@ -155,10 +168,17 @@ class FakeHost(kinds.Host):
                 "Hostname": "localhost", "StaticHostname": "localhost", "PrettyHostname": None,
                 "DefaultHostname": "localhost", "HostnameSource": "static"}), ""),
             "ss -Htuln --cgroup": Result(0, SS, ""),
+            "systemctl show --no-pager -p Result,": Result(0, "Result=success\nExecMainStatus=0\n"
+                                                    "ExecMainStartTimestampMonotonic=8123456\n", ""),
+            JOURNAL_ARGS + "audit-rules.service": Result(0, LOAD_OK, ""),
+            JOURNAL_ARGS + "auditd.service": Result(0, AUDITD_OK, ""),
             "rpm-ostree status": Result(0, json.dumps({"deployments": [
                 {"booted": False, "timestamp": 1}, {"booted": True, "timestamp": BOOTED}]}), ""),
         }
         self.wg = {"wg0-mullvad": Result(0, "51250\n", "")}
+        self.vfs = {"/var/log/audit": (4096, 12 * 2**18, 60 * 2**18)}   # frsize, free, size
+        self.owned = {"/etc/sectop/setuid-known.txt": "# seen\n" + "".join(
+            f"{p}\n" for p in self.setuid)}
         self.calls = []
 
     def read(self, path):
@@ -198,10 +218,22 @@ class FakeHost(kinds.Host):
             raise self.setuid
         return list(self.setuid), self.setuid_unread
 
+    def read_owned(self, path):
+        v = self.owned.get(path)
+        if isinstance(v, Exception):
+            raise v
+        return v
+
+    def statvfs(self, path):
+        if path not in self.vfs:
+            raise FileNotFoundError(2, "No such file or directory")
+        frsize, free, size = self.vfs[path]
+        return os.statvfs_result((frsize, frsize, size, free + 100, free, 0, 0, 0, 0, 255))
+
     def run(self, argv, timeout=kinds.TIMEOUT):
         self.calls.append(argv)
         line = " ".join(os.path.basename(a) if i == 0 else a for i, a in enumerate(argv))
-        for k, v in self.answers.items():
+        for k, v in sorted(self.answers.items(), key=lambda kv: -len(kv[0])):   # most exact
             if line.startswith(k):
                 return v(argv) if callable(v) else v
         return Result(127, "", f"not found: {argv[0]}")
@@ -687,8 +719,8 @@ class TestKinds(unittest.TestCase):
         a.added, a.keys["privileged"] = 75, 28
         r = kinds.check(c, cx(h, audit=a), [])
         self.assertEqual((r.status, r.have), ("fail", "75 rules, setuid 28/27"))
-        self.assertIn(("fix", "rules for programs no longer here: harden-workstation.sh "
-                              "audit-rules, then reboot"), r.lines)
+        self.assertIn(("fix", "rules for programs no longer here: reboot "
+                              "(audit-privileged-sync.service writes the list at boot)"), r.lines)
         # a new setuid program without a rule
         h.setuid.append("/usr/bin/new")
         a.added, a.keys["privileged"] = 74, 27
@@ -723,8 +755,8 @@ class TestKinds(unittest.TestCase):
         a.added, a.keys["privileged"] = 47 + 27, 27
         r = kinds.check(c, cx(h, audit=a), [])
         self.assertEqual((r.status, r.have), ("fail", "74 rules, setuid 27/54"))
-        self.assertEqual(r.lines[3], ("fix", "a setuid program has no rule: harden-workstation.sh "
-                                             "audit-rules, then reboot"))
+        self.assertEqual(r.lines[3], ("fix", "a setuid program has no rule: reboot "
+                                             "(audit-privileged-sync.service writes the list at boot)"))
         # one arch only for one program
         a.added, a.keys["privileged"] = 53 + 53, 53
         self.assertEqual(res(c, h, audit=a), ("fail", "106 rules, setuid 53/54"))
@@ -790,6 +822,125 @@ class TestKinds(unittest.TestCase):
         self.assertEqual(res(chk(kind="audit-enabled"), audit=a), ("pass", "audit_enabled=2"))
         a.err = "journal scan: x"
         self.assertEqual(res(chk(kind="audit-locked"), audit=a), ("unknown", "journal scan: x"))
+
+    def test_audit_load(self):
+        """audit-rules.service: ran, success, no error line (review 2026-11-17 L-2)."""
+        c = chk(kind="audit-load")
+        h = FakeHost()
+        r = kinds.check(c, cx(h), [])
+        self.assertEqual((r.status, r.have), ("pass", "loaded, no error"))
+        self.assertIn(["/usr/bin/journalctl", "-b", "-q", "--no-pager", "-o", "json",
+                       "--output-fields=MESSAGE", "-n", "400", "_SYSTEMD_UNIT=audit-rules.service"],
+                      h.calls)
+        # -c: one rule refused, the others loaded, auditctl exits 1, the unit fails
+        h.answers[JOURNAL_ARGS + "audit-rules.service"] = Result(0, jl(
+            "No rules", "Error sending add rule data request (No such file or directory)",
+            "There was an error in line 61 of /etc/audit/audit.rules", "enabled 2"), "")
+        h.answers["systemctl show --no-pager -p Result,"] = Result(
+            0, "Result=exit-code\nExecMainStatus=1\nExecMainStartTimestampMonotonic=8123456\n", "")
+        r = kinds.check(c, cx(h), [])
+        self.assertEqual((r.status, r.have), ("fail", "exit-code, exit 1, 1 rule(s) not loaded"))
+        self.assertEqual([k for k, _ in r.lines], ["result", "error", "error", "fix"])
+        self.assertTrue(r.lines[2][1].endswith("There was an error in line 61 of "
+                                               "/etc/audit/audit.rules"))
+        # an error line, unit still success (e.g. a later restart): fail
+        h.answers["systemctl show --no-pager -p Result,"] = Result(
+            0, "Result=success\nExecMainStatus=0\nExecMainStartTimestampMonotonic=9\n", "")
+        self.assertEqual(res(c, h)[0], "fail")
+        # not run this boot
+        h.answers[JOURNAL_ARGS + "audit-rules.service"] = Result(1, "", "")   # no entries
+        h.answers["systemctl show --no-pager -p Result,"] = Result(
+            0, "Result=success\nExecMainStatus=0\nExecMainStartTimestampMonotonic=0\n", "")
+        self.assertEqual(res(c, h), ("fail", "not run this boot"))
+        h.answers[JOURNAL_ARGS + "audit-rules.service"] = Result(1, "", "Permission denied\n")
+        self.assertEqual(res(c, h), ("unknown", "journal: Permission denied"))
+        self.assertEqual(kinds.want_text(c), "loaded, no error")
+
+    def test_auditd_logging(self):
+        """auditd's own lines: suspended until a resume or a new start (L-4)."""
+        c = chk(kind="auditd-logging", sev="crit")
+        h = FakeHost()
+        self.assertEqual(res(c, h), ("pass", "logging"))
+        start = "Init complete, auditd 4.1.2 listening for events (startup state enable)"
+        low = "Audit daemon is low on disk space for logging. The audit daemon will SUSPEND"
+        susp = "Audit daemon is suspending logging due to low disk space."
+        h.answers[JOURNAL_ARGS + "auditd.service"] = Result(0, jl(start, low, susp), "")
+        r = kinds.check(c, cx(h), [])
+        self.assertEqual(r.status, "fail")
+        self.assertTrue(r.have.startswith("suspended since "))
+        self.assertEqual([k for k, _ in r.lines], ["line", "line", "fix"])
+        st = pos.State(checks=(c,), host=h, wall=lambda: NOW, stamp=lambda ts: "12:00:00")
+        snap = validate(pos.collect(st, Context((), True, "")))
+        self.assertEqual([a["key"] for a in snap["checks"]], ["x"])       # crit: an alert
+        resume = "Audit daemon is attempting to resume logging."
+        h.answers[JOURNAL_ARGS + "auditd.service"] = Result(0, jl(start, susp, resume), "")
+        self.assertEqual(res(c, h), ("pass", "logging, 2 space line(s)"))
+        h.answers[JOURNAL_ARGS + "auditd.service"] = Result(0, jl(start, susp, start), "")
+        self.assertEqual(res(c, h), ("pass", "logging"))                  # restarted
+        full = ("Audit daemon is suspending logging due to no space left on logging "
+                "partition.")
+        h.answers[JOURNAL_ARGS + "auditd.service"] = Result(0, jl(start, resume, full), "")
+        self.assertEqual(res(c, h)[0], "fail")
+        # a forged line in another unit is not read: the match is _SYSTEMD_UNIT
+        self.assertTrue(all(a[-1] == "_SYSTEMD_UNIT=auditd.service"
+                            for a in h.calls if "journalctl" in a[0] and "auditd" in a[-1]))
+        h.answers[JOURNAL_ARGS + "auditd.service"] = Result(-9, "", "", timed_out=True)
+        self.assertEqual(res(c, h), ("unknown", "timed out"))
+        self.assertEqual(kinds.want_text(c), "not suspended")
+
+    def test_setuid_known(self):
+        """A setuid program not on my list: yellow until accepted (review 2026-11-22)."""
+        c = chk(kind="setuid-known", path="/etc/sectop/setuid-known.txt")
+        h = FakeHost()
+        self.assertEqual(res(c, h), ("pass", "27 known"))
+        h.setuid.append("/usr/bin/zz-new")
+        r = kinds.check(c, cx(h), [])
+        self.assertEqual((r.status, r.have), ("fail", "1 new: /usr/bin/zz-new"))
+        self.assertEqual(r.lines[0], ("new", "/usr/bin/zz-new"))
+        self.assertEqual(r.lines[-1][0], "fix")
+        self.assertIn("--setuid-accept", r.lines[-1][1])
+        # accepted: on the list; a program that left is a detail line, not a fail
+        h.owned[c.path] += "/usr/bin/zz-new\n/usr/bin/old-one\n"
+        r = kinds.check(c, cx(h), [])
+        self.assertEqual((r.status, r.have), ("pass", "28 known, 1 gone"))
+        self.assertEqual(r.lines, [("gone", "/usr/bin/old-one")])
+        # many new ones: the fix line stays
+        h.setuid += [f"/usr/bin/n{i:02d}" for i in range(20)]
+        r = kinds.check(c, cx(h), [])
+        self.assertEqual((r.status, r.have), ("fail", "20 new: /usr/bin/n00 ..."))
+        self.assertEqual(len(r.lines), kinds.MAX_LINES)
+        self.assertEqual(r.lines[-1][0], "fix")
+        del h.owned[c.path]
+        self.assertEqual(res(c, h), ("fail", "no list"))
+        h.owned[c.path] = ConfigError("/etc/sectop/setuid-known.txt: group/other writable")
+        self.assertEqual(res(c, h)[0], "unknown")
+        h.owned[c.path] = ""
+        h.setuid = PermissionError(13, "Permission denied")
+        self.assertEqual(res(c, h), ("unknown", "/usr: Permission denied"))
+        self.assertEqual(kinds.want_text(c), "none new")
+
+    def test_real_read_owned(self):
+        h = kinds.Host()
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(h.read_owned(os.path.join(d, "no-dir", "none.txt")))
+            if os.getuid() != 0:                       # not root-owned: refused
+                p = os.path.join(d, "l.txt")
+                with open(p, "w") as f:
+                    f.write("/usr/bin/su\n")
+                with self.assertRaises(ConfigError):
+                    h.read_owned(p)
+
+    def test_free_space(self):
+        c = chk(kind="free-space", path="/var/log/audit", min_mb=2048)
+        h = FakeHost()
+        r = kinds.check(c, cx(h), [])
+        self.assertEqual((r.status, r.have), ("pass", "12.0 GiB free"))
+        self.assertEqual(r.lines, [("free", "12288 MiB of 61440 MiB"), ("want", ">= 2048 MiB")])
+        h.vfs["/var/log/audit"] = (4096, 300 * 256, 60 * 2**18)          # 300 MiB
+        self.assertEqual(res(c, h), ("fail", "300 MiB free"))
+        self.assertEqual(res(chk(kind="free-space", path="/nope", min_mb=1), h),
+                         ("unknown", "No such file or directory"))
+        self.assertEqual(kinds.want_text(c), ">= 2.0 GiB free")
 
 
 def change(cursor, msg):
@@ -860,7 +1011,8 @@ class TestModule(unittest.TestCase):
         self.assertEqual(crit, {"selinux-enforcing", "audit-boot", "audit-enabled",
                                 "auditd-active", "firewalld-active", "firewalld-zone", "uid0",
                                 "wheel", "luks-var", "ostree-locked", "ostree-gpg", "listeners",
-                                "secure-boot", "mac-random", "hostname", "fwupd-no-reports"})
+                                "secure-boot", "mac-random", "hostname", "fwupd-no-reports",
+                                "auditd-logging"})
         refs = {c.id for c in checks if c.ref}
         self.assertEqual(refs, set())                                    # step 9 done
         self.assertEqual(set(policy.KINDS) - {c.kind for c in checks}, set())   # all used
@@ -1011,6 +1163,14 @@ class TestModule(unittest.TestCase):
                b'[[check]]\nid = "x"\nkind = "audit-rules"\nsev = "warn"\nwhy = "w"\nwant = 53\n'
                b'setuid_rules = 2\n',
                b'[[check]]\nid = "x"\nkind = "fwupd-reports"\nsev = "warn"\nwhy = "w"\n',
+               b'[[check]]\nid = "x"\nkind = "free-space"\nsev = "warn"\nwhy = "w"\npath = "/a"\n',
+               b'[[check]]\nid = "x"\nkind = "free-space"\nsev = "warn"\nwhy = "w"\npath = "/a"\n'
+               b'min_mb = "2048"\n',
+               b'[[check]]\nid = "x"\nkind = "free-space"\nsev = "warn"\nwhy = "w"\npath = "/a"\n'
+               b'min_mb = 0\n',
+               b'[[check]]\nid = "x"\nkind = "audit-load"\nsev = "warn"\nwhy = "w"\n'
+               b'path = "/a"\n',
+               b'[[check]]\nid = "x"\nkind = "setuid-known"\nsev = "warn"\nwhy = "w"\n',
                b'[[check]]\nid = "x"\nkind = "file"\nsev = "warn"\nwhy = "w"\npath = "/a"\n'
                b'want = "1"\nsetuid_key = "privileged"\n',
                b'[[check]]\nid = "x"\nkind = "file"\nsev = "warn"\nwhy = "w"\npath = "/a"\n'
@@ -1048,6 +1208,7 @@ class TestModule(unittest.TestCase):
                 f.write("deny = 5\n")
             self.assertEqual(h.read(p), "deny = 5\n")
             self.assertTrue(stat.S_ISREG(h.stat(p).st_mode))
+            self.assertGreater(h.statvfs(d).f_frsize, 0)
             self.assertEqual(h.listdir(d), ["f"])
             self.assertEqual(h.user(os.getuid()), h.user(os.getuid()))
 

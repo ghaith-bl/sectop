@@ -86,6 +86,16 @@ Offline rating 2026-10-20 (`systemd-analyze security --offline=yes`, systemd 255
 sectop 1.1, sectop-net 1.3, sectop-whois 1.2 (OK). Stricter syscall filters for the
 collector and the net unit after the live test (nft, ss, journalctl: EPERM in the journal).
 
+## New setuid / setgid programs
+
+    sudo ./install.sh --setuid-accept
+
+`/etc/sectop/setuid-known.txt` (root:root 0644): the setuid / setgid programs under /usr I
+have seen. The first install writes it from /usr (`find /usr -xdev -type f -perm /6000`);
+after that only this option changes it. It lists every new program with its package
+(`rpm -qf`), owner and mode, and every one that left, then asks; y = the list is /usr now.
+Posture `setuid-known` is yellow while a program is not on the list.
+
 ## Remove
 
     sudo ./install.sh --remove

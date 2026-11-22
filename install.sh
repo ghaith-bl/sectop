@@ -5,6 +5,7 @@
 #   sudo ./install.sh                       install or update (HEAD, not uncommitted changes)
 #   sudo ./install.sh --desktop-user NAME   same, user helper for NAME (two accounts)
 #   sudo ./install.sh --check               requirements only, changes nothing
+#   sudo ./install.sh --setuid-accept       new setuid / setgid programs seen: on my list
 #   sudo ./install.sh --remove              stop + remove units, code, launcher, sysusers file
 #
 # Users: the one running sudo is the admin: member of group sectop (reads the UI state,
@@ -24,6 +25,7 @@ UNIT_DIR=/etc/systemd/system
 UNITS=(sectop-net.service sectop.service sectop-whois.socket sectop-whois@.service sectop-user@.service)
 SYSUSERS=/etc/sysusers.d/sectop.conf
 CONF=/etc/sectop
+SETUID_LIST=$CONF/setuid-known.txt
 TMP=""
 
 log()  { printf '\e[32m[+]\e[0m %s\n' "$*"; }
@@ -169,6 +171,69 @@ check_conf() {     # collector and net unit read the config as non-root users
   log "config: $CONF 0755, *.toml 0644 root:root (read by sectop users, no secrets)"
 }
 
+# setuid-known.txt: the setuid / setgid programs under /usr I have seen (posture
+# setuid-known). The first install writes the ones there now; later only --setuid-accept,
+# never an update (silverblue-privacy-hardening gives a new one audit rules by itself).
+setuid_scan() { find /usr -xdev -type f -perm /6000 | LC_ALL=C sort; }
+
+write_setuid_list() {   # $1 = paths, one per line
+  local tmp
+  tmp=$(mktemp "$CONF/.setuid-known.XXXXXX")
+  { echo "# setuid / setgid programs under /usr I have seen (sectop posture setuid-known)."
+    echo "# Written by install.sh; a new one: sudo ./install.sh --setuid-accept"
+    printf '%s\n' "$1"
+  } > "$tmp"
+  chown root:root "$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$SETUID_LIST"
+  relabel "$SETUID_LIST"
+}
+
+seed_setuid_list() {
+  local now
+  if [[ -e $SETUID_LIST || -L $SETUID_LIST ]]; then
+    log "setuid list: $SETUID_LIST kept (new programs: sudo ./install.sh --setuid-accept)"
+    return 0
+  fi
+  now=$(setuid_scan)
+  [[ -n $now ]] || { warn "no setuid / setgid program under /usr: no setuid list"; return 0; }
+  write_setuid_list "$now"
+  log "setuid list: $SETUID_LIST (new: the $(wc -l <<< "$now") programs under /usr now)"
+}
+
+# --setuid-accept: show what is new / gone with its package, then the list = /usr now
+setuid_accept() {
+  local now old new gone p pkg ans
+  [[ -d $CONF ]] || die "no $CONF: install first"
+  now=$(setuid_scan)
+  [[ -n $now ]] || die "no setuid / setgid program found under /usr: list kept"
+  old=""
+  if [[ -f $SETUID_LIST && ! -L $SETUID_LIST ]]; then
+    old=$(grep -v '^[[:space:]]*#' "$SETUID_LIST" | grep . | LC_ALL=C sort || true)
+  fi
+  new=$(LC_ALL=C comm -13 <(printf '%s\n' "$old") <(printf '%s\n' "$now") | grep . || true)
+  gone=$(LC_ALL=C comm -23 <(printf '%s\n' "$old") <(printf '%s\n' "$now") | grep . || true)
+  if [[ -z $new && -z $gone ]]; then
+    log "setuid list: nothing new ($(wc -l <<< "$now") programs)"
+    return 0
+  fi
+  while IFS= read -r p; do
+    [[ -n $p ]] || continue
+    pkg=$(rpm -qf "$p" 2>/dev/null || echo "no package")
+    printf '  new:  %s  (%s, %s)\n' "$p" "$pkg" "$(stat -c '%U:%G %a' "$p")"
+  done <<< "$new"
+  while IFS= read -r p; do
+    [[ -n $p ]] && printf '  gone: %s\n' "$p"
+  done <<< "$gone"
+  read -r -p "accept: the list = these $(wc -l <<< "$now") programs? [y/N] " ans < /dev/tty || ans=n
+  if [[ $ans == y || $ans == Y ]]; then
+    write_setuid_list "$now"
+    log "setuid list: $SETUID_LIST written (sectop reads it at the next collect, every 5 min)"
+  else
+    log "setuid list: not changed"
+  fi
+}
+
 install_units() {  # $1 = desktop user: its user helper (sectop-user@<user>.service)
   local u inst helper=sectop-user@$1.service
   for u in "${UNITS[@]}"; do
@@ -222,12 +287,13 @@ main() {
   [[ $EUID -eq 0 ]] || die "run with sudo"
   [[ ${1:-} == --remove ]] && { remove; return; }
   [[ ${1:-} == --check ]] && { preflight; return; }
+  [[ ${1:-} == --setuid-accept ]] && { [[ $# -eq 1 ]] || die "usage: sudo $0 --setuid-accept"; setuid_accept; return; }
   local desktop=""
   if [[ ${1:-} == --desktop-user ]]; then
     [[ $# -eq 2 ]] || die "usage: sudo $0 --desktop-user NAME"
     desktop=$2; shift 2
   fi
-  [[ $# -eq 0 ]] || die "usage: sudo $0 [--desktop-user NAME | --check | --remove]"
+  [[ $# -eq 0 ]] || die "usage: sudo $0 [--desktop-user NAME | --check | --remove | --setuid-accept]"
   local user=${SUDO_USER:-} repo
   [[ $user =~ $USER_RE && $user != root ]] \
     || die "run with sudo from your login (SUDO_USER missing or root)"
@@ -240,6 +306,7 @@ main() {
   install_code "$repo" "$user"
   install_users "$user"
   check_conf
+  seed_setuid_list
   install_units "$desktop"
   if [[ $desktop == "$user" ]]; then
     log "one account: $user reads sectop and runs the user helper"

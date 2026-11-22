@@ -61,6 +61,10 @@ KINDS = {
     "hostname": ({"want"}, set()),
     "dns-servers": ({"allow"}, set()),
     "fwupd-reports": ({"path"}, set()),
+    "audit-load": (set(), set()),
+    "auditd-logging": (set(), set()),
+    "free-space": ({"path", "min_mb"}, set()),
+    "setuid-known": ({"path"}, set()),
 }
 MAX_CHECKS = 100
 MAX_ITEMS = 64                      # values / units / lines / allow / want lists
@@ -101,6 +105,7 @@ class Check:
     props: tuple = ()               # nm-props: ((property, want "a|b"), ...), "" = empty
     setuid_key: str = ""            # audit-rules: key of the rules for setuid programs
     setuid_rules: int = 1           # audit-rules: rules per setuid program (2: one per arch)
+    min_mb: int = 0                 # free-space: MiB free at least
 
 
 def _text(v, w: str, most: int = MAX_TEXT, empty: bool = False) -> str:
@@ -245,6 +250,11 @@ def _check(t, i: int, path: str, seen: set) -> Check:
         if not isinstance(o, str) or not OWNER_RE.fullmatch(o):
             raise ConfigError(f"{w}.owner: \"user:group\" required")
         args["mode"], args["owner"] = int(m, 8), o
+    if kind == "free-space":
+        mb = t["min_mb"]
+        if type(mb) is not int or not 1 <= mb <= 10_000_000:
+            raise ConfigError(f"{w}.min_mb: whole number 1..10000000 required (MiB)")
+        args["min_mb"] = mb
     if kind == "ostree-age":
         d = t["max_days"]
         if type(d) is not int or not 1 <= d <= 3650:
