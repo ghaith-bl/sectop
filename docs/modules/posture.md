@@ -80,7 +80,7 @@ Summary `pass <n> | fail <n> | unknown <n> | accepted <n>`.
 | luks | path | the mount's device-mapper device (or one under it: LVM) has uuid `CRYPT-LUKS*`. Matched by dm name (`/sys/block/dm-*/dm/name`): the sandbox has no `/dev/mapper` (PrivateDevices) |
 | secureboot | - | efivar SecureBoot value 1 (4 bytes attributes, then the value) |
 | lockdown | want | `/sys/kernel/security/lockdown` `[mode]` in want |
-| audit-rules | want (number), setuid_key? | add_rule - remove_rule this boot >= want. With setuid_key: rules of the other keys >= want, and the rules with that key = the setuid / setgid files under /usr (regular files, one file system, like `find /usr -xdev -type f -perm /6000`; scanned once per sectop start, /usr only changes with a new deployment = a reboot). Detail: counts, a fix hint, the files. /usr not readable: unknown |
+| audit-rules | want (number), setuid_key?, setuid_rules? (1 or 2, default 1) | add_rule - remove_rule this boot >= want. With setuid_key: rules of the other keys >= want, and the rules with that key = setuid_rules x the setuid / setgid files under /usr (regular files, one file system, like `find /usr -xdev -type f -perm /6000`; scanned once per sectop start, /usr only changes with a new deployment = a reboot). Detail: counts, a fix hint, the files. /usr not readable: unknown |
 | audit-enabled | - | no `audit_enabled=0` this boot |
 | audit-locked | - | last `audit_enabled` set this boot is `2` (`-e 2`) |
 | uid0 | want (list) | the accounts with UID 0 (`/etc/passwd`) = want |
@@ -112,7 +112,7 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
           the admin; /var on LUKS; system image not unlocked; ostree remotes verify; listeners;
           Secure Boot on; no hardware MAC on a link that is up; hostname localhost; fwupd
           sends no reports
-    warn  SELinux config enforcing + targeted; audit rules >= 47 + 1 per setuid file; audit locked
+    warn  SELinux config enforcing + targeted; audit rules >= 53 + 2 per setuid file; audit locked
           (-e 2); firmware metadata every second day; journald audit
           socket; su closed (sugroup empty, pam_wheel); faillock 5 / 900 s; pwquality 15
           / 4 classes; login.defs min age >= 1 (new accounts: existing ones are in
@@ -199,6 +199,11 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
   programs that left (the `audit-rules` section was not run again). The scan: ~0.5 s
   for 166k entries, once per start. Files under a directory user sectop cannot read
   are missed (the detail counts such directories).
+- Two rules per setuid program (2026-11-21): silverblue-cis-hardening writes its audit
+  rules in the text scap-security-guide matches, path rules once per arch (b32 + b64;
+  one rule without arch covered both, the events stay the same). Now `want = 53` and
+  `setuid_rules = 2`. Between the new rules files and the next reboot the old rules stay
+  loaded (`-e 2`): the check fails with the reboot hint until then.
 - fwupd (2026-11-16, silverblue-cis-hardening `autoupdate` `FIRMWARE_REPORTS=no`):
   `fwupd-no-reports` (fwupd-reports, crit: a report address back means a refresh may
   upload again; lvfs.conf had `AutomaticReports=true`) and `fwupd-schedule` (file: the

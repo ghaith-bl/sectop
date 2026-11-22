@@ -44,7 +44,7 @@ KINDS = {
     "luks": ({"path"}, set()),
     "secureboot": (set(), set()),
     "lockdown": ({"want"}, set()),
-    "audit-rules": ({"want"}, {"setuid_key"}),
+    "audit-rules": ({"want"}, {"setuid_key", "setuid_rules"}),
     "audit-enabled": (set(), set()),
     "audit-locked": (set(), set()),
     "uid0": ({"want"}, set()),
@@ -99,7 +99,8 @@ class Check:
     tunnel_owner: str = ""          # listeners: program of a userspace tunnel's socket
     types: tuple = ()               # nm-props: NetworkManager profile types
     props: tuple = ()               # nm-props: ((property, want "a|b"), ...), "" = empty
-    setuid_key: str = ""            # audit-rules: key of the one-rule-per-setuid-program rules
+    setuid_key: str = ""            # audit-rules: key of the rules for setuid programs
+    setuid_rules: int = 1           # audit-rules: rules per setuid program (2: one per arch)
 
 
 def _text(v, w: str, most: int = MAX_TEXT, empty: bool = False) -> str:
@@ -181,6 +182,11 @@ def _check(t, i: int, path: str, seen: set) -> Check:
         if not isinstance(sk, str) or (sk and not AUDIT_KEY_RE.fullmatch(sk)):
             raise ConfigError(f"{w}.setuid_key: audit key of 1..31 of a-z A-Z 0-9 _ - required")
         args["setuid_key"] = sk
+        if "setuid_rules" in t:
+            per = t["setuid_rules"]
+            if not sk or type(per) is not int or per not in (1, 2):
+                raise ConfigError(f"{w}.setuid_rules: 1 or 2 required, with setuid_key")
+            args["setuid_rules"] = per
     if kind == "sysctl":
         vals = []
         for k, v in _table(t["values"], f"{w}.values").items():

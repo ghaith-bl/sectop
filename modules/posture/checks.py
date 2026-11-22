@@ -865,8 +865,8 @@ def _setuid(cx: Cx):
 
 def k_audit_rules(c, cx: Cx) -> Res:
     """Rules loaded this boot >= want. With setuid_key: rules of the other keys >= want,
-    and one setuid_key rule per setuid / setgid file under /usr (the list changes with
-    image updates: a fixed total breaks)."""
+    and setuid_rules setuid_key rules per setuid / setgid file under /usr (2: one per
+    arch; the list changes with image updates: a fixed total breaks)."""
     a = cx.audit
     src = "journal CONFIG_CHANGE this boot (add_rule - remove_rule)"
     if a is None or a.err:
@@ -883,16 +883,18 @@ def k_audit_rules(c, cx: Cx) -> Res:
         return Res("unknown", f"{SETUID_ROOT}: {_err(e)}", source=src)
     k = a.keys.get(c.setuid_key, 0)
     other = n - k
-    ok = other >= c.want and k == len(files)
-    res = Res("pass" if ok else "fail", f"{n} rules, setuid {k}/{len(files)}", source=src)
+    need = c.setuid_rules * len(files)
+    ok = other >= c.want and k == need
+    res = Res("pass" if ok else "fail", f"{n} rules, setuid {k}/{need}", source=src)
     res.lines = [("other rules", f"{other} (want >= {c.want})"),
-                 (f"{c.setuid_key} rules", str(k)),
+                 (f"{c.setuid_key} rules", str(k)
+                  + (f" ({c.setuid_rules} per file)" if c.setuid_rules > 1 else "")),
                  ("setuid files", str(len(files))
                   + (f" ({unread} dirs not readable)" if unread else ""))]
-    if k < len(files):
+    if k < need:
         res.lines.append(("fix", "a setuid program has no rule: harden-workstation.sh "
                                  "audit-rules, then reboot"))
-    elif k > len(files):
+    elif k > need:
         res.lines.append(("fix", "rules for programs no longer here: harden-workstation.sh "
                                  "audit-rules, then reboot"))
     res.lines += [("setuid", p) for p in files]
@@ -985,7 +987,7 @@ def want_text(c) -> str:
     if k == "taint":
         return f"only {c.want}" if c.want.strip() else "none"
     if k == "audit-rules":
-        return f">= {c.want} + 1 per setuid file" if c.setuid_key else f">= {c.want}"
+        return f">= {c.want} + {c.setuid_rules} per setuid file" if c.setuid_key else f">= {c.want}"
     if k == "perms":
         return f"{c.mode:o} {c.owner}"
     if k == "ostree-age":

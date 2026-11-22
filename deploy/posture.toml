@@ -63,16 +63,18 @@ sev = "crit"
 why = "auditd running"
 units = { "auditd.service" = "active" }
 
-# silverblue-cis-hardening audit-rules: one "privileged" rule per setuid / setgid program,
-# so the total follows the image (2026-11-16: 47 + 27). sectop counts the programs under
-# /usr once per start and wants exactly one rule each, plus >= want rules of other keys.
+# silverblue-cis-hardening audit-rules: one "privileged" rule per setuid / setgid program
+# and arch (b32 + b64 since 2026-11-21, the scanner's text), so the total follows the
+# image (53 + 2 x 26). sectop counts the programs under /usr once per start and wants
+# exactly two rules each, plus >= want rules of other keys.
 [[check]]
 id = "audit-rules"
 kind = "audit-rules"
 sev = "warn"
-why = "audit rules loaded, one per setuid program (verification.md)"
-want = 47
+why = "audit rules loaded, two per setuid program (verification.md)"
+want = 53
 setuid_key = "privileged"
+setuid_rules = 2
 
 [[check]]
 id = "journald-audit"

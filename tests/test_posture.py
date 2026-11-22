@@ -708,6 +708,28 @@ class TestKinds(unittest.TestCase):
         self.assertEqual(kinds.want_text(c), ">= 47 + 1 per setuid file")
         self.assertEqual(kinds.want_text(chk(kind="audit-rules", want=70)), ">= 70")
 
+    def test_audit_setuid_rules_per_arch(self):
+        """2026-11-21: path rules once per arch: 53 other rules + two per setuid program."""
+        c = chk(kind="audit-rules", want=53, setuid_key="privileged", setuid_rules=2)
+        a = pos.Audit()
+        h = FakeHost()
+        a.added, a.keys["privileged"] = 53 + 54, 54
+        r = kinds.check(c, cx(h, audit=a), [])
+        self.assertEqual((r.status, r.have), ("pass", "107 rules, setuid 54/54"))
+        self.assertEqual(r.lines[:3], [("other rules", "53 (want >= 53)"),
+                                       ("privileged rules", "54 (2 per file)"),
+                                       ("setuid files", "27")])
+        # rules.d rewritten, the old rules (one per program, 47 others) still loaded
+        a.added, a.keys["privileged"] = 47 + 27, 27
+        r = kinds.check(c, cx(h, audit=a), [])
+        self.assertEqual((r.status, r.have), ("fail", "74 rules, setuid 27/54"))
+        self.assertEqual(r.lines[3], ("fix", "a setuid program has no rule: harden-workstation.sh "
+                                             "audit-rules, then reboot"))
+        # one arch only for one program
+        a.added, a.keys["privileged"] = 53 + 53, 53
+        self.assertEqual(res(c, h, audit=a), ("fail", "106 rules, setuid 53/54"))
+        self.assertEqual(kinds.want_text(c), ">= 53 + 2 per setuid file")
+
     def test_setuid_files_real(self):
         with tempfile.TemporaryDirectory() as d:
             os.makedirs(os.path.join(d, "bin", "sub"))
@@ -877,8 +899,8 @@ class TestModule(unittest.TestCase):
 })
         self.assertTrue(allow)
         st = pos.State(checks=checks, host=h, wall=lambda: NOW, stamp=lambda ts: "12:00:00")
-        st.audit.added = 74   # 2026-11-16: 47 + one per setuid program (27)
-        st.audit.keys["privileged"] = 27
+        st.audit.added = 107  # 2026-11-21: 53 + two per setuid program (27, one per arch)
+        st.audit.keys["privileged"] = 54
         h.dirs["/etc/fwupd/remotes.d"] = ["lvfs.conf", "lvfs-testing.conf"]
         for n in h.dirs["/etc/fwupd/remotes.d"]:
             h.files[f"/etc/fwupd/remotes.d/{n}"] = (
@@ -982,6 +1004,12 @@ class TestModule(unittest.TestCase):
                b'setuid_key = "a b"\n',
                b'[[check]]\nid = "x"\nkind = "audit-rules"\nsev = "warn"\nwhy = "w"\nwant = 47\n'
                b'setuid_key = 1\n',
+               b'[[check]]\nid = "x"\nkind = "audit-rules"\nsev = "warn"\nwhy = "w"\nwant = 53\n'
+               b'setuid_key = "privileged"\nsetuid_rules = 3\n',
+               b'[[check]]\nid = "x"\nkind = "audit-rules"\nsev = "warn"\nwhy = "w"\nwant = 53\n'
+               b'setuid_key = "privileged"\nsetuid_rules = "2"\n',
+               b'[[check]]\nid = "x"\nkind = "audit-rules"\nsev = "warn"\nwhy = "w"\nwant = 53\n'
+               b'setuid_rules = 2\n',
                b'[[check]]\nid = "x"\nkind = "fwupd-reports"\nsev = "warn"\nwhy = "w"\n',
                b'[[check]]\nid = "x"\nkind = "file"\nsev = "warn"\nwhy = "w"\npath = "/a"\n'
                b'want = "1"\nsetuid_key = "privileged"\n',
