@@ -18,6 +18,13 @@ DEPLOY = os.path.join(ROOT, "deploy", "posture.toml")
 DAY = 86400.0
 NOW = 1792900000.0                       # 2026-10-26
 BOOTED = 1792828294.0                    # host 2026-10-26: rpm-ostree booted timestamp
+# harden-check result (silverblue-privacy-hardening integrity section), an hour before NOW
+HC_RESULT = ("# harden-check result (aidecheck.service); sectop posture row harden-check\n"
+             f"time\t{int(NOW) - 3600}\t2026-10-26T11:00:00+03:00\n"
+             "check\taide\tpass\t5321 entries, no change since 2026-10-26T10:00+03:00\n"
+             "check\tboot-image\tpass\t4 files = image (2 entries)\n"
+             "check\tsudoers\tpass\t2 files 440 root, syntax ok\n"
+             "check\tbpf-jit\tpass\tnet.core.bpf_jit_harden = 2\n")
 
 # /proc/net of my host 2026-10-26 (ss -Htuln): libvirt dnsmasq 192.168.122.1:53 tcp + udp
 # and 0.0.0.0:67 (bound to virbr0), resolved 127.0.0.53 / .54:53, chronyd 127.0.0.1 / ::1
@@ -888,6 +895,56 @@ class TestKinds(unittest.TestCase):
         self.assertEqual(res(c, h), ("unknown", "timed out"))
         self.assertEqual(kinds.want_text(c), "not suspended")
 
+    def test_harden_check(self):
+        """The root drift check's result: yellow while a file changed since the accept
+        or a root check fails; stale after a day, not in the minutes after boot."""
+        c = chk(kind="harden-check", path="/var/lib/harden-check/result")
+        h = FakeHost()
+        self.assertEqual(res(c, h), ("fail", "no result"))
+        h.owned[c.path] = HC_RESULT
+        r = kinds.check(c, cx(h), [])
+        self.assertEqual((r.status, r.have), ("pass", "4 checks pass"))
+        self.assertEqual(r.lines[1], ("boot-image", "4 files = image (2 entries)"))
+        changed = HC_RESULT.replace(
+            "check\taide\tpass\t5321 entries, no change since 2026-10-26T10:00+03:00\n",
+            "check\taide\tfail\t2 changed since 2026-10-26T10:00+03:00: 1 other, 1 from the OS update\n"
+            "item\taide\tother + /etc/cron.d/x\n"
+            "item\taide\tupdate ~ /etc/pki/ca-trust/extracted/java/cacerts\n")
+        h.owned[c.path] = changed
+        r = kinds.check(c, cx(h), [])
+        self.assertEqual((r.status, r.have),
+                         ("fail", "aide: 2 changed since 2026-10-26T10:00+03:00: 1 other, 1 from the OS update"))
+        self.assertEqual(r.lines[1:3], [("aide", "other + /etc/cron.d/x"),
+                                        ("aide", "update ~ /etc/pki/ca-trust/extracted/java/cacerts")])
+        self.assertEqual(r.lines[-1][0], "fix")
+        self.assertIn("harden-check --accept", r.lines[-1][1])
+        # many items: cut, a "more" line, the fix line stays
+        h.owned[c.path] = changed + "".join(f"item\taide\tother + /etc/n{i:02d}\n" for i in range(30))
+        r = kinds.check(c, cx(h), [])
+        self.assertEqual(len(r.lines), kinds.MAX_LINES)
+        self.assertEqual(r.lines[-2][0], "more")
+        self.assertEqual(r.lines[-1][0], "fix")
+        # another check fails: no accept hint
+        h.owned[c.path] = HC_RESULT.replace("bpf-jit\tpass\tnet.core.bpf_jit_harden = 2",
+                                            "bpf-jit\tfail\tnet.core.bpf_jit_harden = 0, want 2")
+        r = kinds.check(c, cx(h), [])
+        self.assertEqual((r.status, r.have), ("fail", "bpf-jit: net.core.bpf_jit_harden = 0, want 2"))
+        self.assertNotIn("fix", [k for k, _ in r.lines])
+        h.owned[c.path] = HC_RESULT.replace("sudoers\tpass", "sudoers\tunknown")
+        self.assertEqual(res(c, h), ("unknown", "1 of 4 not checked: sudoers"))
+        # stale: a day and more; right after boot it waits for the timer's run
+        h.owned[c.path] = HC_RESULT
+        r = kinds.check(c, cx(h, now=NOW + 27 * 3600), [])
+        self.assertEqual((r.status, r.have), ("fail", "28 h old: did aidecheck.service run?"))
+        h.files["/proc/uptime"] = "120.5 300.0\n"
+        self.assertEqual(res(c, h, now=NOW + 27 * 3600),
+                         ("unknown", "28 h old, the run after boot is due"))
+        h.owned[c.path] = "garbage\n"
+        self.assertEqual(res(c, h), ("unknown", "result not readable"))
+        h.owned[c.path] = ConfigError("/var/lib/harden-check/result: group/other writable")
+        self.assertEqual(res(c, h)[0], "unknown")
+        self.assertEqual(kinds.want_text(c), "no change, all pass")
+
     def test_setuid_known(self):
         """A setuid program not on my list: yellow until accepted (review 2026-11-22)."""
         c = chk(kind="setuid-known", path="/etc/sectop/setuid-known.txt")
@@ -1061,6 +1118,7 @@ class TestModule(unittest.TestCase):
         h.files["/etc/systemd/system/fwupd-refresh.timer.d/50-schedule.conf"] = (
             "# x\n[Timer]\nOnCalendar=\nOnCalendar=*-*-1/2\n")
         st.audit.enabled = "2"   # -e 2 at boot
+        h.owned["/var/lib/harden-check/result"] = HC_RESULT
         snap = validate(pos.collect(st, Context((), True, "")))
         got = {r["cells"][0]: r["cells"][1] for r in snap["panels"][0]["rows"]}
         self.assertEqual({k: v for k, v in got.items() if v != "pass"}, {})

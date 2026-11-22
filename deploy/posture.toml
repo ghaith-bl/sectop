@@ -105,6 +105,15 @@ sev = "warn"
 why = "every setuid / setgid program under /usr seen and accepted"
 path = "/etc/sectop/setuid-known.txt"
 
+# silverblue-privacy-hardening integrity section: AIDE + root checks (daily, root-owned
+# result). Any changed file stays yellow until the admin accepts it (harden-check --accept)
+[[check]]
+id = "harden-check"
+kind = "harden-check"
+sev = "warn"
+why = "no file changed since accepted (AIDE), boot files = image, root-only values as set"
+path = "/var/lib/harden-check/result"
+
 # warn long before auditd's own limits: the log ring can still grow to 40 x 32 MiB
 [[check]]
 id = "audit-space"

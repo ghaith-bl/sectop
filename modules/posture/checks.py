@@ -1073,6 +1073,84 @@ def k_setuid_known(c, cx: Cx) -> Res:
 ACCEPT = "sudo ./install.sh --setuid-accept (the admin's sectop clone)"
 
 
+# --- harden-check (silverblue-privacy-hardening integrity section) ----------------------
+
+HC_STALE = 26 * 3600               # daily timer + a late day
+HC_BOOT_GRACE = 15 * 60            # first run 5 min after boot (aidecheck.timer)
+HC_ACCEPT = "sudo harden-check --accept (admin, text console)"
+UPTIME = "/proc/uptime"
+
+
+def parse_harden_check(text: str) -> tuple:
+    """RESULT of harden-check: `time<TAB>epoch<TAB>iso`, `check<TAB>id<TAB>status<TAB>summary`,
+    `item<TAB>id<TAB>text`. -> (epoch or None, [(id, status, summary, [items])])."""
+    when, checks, by_id = None, [], {}
+    for line in text.splitlines():
+        f = line.split("\t")
+        if f[0] == "time" and len(f) >= 2 and f[1].isdigit():
+            when = int(f[1])
+        elif f[0] == "check" and len(f) >= 4:
+            entry = (f[1], f[2], f[3], [])
+            checks.append(entry)
+            by_id[f[1]] = entry
+        elif f[0] == "item" and len(f) >= 3 and f[1] in by_id:
+            by_id[f[1]][3].append(f[2])
+    return when, checks
+
+
+def k_harden_check(c, cx: Cx) -> Res:
+    """The root drift check's last result (silverblue-privacy-hardening: aidecheck.service
+    runs aide --check, then harden-check; review D-U1, 2026-11-22). A file changed since
+    the admin's last accept, a boot file that is not the image's, a root-only value off:
+    fail (sev warn: yellow) until it is gone or accepted. Older than a day: fail, except
+    in the first minutes after boot (the timer runs 5 min after boot)."""
+    src = f"{c.path} (aidecheck.service, root)"
+    try:
+        text = cx.host.read_owned(c.path)
+    except (ConfigError, OSError) as e:
+        return Res("unknown", (str(e) if isinstance(e, ConfigError) else _err(e))[:120], source=src)
+    if text is None:
+        res = Res("fail", "no result", source=src)
+        res.lines = [("fix", "sudo ./harden-workstation.sh integrity (aide layered first)")]
+        return res
+    when, checks = parse_harden_check(text)
+    if when is None or not checks:
+        return Res("unknown", "result not readable", source=src)
+    age = cx.now - when
+    if age > HC_STALE:
+        try:
+            up = float(cx.host.read(UPTIME).split()[0])
+        except (OSError, ValueError, IndexError):
+            up = HC_BOOT_GRACE + 1
+        hours = int(age // 3600)
+        if up < HC_BOOT_GRACE:
+            return Res("unknown", f"{hours} h old, the run after boot is due", source=src)
+        res = Res("fail", f"{hours} h old: did aidecheck.service run?", source=src)
+        res.lines = [("fix", "systemctl status aidecheck.timer aidecheck.service")]
+        return res
+    bad = [x for x in checks if x[1] == "fail"]
+    unk = [x for x in checks if x[1] not in ("pass", "fail")]
+    if bad:
+        first = bad[0]
+        res = Res("fail", f"{first[0]}: {first[2]}"[:120], source=src)
+    elif unk:
+        res = Res("unknown", f"{len(unk)} of {len(checks)} not checked: "
+                             + " ".join(x[0] for x in unk), source=src)
+    else:
+        return Res("pass", f"{len(checks)} checks pass", source=src,
+                   lines=[(x[0], x[2]) for x in checks][:MAX_LINES])
+    lines = []
+    for cid, st, summ, items in bad + unk:
+        lines.append((cid, f"{st}: {summ}"))
+        lines += [(cid, i) for i in items]
+    tail = [("fix", f"seen and wanted: {HC_ACCEPT}")] if any(x[0] == "aide" for x in bad) else []
+    shown = lines[:MAX_LINES - len(tail)]
+    if len(lines) > len(shown) and shown:
+        shown[-1] = ("more", f"{len(lines) - len(shown) + 1} lines: sudo cat {c.path}")
+    res.lines = shown + tail
+    return res
+
+
 # --- fwupd (silverblue-cis-hardening FIRMWARE_REPORTS=no) ------------------------
 
 REPORT_KEYS = ("ReportURI", "SecurityReportURI")
@@ -1139,7 +1217,7 @@ KINDS = {
     "mac-local": k_mac_local, "hostname": k_hostname, "dns-servers": k_dns_servers,
     "fwupd-reports": k_fwupd_reports, "audit-load": k_audit_load,
     "auditd-logging": k_auditd_logging, "free-space": k_free_space,
-    "setuid-known": k_setuid_known,
+    "setuid-known": k_setuid_known, "harden-check": k_harden_check,
 }
 
 
@@ -1185,7 +1263,7 @@ def want_text(c) -> str:
             "ostree-gpg": "all verify", "mac-local": "local MAC",
             "fwupd-reports": "no report address", "audit-load": "loaded, no error",
             "auditd-logging": "not suspended",
-            "setuid-known": "none new"}.get(k, "-")
+            "setuid-known": "none new", "harden-check": "no change, all pass"}.get(k, "-")
 
 
 def check(c, cx: Cx, unit_names: list) -> Res:
