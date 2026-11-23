@@ -19,7 +19,7 @@ import stat
 import time
 from dataclasses import dataclass, field
 
-from core import netd
+from core import homed, netd
 from core.config import ConfigError, read_file
 from core.proc import program
 from core.run import Result
@@ -130,6 +130,10 @@ class Host:
         core/config.py read_file. None = missing; ConfigError = not safe."""
         data = read_file(path, 0)
         return None if data is None else data.decode("utf-8", errors="replace")
+
+    def home_report(self, user: str) -> tuple:
+        """The home watch's last report (core/homed.py): ({path: sig}, home). ValueError."""
+        return homed.load_report(user, wall=time.time)
 
     def wg_listen_port(self, tunnel: str):
         """The net unit's last `wg show <tunnel> listen-port` (core/netd.py Reader)."""
@@ -1151,6 +1155,51 @@ def k_harden_check(c, cx: Cx) -> Res:
     return res
 
 
+# --- home-watch (sectop-home@<user>.service, core/homed.py) ---------------------------
+
+HOME_ACCEPT = "sudo ./install.sh --home-accept (the admin's sectop clone)"
+
+
+def k_home_watch(c, cx: Cx) -> Res:
+    """The start places in the desktop user's home as the admin accepted them (step 8b2,
+    2026-11-23): a new, changed or gone entry, a place that became unreadable (ACL taken
+    away), or no fresh report: fail (sev warn: yellow) until it is back or accepted. The
+    report comes from sectop-home, never from the desktop user."""
+    src = f"{c.path} + {homed.RUN_DIR}/<user>/{homed.FILE}"
+    try:
+        text = cx.host.read_owned(c.path)
+    except (ConfigError, OSError) as e:
+        return Res("unknown", (str(e) if isinstance(e, ConfigError) else _err(e))[:120], source=src)
+    if text is None:
+        res = Res("fail", "no accepted list", source=src)
+        res.lines = [("fix", HOME_ACCEPT)]
+        return res
+    try:
+        user, known = homed.parse_known(text)
+    except ValueError as e:
+        return Res("unknown", f"{c.path}: {e}"[:120], source=src)
+    try:
+        now, home = cx.host.home_report(user)
+    except ValueError as e:
+        res = Res("fail", str(e)[:120], source=src)
+        res.lines = [("fix", f"systemctl status sectop-home@{user}.service")]
+        return res
+    changes = homed.diff(known, now)
+    if not changes:
+        n_un = sum(1 for v in now.values() if v == homed.UNREADABLE)
+        return Res("pass", f"{len(now)} entries as accepted" + (f" ({n_un} unreadable)" if n_un else ""),
+                   source=src)
+    first = changes[0]
+    res = Res("fail", f"{len(changes)} changed: ~/{first[1]} ({first[0]})"[:120], source=src)
+    lines = [(kind, f"~/{path}" + (f" ({d})" if d else "")) for kind, path, d in changes]
+    tail = [("fix", f"seen and wanted: {HOME_ACCEPT}")]
+    shown = lines[:MAX_LINES - len(tail)]
+    if len(lines) > len(shown) and shown:
+        shown[-1] = ("more", f"{len(lines) - len(shown) + 1} more: {HOME_ACCEPT} shows all")
+    res.lines = shown + tail
+    return res
+
+
 # --- fwupd (silverblue-cis-hardening FIRMWARE_REPORTS=no) ------------------------
 
 REPORT_KEYS = ("ReportURI", "SecurityReportURI")
@@ -1218,6 +1267,7 @@ KINDS = {
     "fwupd-reports": k_fwupd_reports, "audit-load": k_audit_load,
     "auditd-logging": k_auditd_logging, "free-space": k_free_space,
     "setuid-known": k_setuid_known, "harden-check": k_harden_check,
+    "home-watch": k_home_watch,
 }
 
 
@@ -1263,7 +1313,8 @@ def want_text(c) -> str:
             "ostree-gpg": "all verify", "mac-local": "local MAC",
             "fwupd-reports": "no report address", "audit-load": "loaded, no error",
             "auditd-logging": "not suspended",
-            "setuid-known": "none new", "harden-check": "no change, all pass"}.get(k, "-")
+            "setuid-known": "none new", "harden-check": "no change, all pass",
+            "home-watch": "as accepted"}.get(k, "-")
 
 
 def check(c, cx: Cx, unit_names: list) -> Res:

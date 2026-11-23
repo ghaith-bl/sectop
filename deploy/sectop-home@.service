@@ -1,0 +1,66 @@
+# sectop home watch: the places in %i's home where a program can set itself to run again
+# (core/homed.py SPOTS): names + metadata (type, mode, owner, size, times, inode), never
+# content. Runs as system user sectop-home, not as %i: a program in %i's session cannot
+# write the report or stop this unit. Reads via ACL entries %i's account sets (x on the
+# path, r-x on the dirs: docs/install.md, Home watch). No capabilities, no network.
+# docs/architecture.md (Privilege split), docs/modules/posture.md (home-watch)
+[Unit]
+Description=sectop home watch for %i (start places in the home, names + metadata)
+Documentation=file:/usr/local/lib/sectop/docs/install.md
+After=sectop.service
+
+[Service]
+Type=exec
+User=sectop-home
+# primary group sectop-feed: the runtime dir and the report get it, the collector reads
+# them (SupplementaryGroups=). No member has it.
+Group=sectop-feed
+ExecStart=/usr/bin/python3 -I -B /usr/local/lib/sectop/bin/sectop-home %i
+Restart=on-failure
+RestartSec=5s
+RestartSteps=5
+RestartMaxDelaySec=5min
+# /run/sectop-home/%i: sectop-home:sectop-feed 0750, made by systemd
+RuntimeDirectory=sectop-home/%i
+RuntimeDirectoryMode=0750
+UMask=0027
+# the collector's state: never needed here ('-': fine when missing)
+InaccessiblePaths=-/run/sectop
+
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+
+# strict: every path read-only, the home included. No ProtectHome=: yes would hide the
+# home this unit reads; read-only adds bind mounts on /root and /run/user for nothing
+# (each one a mounton SELinux may refuse: docs/lessons-learned)
+ProtectSystem=strict
+PrivateTmp=yes
+PrivateDevices=yes
+DevicePolicy=closed
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+KeyringMode=private
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+MemoryMax=64M
+TasksMax=4
+
+[Install]
+WantedBy=multi-user.target

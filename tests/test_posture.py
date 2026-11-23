@@ -185,7 +185,12 @@ class FakeHost(kinds.Host):
         self.wg = {"wg0-mullvad": Result(0, "51250\n", "")}
         self.vfs = {"/var/log/audit": (4096, 12 * 2**18, 60 * 2**18)}   # frsize, free, size
         self.owned = {"/etc/sectop/setuid-known.txt": "# seen\n" + "".join(
-            f"{p}\n" for p in self.setuid)}
+            f"{p}\n" for p in self.setuid),
+            "/etc/sectop/home-known.txt": "# accepted\nuser\tnull\n"
+                                          "entry\t.bashrc\tf 644 1000 10 1 2 3\n"
+                                          "entry\t.config/autostart\td 755 1000 0 4 5 6\n"}
+        self.home = ({".bashrc": "f 644 1000 10 1 2 3",
+                      ".config/autostart": "d 755 1000 0 4 5 6"}, "/var/home/null")
         self.calls = []
 
     def read(self, path):
@@ -224,6 +229,12 @@ class FakeHost(kinds.Host):
         if isinstance(self.setuid, OSError):
             raise self.setuid
         return list(self.setuid), self.setuid_unread
+
+    def home_report(self, user):
+        self.calls.append(["home_report", user])
+        if isinstance(self.home, Exception):
+            raise self.home
+        return self.home
 
     def read_owned(self, path):
         v = self.owned.get(path)
@@ -975,6 +986,45 @@ class TestKinds(unittest.TestCase):
         h.setuid = PermissionError(13, "Permission denied")
         self.assertEqual(res(c, h), ("unknown", "/usr: Permission denied"))
         self.assertEqual(kinds.want_text(c), "none new")
+
+    def test_home_watch(self):
+        """Start places in the desktop home as accepted (step 8b2, 2026-11-23): new /
+        changed / gone / unreadable yellow until accepted; no report: yellow too."""
+        c = chk(kind="home-watch", path="/etc/sectop/home-known.txt")
+        h = FakeHost()
+        self.assertEqual(res(c, h), ("pass", "2 entries as accepted"))
+        self.assertIn(["home_report", "null"], h.calls)
+        files, home = h.home
+        files[".config/autostart/evil.desktop"] = "f 644 1000 90 7 8 9"
+        files[".bashrc"] = "f 644 1000 99 1 20 3"
+        r = kinds.check(c, cx(h), [])
+        self.assertEqual((r.status, r.have), ("fail", "2 changed: ~/.bashrc (changed)"))
+        self.assertEqual(r.lines[:2], [("changed", "~/.bashrc (size, ctime)"),
+                                       ("new", "~/.config/autostart/evil.desktop (file)")])
+        self.assertEqual(r.lines[-1][0], "fix")
+        self.assertIn("--home-accept", r.lines[-1][1])
+        # ACL taken away: unreadable, a change too
+        h.home = ({".bashrc": "unreadable", ".config/autostart": "unreadable"}, home)
+        r = kinds.check(c, cx(h), [])
+        self.assertEqual(r.lines[0], ("changed", "~/.bashrc (file -> unreadable)"))
+        # many: the fix line stays
+        h.home = ({f".local/bin/x{i:02d}": "f 755 1000 1 1 1 1" for i in range(30)}, home)
+        r = kinds.check(c, cx(h), [])
+        self.assertEqual(len(r.lines), kinds.MAX_LINES)
+        self.assertEqual(r.lines[-2][0], "more")
+        self.assertEqual(r.lines[-1][0], "fix")
+        h.home = ValueError("report 400 s old (sectop-home@null.service stuck?)")
+        r = kinds.check(c, cx(h), [])
+        self.assertEqual((r.status, r.have),
+                         ("fail", "report 400 s old (sectop-home@null.service stuck?)"))
+        self.assertIn("sectop-home@null.service", r.lines[0][1])
+        del h.owned[c.path]
+        self.assertEqual(res(c, h), ("fail", "no accepted list"))
+        h.owned[c.path] = "user\tnull\nwhat\n"
+        self.assertEqual(res(c, h)[0], "unknown")
+        h.owned[c.path] = ConfigError("/etc/sectop/home-known.txt: group/other writable")
+        self.assertEqual(res(c, h)[0], "unknown")
+        self.assertEqual(kinds.want_text(c), "as accepted")
 
     def test_real_read_owned(self):
         h = kinds.Host()

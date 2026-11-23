@@ -104,6 +104,7 @@ Summary `pass <n> | fail <n> | unknown <n> | accepted <n>`.
 | auditd-logging | - | auditd.service's own journal lines this boot: no `suspending logging` / `logging suspended` / `Could not reopen a log after resume` after the last `Init complete, auditd` or `resume logging` line. Detail: the space / write-error lines |
 | setuid-known | path | every setuid / setgid file under /usr (the `audit-rules` scan, once per start) is on the list in path (root-owned, not group / other writable, no symlink: core/config.py `read_file`; one path per line, `#` comments; read every collect). Not on it: fail, `new` lines + fix hint. On it, not under /usr: `gone` lines only. No list: fail. Unsafe list: unknown |
 | harden-check | path | the last result of silverblue-privacy-hardening's root drift check (aidecheck.service: `aide --check`, then `harden-check`; read like setuid-known: root-owned, not group / other writable). Lines `time`, `check<TAB>id<TAB>status<TAB>summary`, `item<TAB>id<TAB>text`. A failed check: fail, have = its summary, detail = failed / not checked checks and their items, `more` when cut, a fix hint (`sudo harden-check --accept`) when `aide` fails. Older than 26 h: fail, unknown in the first 15 min after boot (the timer runs 5 min after boot). No result: fail |
+| home-watch | path | the home watch's report (sectop-home@<user>.service, `/run/sectop-home/<user>/report.json`, owner sectop-home, max 180 s old) against the accepted list in path (root-owned, like setuid-known; lines `user<TAB>name`, `entry<TAB>path<TAB>sig`). New / changed / gone / unreadable entries: fail, have = count + the first, detail = each (`changed` names the fields: mode, size, ctime, link target, ...), `more` when cut, fix hint `--home-accept`. No list or no fresh report: fail. Unsafe list: unknown |
 | free-space | path, min_mb | `statvfs(path)`: free blocks for users (`f_bavail`) x `f_frsize` >= min_mb MiB. Search on the parent folders is enough (`/var/log/audit` itself is root 0700) |
 
 Limits: 100 checks, 64 items per list / table, paths `A-Z a-z 0-9 _ . @ % + : / -`
@@ -113,7 +114,7 @@ without `..`.
 
 From silverblue-cis-hardening (harden-workstation.sh, docs/deviations.md,
 docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agreed
-2026-10-26. 75 checks.
+2026-10-26. 76 checks.
 
     crit  SELinux enforcing now; audit=1 + backlog in kernel args; audit not switched
           off; auditd, firewalld running; auditd not suspended; firewalld zone drop; only root UID 0; wheel =
@@ -123,7 +124,8 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
     warn  SELinux config enforcing + targeted; audit rules >= 53 + 2 per setuid file; audit locked
           (-e 2); audit rules loaded without an error; >= 2 GiB free on /var; no setuid
           / setgid program I have not seen; no file changed since I accepted it and
-          the root checks pass (harden-check, daily); firmware metadata every second day; journald audit
+          the root checks pass (harden-check, daily); start places in the desktop home
+          as accepted (home-watch); firmware metadata every second day; journald audit
           socket; su closed (sugroup empty, pam_wheel); faillock 5 / 900 s; pwquality 15
           / 4 classes; login.defs min age >= 1 (new accounts: existing ones are in
           /etc/shadow, root only); shadow, gshadow, passwd, group perms; sysctls of
@@ -268,3 +270,9 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
   `harden-check` (warn) reads it. Any changed file stays yellow until the admin accepts
   it (`sudo harden-check --accept`), changes an OS update explains are grouped, not
   hidden.
+- Start places in the daily home (2026-11-23, step 8b2, asked by me): autostart, user
+  units, shell files, PATH dirs, ... `home-watch` (warn) compares the home watch's report
+  (sectop-home@<daily>, names + metadata) with the list the admin accepted
+  (`sudo ./install.sh --home-accept`). silverblue-privacy-hardening's homelock section
+  makes the unused places immutable (nothing new there), so a change there is rare and
+  loud; the places in use (~/.local/bin, desktop files, ~/.ssh, git config) are watched.

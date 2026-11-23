@@ -114,6 +114,17 @@ sev = "warn"
 why = "no file changed since accepted (AIDE), boot files = image, root-only values as set"
 path = "/var/lib/harden-check/result"
 
+# sectop home watch (sectop-home@<user>.service): the places in the desktop user's home a
+# program can set itself to run again from (autostart, user units, shell files, PATH dirs,
+# ...), names + metadata. New / changed / gone / unreadable: yellow until the admin accepts
+# it (install.sh --home-accept). Step 8b2, 2026-11-23.
+[[check]]
+id = "home-watch"
+kind = "home-watch"
+sev = "warn"
+why = "start places in the desktop home as accepted (autostart, units, shell files)"
+path = "/etc/sectop/home-known.txt"
+
 # warn long before auditd's own limits: the log ring can still grow to 40 x 32 MiB
 [[check]]
 id = "audit-space"

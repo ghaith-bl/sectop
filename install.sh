@@ -6,11 +6,13 @@
 #   sudo ./install.sh --desktop-user NAME   same, user helper for NAME (two accounts)
 #   sudo ./install.sh --check               requirements only, changes nothing
 #   sudo ./install.sh --setuid-accept       new setuid / setgid programs seen: on my list
+#   sudo ./install.sh --home-accept         start places in the desktop home as now: accepted
 #   sudo ./install.sh --remove              stop + remove units, code, launcher, sysusers file
 #
 # Users: the one running sudo is the admin: member of group sectop (reads the UI state,
 # whois), its name in the posture default (wheel, sectop, mullvad: "@admin"). The desktop
-# user (GNOME session) gets the user helper sectop-user@NAME.service and no sectop group.
+# user (GNOME session) gets the user helper sectop-user@NAME.service and no sectop group;
+# its home's start places are watched by sectop-home@NAME.service (user sectop-home).
 # One account: no --desktop-user, both are the sudo user.
 #
 # Why: code a service runs must not be writable by my user (docs/architecture.md,
@@ -22,7 +24,7 @@ set -euo pipefail
 DEST=/usr/local/lib/sectop
 BIN=/usr/local/bin/sectop
 UNIT_DIR=/etc/systemd/system
-UNITS=(sectop-net.service sectop.service sectop-whois.socket sectop-whois@.service sectop-user@.service)
+UNITS=(sectop-net.service sectop.service sectop-whois.socket sectop-whois@.service sectop-user@.service sectop-home@.service)
 SYSUSERS=/etc/sysusers.d/sectop.conf
 CONF=/etc/sectop
 SETUID_LIST=$CONF/setuid-known.txt
@@ -39,10 +41,11 @@ remove() {
     >/dev/null 2>&1 || true
   local inst
   for inst in $(systemctl list-units --all --plain --no-legend 'sectop-user@*.service' \
-                  | awk '{print $1}'); do
+                  'sectop-home@*.service' | awk '{print $1}'); do
     systemctl disable --now "$inst" >/dev/null 2>&1 || true
   done
-  rm -f "$UNIT_DIR"/multi-user.target.wants/sectop-user@*.service
+  rm -f "$UNIT_DIR"/multi-user.target.wants/sectop-user@*.service \
+        "$UNIT_DIR"/multi-user.target.wants/sectop-home@*.service
   local u
   for u in "${UNITS[@]}"; do rm -f "$UNIT_DIR/$u"; done
   systemctl daemon-reload
@@ -50,8 +53,9 @@ remove() {
   rm -rf "$DEST"
   rm -f "$SYSUSERS"
   log "removed: units, $DEST, $BIN, $SYSUSERS"
-  log "kept: $CONF; users sectop, sectop-net and groups sectop, sectop-feed"
-  log "  (by hand: userdel sectop; userdel sectop-net; groupdel sectop; groupdel sectop-feed)"
+  log "kept: $CONF; users sectop, sectop-net, sectop-home and groups sectop, sectop-feed"
+  log "  (by hand: userdel sectop; userdel sectop-net; userdel sectop-home; groupdel sectop;"
+  log "  groupdel sectop-feed; the desktop user: setfacl -R -x u:sectop-home on its home)"
 }
 
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -141,7 +145,7 @@ install_users() {  # $1 = admin (only member of group sectop added here)
   mv "$SYSUSERS.tmp" "$SYSUSERS"
   relabel "$SYSUSERS"
   systemd-sysusers "$SYSUSERS"
-  log "users: $(id sectop), $(id sectop-net)"
+  log "users: $(id sectop), $(id sectop-net), $(id sectop-home)"
 }
 
 put_default() {    # $1 = watch | posture: deploy/$1.toml -> $CONF/$1.toml when missing
@@ -234,8 +238,18 @@ setuid_accept() {
   fi
 }
 
-install_units() {  # $1 = desktop user: its user helper (sectop-user@<user>.service)
-  local u inst helper=sectop-user@$1.service
+# --home-accept: what differs from the accepted list (core/homed.py accept), y = the list
+# is the home watch's report now. Root reads the report in /run, never the home.
+home_accept() {
+  [[ -d $CONF ]] || die "no $CONF: install first"
+  [[ -f $DEST/bin/sectop-home ]] || die "no $DEST/bin/sectop-home: install first"
+  /usr/bin/python3 -I -B "$DEST/bin/sectop-home" --accept
+  [[ -f $CONF/home-known.txt ]] && relabel "$CONF/home-known.txt"
+  return 0
+}
+
+install_units() {  # $1 = desktop user: its user helper + home watch
+  local u inst helper=sectop-user@$1.service watch=sectop-home@$1.service
   for u in "${UNITS[@]}"; do
     install -m 0644 -o root -g root "$DEST/deploy/$u" "$UNIT_DIR/$u"
   done
@@ -243,16 +257,17 @@ install_units() {  # $1 = desktop user: its user helper (sectop-user@<user>.serv
   systemctl daemon-reload
   # one helper: another desktop user's instance (older install) goes
   for inst in $( { systemctl list-units --all --plain --no-legend 'sectop-user@*.service' \
-                     | awk '{print $1}'
-                   find "$UNIT_DIR/multi-user.target.wants" -maxdepth 1 \
-                     -name 'sectop-user@*.service' -printf '%f\n' 2>/dev/null; } | sort -u); do
-    [[ $inst == "$helper" ]] && continue
+                     'sectop-home@*.service' | awk '{print $1}'
+                   find "$UNIT_DIR/multi-user.target.wants" -maxdepth 1 \( \
+                     -name 'sectop-user@*.service' -o -name 'sectop-home@*.service' \) \
+                     -printf '%f\n' 2>/dev/null; } | sort -u); do
+    [[ $inst == "$helper" || $inst == "$watch" ]] && continue
     systemctl disable --now "$inst" >/dev/null 2>&1 || true
     log "$inst stopped + disabled (desktop user is now $1)"
   done
-  systemctl enable sectop-net.service sectop.service sectop-whois.socket "$helper" >/dev/null
-  systemctl restart sectop-net.service sectop.service sectop-whois.socket "$helper"
-  for u in sectop-net.service sectop.service sectop-whois.socket "$helper"; do
+  systemctl enable sectop-net.service sectop.service sectop-whois.socket "$helper" "$watch" >/dev/null
+  systemctl restart sectop-net.service sectop.service sectop-whois.socket "$helper" "$watch"
+  for u in sectop-net.service sectop.service sectop-whois.socket "$helper" "$watch"; do
     if systemctl is-active --quiet "$u"; then
       log "$u active"
     else
@@ -288,12 +303,13 @@ main() {
   [[ ${1:-} == --remove ]] && { remove; return; }
   [[ ${1:-} == --check ]] && { preflight; return; }
   [[ ${1:-} == --setuid-accept ]] && { [[ $# -eq 1 ]] || die "usage: sudo $0 --setuid-accept"; setuid_accept; return; }
+  [[ ${1:-} == --home-accept ]] && { [[ $# -eq 1 ]] || die "usage: sudo $0 --home-accept"; home_accept; return; }
   local desktop=""
   if [[ ${1:-} == --desktop-user ]]; then
     [[ $# -eq 2 ]] || die "usage: sudo $0 --desktop-user NAME"
     desktop=$2; shift 2
   fi
-  [[ $# -eq 0 ]] || die "usage: sudo $0 [--desktop-user NAME | --check | --remove | --setuid-accept]"
+  [[ $# -eq 0 ]] || die "usage: sudo $0 [--desktop-user NAME | --check | --remove | --setuid-accept | --home-accept]"
   local user=${SUDO_USER:-} repo
   [[ $user =~ $USER_RE && $user != root ]] \
     || die "run with sudo from your login (SUDO_USER missing or root)"
@@ -319,7 +335,11 @@ main() {
     log "UI: $user is new in group sectop: log out and in once, then: sectop"
   fi
   log "check: systemd-analyze security sectop.service sectop-net.service sectop-whois@x.service"
-  log "       systemd-analyze security sectop-user@$desktop.service"
+  log "       systemd-analyze security sectop-user@$desktop.service sectop-home@$desktop.service"
+  if [[ ! -e $CONF/home-known.txt ]]; then
+    log "home watch: $desktop's account gives sectop-home read access (docs/install.md, Home"
+    log "  watch), then the first list: sudo ./install.sh --home-accept"
+  fi
 }
 
 main "$@"

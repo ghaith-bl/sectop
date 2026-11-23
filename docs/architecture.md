@@ -619,6 +619,8 @@ Design (least privilege: NIST SP 800-53 / 800-171 AC-6, systemd.exec(5), capabil
     sectop-whois.socket  one sectop-whois@.service per lookup, DynamicUser (sectop-whois), RDAP only
     sectop-user@<daily>  desktop user, group sectop-feed, no caps, no network
                          -> /run/sectop-user/<daily>/
+    sectop-home@<daily>  user sectop-home, group sectop-feed, no caps, no network
+                         -> /run/sectop-home/<daily>/report.json
     sectop (UI)          admin user, no sudo, group sectop: reads /run/sectop/state.json
 
 - Collector = system service started by systemd, not from my login. loginuid stays
@@ -665,6 +667,13 @@ Design (least privilege: NIST SP 800-53 / 800-171 AC-6, systemd.exec(5), capabil
   `/run/sectop-user/<daily>/socks.json`. Collector: socket inode (`ss -e`) -> process,
   display only (the user can write anything there, a process sets its own comm): never
   a check.
+- Home watch (2026-11-23, step 8b2): the daily home's start places (core/homed.py), names
+  + metadata, never content. Not the user helper: a program running as the daily user
+  could rewrite its file. System user `sectop-home` reads through ACL entries the daily
+  account sets (x on the path, r-x on the watched dirs), writes the report; the daily user
+  can neither write it nor stop the unit. ctime is the change signal (not settable by a
+  user, needs no read access to the file). Accepted list `/etc/sectop/home-known.txt`:
+  only `install.sh --home-accept` (root, reads the report, never the home).
 - Helper -> collector channel (2026-11-05): group `sectop-feed`, no members.
   `Group=sectop-feed` in the helper unit (primary group: systemd makes the runtime dir
   `<daily>:sectop-feed` 0750, new files 0640 get the group, the helper chowns nothing),

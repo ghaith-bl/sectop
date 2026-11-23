@@ -3,7 +3,10 @@
 #   m <admin user> sectop     (the UI reads /run/sectop, connects to the whois socket)
 # sectop-feed: no members. The user helper's unit Group= and the collector's
 # SupplementaryGroups=: the helper -> collector channel (/run/sectop-user/<user>/).
+# sectop-home: the home watch (sectop-home@<user>.service), reads the desktop user's start
+# places through ACL entries, writes /run/sectop-home/<user>/ for the collector.
 g sectop      -
 g sectop-feed -
 u sectop      -:sectop  "sectop collector"  -  -
 u sectop-net  -:sectop  "sectop net unit"   -  -
+u sectop-home -:sectop-feed "sectop home watch" - -

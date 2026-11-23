@@ -8,6 +8,7 @@ sectop runs as separate parts (docs/architecture.md, Privilege split):
 | sectop.service (collector) | sectop | groups systemd-journal + sectop-feed, no capabilities, no network | /run/sectop/state.json |
 | sectop-whois.socket + sectop-whois@.service | dynamic, per lookup | network only | the answer, on the socket |
 | sectop-user@<desktop user>.service | desktop user, group sectop-feed (unit `Group=`) | no capabilities, no network; reads its own processes' fds in GNOME Shell's cgroup | /run/sectop-user/<desktop user>/socks.json |
+| sectop-home@<desktop user>.service | sectop-home, group sectop-feed | no capabilities, no network; lstat + list of the desktop home's start places (ACL entries the desktop user sets), never file content | /run/sectop-home/<desktop user>/report.json |
 | sectop (UI) | admin (the sudo user), no sudo | group sectop: reads /run/sectop, connects to the whois socket | nothing |
 
 Two accounts (admin on the text console, daily user in GNOME, no sudo):
@@ -96,11 +97,41 @@ after that only this option changes it. It lists every new program with its pack
 (`rpm -qf`), owner and mode, and every one that left, then asks; y = the list is /usr now.
 Posture `setuid-known` is yellow while a program is not on the list.
 
+## Home watch
+
+Posture `home-watch`: the places in the desktop user's home a program can set itself to
+run again from (core/homed.py `SPOTS`: autostart, user units and manager config,
+environment.d, shell start files, ~/bin and ~/.local/bin, D-Bus services, GNOME Shell
+extensions, Files scripts, completions, desktop files, podman, git config, ~/.ssh, ...).
+Type, mode, owner, size, mtime, ctime, inode, link target; never content. Changed /
+new / gone / unreadable: yellow until the admin accepts it.
+
+Read access: user sectop-home needs `x` on each folder on the way and `r-x` on the
+watched folders, given by the desktop user's own account (root never reads the home).
+silverblue-privacy-hardening's `homelock` section sets it; by hand, as the desktop user:
+
+    setfacl -m u:sectop-home:x ~ ~/.config ~/.local ~/.local/share
+    setfacl -m u:sectop-home:rx ~/.config/autostart ~/.local/bin   # each watched folder
+
+Without it every place shows `unreadable` (the row still works: an ACL taken away later
+shows as a change). The home's mode shows 710 then (ACL mask), group still gets nothing.
+
+First list and every change seen:
+
+    sudo ./install.sh --home-accept
+
+Lists what differs from `/etc/sectop/home-known.txt` (root:sectop 0640), then asks; y =
+the list is the report now. Root reads the report in /run, not the home.
+Limit: a program running as the desktop user can change a place (shown) or take the
+access away (shown), not the report; one running as root can do anything (silverblue-
+privacy-hardening AIDE watches `/etc/sectop`).
+
 ## Remove
 
     sudo ./install.sh --remove
 
-Stops and removes the units (every sectop-user@ instance too), `/usr/local/lib/sectop`,
+Stops and removes the units (every sectop-user@ / sectop-home@ instance too), `/usr/local/lib/sectop`,
 the launcher and the sysusers file.
-Kept: `/etc/sectop`, users sectop / sectop-net and groups sectop / sectop-feed
-(`userdel sectop; userdel sectop-net; groupdel sectop; groupdel sectop-feed` by hand).
+Kept: `/etc/sectop`, users sectop / sectop-net / sectop-home and groups sectop /
+sectop-feed (`userdel sectop; userdel sectop-net; userdel sectop-home; groupdel sectop;
+groupdel sectop-feed` by hand; the desktop user: `setfacl -R -x u:sectop-home ~`).

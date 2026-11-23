@@ -66,6 +66,7 @@ KINDS = {
     "free-space": ({"path", "min_mb"}, set()),
     "setuid-known": ({"path"}, set()),
     "harden-check": ({"path"}, set()),
+    "home-watch": ({"path"}, set()),
 }
 MAX_CHECKS = 100
 MAX_ITEMS = 64                      # values / units / lines / allow / want lists

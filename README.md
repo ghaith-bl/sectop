@@ -41,11 +41,14 @@ Public IPs masked (key m), the way the screens start.
 
 ## Security model
 
-- Four services, none as root: `sectop-net` (CAP_NET_ADMIN only, no network: `nft`,
+- Five services, none as root: `sectop-net` (CAP_NET_ADMIN only, no network: `nft`,
   `wg`), `sectop` collector (group systemd-journal, no capabilities, no network),
   `sectop-whois@` (dynamic user, network only, one RDAP lookup per connection),
   `sectop-user@<desktop user>` (no capabilities, no network, group sectop-feed only:
-  names the processes in GNOME Shell's shared cgroup, display only)
+  names the processes in GNOME Shell's shared cgroup, display only),
+  `sectop-home@<desktop user>` (user sectop-home, no capabilities, no network: names +
+  metadata of the start places in the desktop home, never content; the desktop user
+  cannot write its report)
 - Two accounts supported (`--desktop-user`): the UI runs as the admin (text console),
   no sudo, reads only /run/sectop (group sectop) and validates every field before
   drawing it. The daily GNOME user holds no sectop group
@@ -147,11 +150,13 @@ terminal, else the 8 basic colors.
     sudo ./install.sh --desktop-user <daily user>   # admin + daily account
     sudo ./install.sh --remove
     sudo ./install.sh --setuid-accept   # new setuid / setgid programs seen: on my list
+    sudo ./install.sh --home-accept     # start places in the desktop home as now: accepted
 
 First install: log out and in once (the sudo user joins group sectop).
 
 Parts: sectop-net.service (nft / wg, CAP_NET_ADMIN only), sectop.service (collector),
-sectop-whois.socket (RDAP), sectop-user@ (desktop user helper), UI as the sudo user.
+sectop-whois.socket (RDAP), sectop-user@ (desktop user helper), sectop-home@ (home
+watch), UI as the sudo user.
 See docs/install.md.
 
 ## Run

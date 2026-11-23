@@ -7,13 +7,13 @@ import sys
 import tempfile
 import unittest
 
-from core import app, collector, lookup, netd, userd
+from core import app, collector, homed, lookup, netd, userd
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEPLOY = os.path.join(ROOT, "deploy")
 PREFIX = "/usr/local/lib/sectop/"
 SERVICES = ("sectop.service", "sectop-net.service", "sectop-whois@.service",
-            "sectop-user@.service")
+            "sectop-user@.service", "sectop-home@.service")
 
 
 def unit(name: str) -> dict:
@@ -44,7 +44,9 @@ class TestUnits(unittest.TestCase):
         self.assertIn(["g", "sectop-feed", "-"], lines)
         self.assertNotIn("m", {ln[0] for ln in lines})        # members: install.sh only
         users = {ln[1]: ln[2] for ln in lines if ln[0] == "u"}
-        self.assertEqual(users, {"sectop": "-:sectop", "sectop-net": "-:sectop"})
+        self.assertEqual(users, {"sectop": "-:sectop", "sectop-net": "-:sectop",
+                                 "sectop-home": "-:sectop-feed"})
+        self.assertEqual(homed.OWNER, "sectop-home")
         self.assertEqual((app.COLLECTOR_USER, netd.NET_USER), ("sectop", "sectop-net"))
         c, n = svc("sectop.service"), svc("sectop-net.service")
         self.assertEqual((c["User"], c["Group"], n["User"], n["Group"]),
@@ -76,7 +78,8 @@ class TestUnits(unittest.TestCase):
         n = svc("sectop-net.service")
         self.assertEqual((n["AmbientCapabilities"], n["CapabilityBoundingSet"]),
                          ("CAP_NET_ADMIN", "CAP_NET_ADMIN"))
-        for name in ("sectop.service", "sectop-whois@.service", "sectop-user@.service"):
+        for name in ("sectop.service", "sectop-whois@.service", "sectop-user@.service",
+                     "sectop-home@.service"):
             s = svc(name)
             self.assertEqual((s["AmbientCapabilities"], s["CapabilityBoundingSet"]), ("", ""),
                              name)
@@ -91,6 +94,10 @@ class TestUnits(unittest.TestCase):
         for name in SERVICES:
             s = svc(name)
             for k, v in want.items():
+                if name == "sectop-home@.service" and k == "ProtectHome":
+                    # reads the home: strict makes it read-only; no bind mounts (lessons)
+                    self.assertNotIn(k, s)
+                    continue
                 self.assertEqual(s.get(k), v, f"{name} {k}")
             self.assertEqual(unit(name)["Service"]["SystemCallFilter"][0], "@system-service")
 
@@ -99,7 +106,7 @@ class TestUnits(unittest.TestCase):
         user helper sees its own user's (fd of the shared cgroup, 2026-11-03)."""
         self.assertEqual(svc("sectop.service")["ProtectProc"], "default")
         self.assertEqual(svc("sectop-user@.service")["ProtectProc"], "default")
-        for name in ("sectop-net.service", "sectop-whois@.service"):
+        for name in ("sectop-net.service", "sectop-whois@.service", "sectop-home@.service"):
             self.assertEqual(svc(name)["ProtectProc"], "invisible", name)
         self.assertNotIn("CAP_SYS_PTRACE", svc("sectop.service").get("CapabilityBoundingSet",
                                                                       ""))
@@ -135,11 +142,28 @@ class TestUnits(unittest.TestCase):
     def test_restart_backoff(self):
         """2026-11-06: a helper that can never start was restarted every 5 s (169 times
         in 30 min). Long-running units back off to 5 min instead of giving up."""
-        for name in ("sectop.service", "sectop-net.service", "sectop-user@.service"):
+        for name in ("sectop.service", "sectop-net.service", "sectop-user@.service",
+                     "sectop-home@.service"):
             s = svc(name)
             self.assertEqual((s["Restart"], s["RestartSec"], s["RestartSteps"],
                               s["RestartMaxDelaySec"]),
                              ("on-failure", "5s", "5", "5min"), name)
+
+    def test_home_watch(self):
+        """sectop-home@<user>.service (step 8b2): system user sectop-home, never the
+        desktop user (%i is only the argument), group sectop-feed, no network."""
+        h = svc("sectop-home@.service")
+        self.assertEqual((h["User"], h["Group"], h["RuntimeDirectory"],
+                          h["RuntimeDirectoryMode"], h["UMask"]),
+                         (homed.OWNER, homed.GROUP, "sectop-home/%i", "0750", "0027"))
+        self.assertEqual(homed.RUN_DIR, "/run/sectop-home")
+        self.assertTrue(h["ExecStart"].endswith("/bin/sectop-home %i"))
+        self.assertNotIn("SupplementaryGroups", h)
+        self.assertEqual((h["PrivateNetwork"], h["IPAddressDeny"], h["RestrictAddressFamilies"]),
+                         ("yes", "any", "AF_UNIX"))
+        self.assertEqual(h["InaccessiblePaths"], "-" + os.path.dirname(collector.STATE_PATH))
+        for k in ("ReadWritePaths", "ReadOnlyPaths", "BindPaths", "BindReadOnlyPaths"):
+            self.assertNotIn(k, h)                            # no mounton (lessons)
 
     def test_user_helper_hides_reader_paths(self):
         """2026-11-05 account split: the helper runs as the desktop user, who must not
@@ -171,9 +195,12 @@ class TestLaunchers(unittest.TestCase):
             r = self.run_bin(name, "x")                         # args refused before anything
             self.assertEqual(r.returncode, 2, r.stderr)
             self.assertIn(f"usage: {name}", r.stderr)
+        r = self.run_bin("sectop-home", "x", "y")               # one user name only
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("usage: sectop-home USER", r.stderr)
 
     def test_executable_and_shebang(self):
-        for name in ("sectop", "sectop-collector", "sectop-net", "sectop-user"):
+        for name in ("sectop", "sectop-collector", "sectop-net", "sectop-user", "sectop-home"):
             p = os.path.join(ROOT, "bin", name)
             self.assertTrue(os.access(p, os.X_OK), name)
             with open(p, encoding="ascii") as f:
