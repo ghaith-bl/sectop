@@ -395,7 +395,44 @@ id = "kspp-kargs"
 kind = "cmdline"
 sev = "warn"
 why = "KSPP kernel args: hashed pointers, no forced mem writes, signed modules, IOMMU, no debugfs / mounted-disk writes"
-want = ["hash_pointers=always", "proc_mem.force_override=never", "module.sig_enforce=1", "intel_iommu=on", "debugfs=off", "bdev_allow_write_mounted=0"]
+want = ["hash_pointers=always", "proc_mem.force_override=never", "module.sig_enforce=1", "debugfs=off", "bdev_allow_write_mounted=0"]
+
+# IOMMU against DMA from devices (silverblue-privacy-hardening kargs IOMMU=vendor +
+# EARLY_PCI_DMA_OFF=yes, 2026-11-24, KSPP). Read from sysfs / proc as user sectop (the
+# kernel log needs root: the admin checks "DMAR: IOMMU enabled" there). No groups = the
+# IOMMU is off (firmware VT-d off or the arg gone): crit. The args work from the next boot.
+[[check]]
+id = "iommu-vendor"
+kind = "iommu-vendor"
+sev = "warn"
+why = "IOMMU on for this CPU (kernel arg of the vendor)"
+
+[[check]]
+id = "iommu-no-passthrough"
+kind = "cmdline"
+sev = "warn"
+why = "no device skips the IOMMU (kernel arg)"
+want = ["iommu.passthrough=0"]
+
+[[check]]
+id = "iommu-groups"
+kind = "iommu-groups"
+sev = "crit"
+why = "every device behind the IOMMU, strict (group type DMA)"
+want = "DMA"
+
+[[check]]
+id = "irq-remap"
+kind = "irq-remap"
+sev = "warn"
+why = "interrupt remapping on (no forged device interrupts)"
+
+[[check]]
+id = "early-pci-dma"
+kind = "cmdline"
+sev = "warn"
+why = "no device DMA before the IOMMU is up (kernel arg, trial)"
+want = ["efi=disable_early_pci_dma"]
 
 # Secure Boot on since step 9 (2026-10-26). Off again = switched off in the firmware
 # setup (admin password): crit. Lockdown follows it: warn, one alert is enough.

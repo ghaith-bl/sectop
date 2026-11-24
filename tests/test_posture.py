@@ -119,7 +119,15 @@ class FakeHost(kinds.Host):
                              "rd.emergency=halt init_on_free=1 iommu.strict=1 "
                              "hash_pointers=always proc_mem.force_override=never "
                              "module.sig_enforce=1 intel_iommu=on debugfs=off "
-                             "bdev_allow_write_mounted=0 systemd.ssh_auto=no\n",
+                             "bdev_allow_write_mounted=0 systemd.ssh_auto=no "
+                             "iommu.passthrough=0 efi=disable_early_pci_dma\n",
+            # IOMMU (host 2026-11-24: Alder Lake-P, x2apic IRQ remapping, 16 groups DMA)
+            "/proc/cpuinfo": "processor\t: 0\nvendor_id\t: GenuineIntel\ncpu family\t: 6\n",
+            "/proc/interrupts": ("            CPU0       CPU1\n"
+                                 "   1:          0          0  IR-IO-APIC    1-edge      i8042\n"
+                                 " 140:          0         12  IR-PCI-MSIX-0000:00:14.3    0-edge"
+                                 "      iwlwifi:default_queue\n"
+                                 " NMI:          0          0   Non-maskable interrupts\n"),
             "/etc/security/faillock.conf": "# deny = 3\ndeny = 5\nunlock_time = 900\n",
             "/etc/security/pwquality.conf": "minlen = 15\nminclass = 4\nenforce_for_root\n",
             "/etc/login.defs": "#\tPASS_MIN_DAYS\tMinimum number of days allowed\n"
@@ -145,6 +153,7 @@ class FakeHost(kinds.Host):
             "/sys/class/net/wlan0/address": "02:00:00:00:00:01\n",
             "/sys/class/net/eth0/type": "1\n", "/sys/class/net/eth0/operstate": "down\n",
             "/sys/class/net/eth0/address": "00:00:5e:00:53:01\n",
+            **{f"/sys/kernel/iommu_groups/{g}/type": "DMA\n" for g in range(16)},
             # Thunderbolt 4 port (host 2026-11-24)
             "/sys/bus/thunderbolt/devices/domain0/security": "user\n",
             "/sys/bus/thunderbolt/devices/domain0/iommu_dma_protection": "1\n",
@@ -153,7 +162,8 @@ class FakeHost(kinds.Host):
         self.dirs = {"/sys/block": ["dm-0", "nvme0n1"], "/sys/block/dm-0/slaves": ["nvme0n1p3"],
                      "/etc/ostree/remotes.d": ["fedora.conf", "README"],
                      "/sys/class/net": ["eth0", "lo", "virbr0", "wg0-mullvad", "wlan0"],
-                     "/sys/class/net/eth0/device": [], "/sys/class/net/wlan0/device": []}
+                     "/sys/class/net/eth0/device": [], "/sys/class/net/wlan0/device": [],
+                     "/sys/kernel/iommu_groups": [str(g) for g in range(16)]}
         self.stats = {"/etc/shadow": (0o100000, 0, 0), "/etc/passwd": (0o100644, 0, 0)}
         self.setuid = [f"/usr/bin/s{i:02d}" for i in range(27)]   # host 2026-11-16: 27
         self.setuid_unread = 0
@@ -332,6 +342,50 @@ class TestKinds(unittest.TestCase):
             if p.startswith("/sys/bus/thunderbolt/"):
                 del h.files[p]
         self.assertEqual(res(rows["thunderbolt-level"], h), ("fail", "missing"))
+
+    def test_iommu_rows(self):
+        """Deploy rows of the IOMMU (2026-11-24): vendor arg, no passthrough, groups DMA,
+        IRQ remapping, early PCI DMA off."""
+        with open(DEPLOY, "rb") as f:
+            rows = {c.id: c for c in policy.parse(f.read(), DEPLOY)
+                    if c.id in ("iommu-vendor", "iommu-no-passthrough", "iommu-groups",
+                                "irq-remap", "early-pci-dma")}
+        self.assertEqual(len(rows), 5)
+        self.assertEqual(res(rows["iommu-vendor"]), ("pass", "intel_iommu=on"))
+        self.assertEqual(res(rows["iommu-no-passthrough"]), ("pass", "iommu.passthrough=0"))
+        self.assertEqual(res(rows["iommu-groups"]), ("pass", "16 groups: 16 DMA"))
+        self.assertEqual(res(rows["irq-remap"]), ("pass", "2 IR- interrupt lines"))
+        self.assertEqual(res(rows["early-pci-dma"]), ("pass", "efi=disable_early_pci_dma"))
+        self.assertEqual(kinds.want_text(rows["iommu-groups"]), "every type DMA")
+        # before the reboot of step 10b: only the old args
+        h = FakeHost()
+        h.files["/proc/cmdline"] = h.files["/proc/cmdline"].replace(
+            " iommu.passthrough=0 efi=disable_early_pci_dma", "")
+        self.assertEqual(res(rows["iommu-no-passthrough"], h), ("fail", "missing iommu.passthrough=0"))
+        self.assertEqual(res(rows["early-pci-dma"], h), ("fail", "missing efi=disable_early_pci_dma"))
+        # AMD: its own arg; another vendor: unknown
+        h.files["/proc/cpuinfo"] = "vendor_id\t: AuthenticAMD\n"
+        self.assertEqual(res(rows["iommu-vendor"], h), ("fail", "missing amd_iommu=force_isolation"))
+        h.files["/proc/cmdline"] += " amd_iommu=force_isolation"
+        self.assertEqual(res(rows["iommu-vendor"], h), ("pass", "amd_iommu=force_isolation"))
+        h.files["/proc/cpuinfo"] = "vendor_id\t: CentaurHauls\n"
+        self.assertEqual(res(rows["iommu-vendor"], h), ("unknown", "CPU vendor CentaurHauls: no arg known"))
+        # lazy flush in one group, identity in another
+        h.files["/sys/kernel/iommu_groups/3/type"] = "DMA-FQ\n"
+        h.files["/sys/kernel/iommu_groups/7/type"] = "identity\n"
+        r = kinds.check(rows["iommu-groups"], cx(h), [])
+        self.assertEqual((r.status, r.have), ("fail", "16 groups: 14 DMA, 1 DMA-FQ, 1 identity"))
+        self.assertEqual(r.lines, [("group 3", "DMA-FQ"), ("group 7", "identity")])
+        # IOMMU off: no groups
+        h.dirs["/sys/kernel/iommu_groups"] = []
+        self.assertEqual(res(rows["iommu-groups"], h), ("fail", "no IOMMU groups (IOMMU off)"))
+        del h.dirs["/sys/kernel/iommu_groups"]
+        self.assertEqual(res(rows["iommu-groups"], h), ("fail", "no IOMMU groups (IOMMU off)"))
+        # no remapping: plain chip names
+        h.files["/proc/interrupts"] = h.files["/proc/interrupts"].replace("IR-", "")
+        self.assertEqual(res(rows["irq-remap"], h), ("fail", "no IR- interrupt"))
+        h.denied.add("/proc/interrupts")
+        self.assertEqual(res(rows["irq-remap"], h)[0], "unknown")
 
     def test_file_sep_space(self):
         """login.defs: KEY, spaces / tabs, value (2026-11-18, pwage min age)."""
@@ -1140,7 +1194,7 @@ class TestModule(unittest.TestCase):
                                 "auditd-active", "firewalld-active", "firewalld-zone", "uid0",
                                 "wheel", "luks-var", "ostree-locked", "ostree-gpg", "listeners",
                                 "secure-boot", "mac-random", "hostname", "fwupd-no-reports",
-                                "auditd-logging"})
+                                "auditd-logging", "iommu-groups"})
         refs = {c.id for c in checks if c.ref}
         self.assertEqual(refs, set())                                    # step 9 done
         self.assertEqual(set(policy.KINDS) - {c.kind for c in checks}, set())   # all used

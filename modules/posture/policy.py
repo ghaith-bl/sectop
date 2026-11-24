@@ -67,6 +67,9 @@ KINDS = {
     "setuid-known": ({"path"}, set()),
     "harden-check": ({"path"}, set()),
     "home-watch": ({"path"}, set()),
+    "iommu-vendor": (set(), set()),
+    "iommu-groups": ({"want"}, set()),
+    "irq-remap": (set(), set()),
 }
 MAX_CHECKS = 100
 MAX_ITEMS = 64                      # values / units / lines / allow / want lists
@@ -172,7 +175,8 @@ def _check(t, i: int, path: str, seen: set) -> Check:
         if not args.get("key"):
             raise ConfigError(f"{w}.sep: needs key")
         args["sep"] = t["sep"]
-    if kind in ("file", "taint", "lockdown", "firewalld-zone", "wifi-ipv6", "hostname"):
+    if kind in ("file", "taint", "lockdown", "firewalld-zone", "wifi-ipv6", "hostname",
+                "iommu-groups"):
         args["want"] = _text(t["want"], f"{w}.want", 120, empty=kind == "taint")
         if kind == "hostname" and not HOST_RE.fullmatch(args["want"]):
             raise ConfigError(f"{w}.want: hostname required")

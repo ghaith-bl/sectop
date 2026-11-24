@@ -105,6 +105,9 @@ Summary `pass <n> | fail <n> | unknown <n> | accepted <n>`.
 | setuid-known | path | every setuid / setgid file under /usr (the `audit-rules` scan, once per start) is on the list in path (root-owned, not group / other writable, no symlink: core/config.py `read_file`; one path per line, `#` comments; read every collect). Not on it: fail, `new` lines + fix hint. On it, not under /usr: `gone` lines only. No list: fail. Unsafe list: unknown |
 | harden-check | path | the last result of silverblue-privacy-hardening's root drift check (aidecheck.service: `aide --check`, then `harden-check`; read like setuid-known: root-owned, not group / other writable). Lines `time`, `check<TAB>id<TAB>status<TAB>summary`, `item<TAB>id<TAB>text`. A failed check: fail, have = its summary, detail = failed / not checked checks and their items, `more` when cut, a fix hint (`sudo harden-check --accept`) when `aide` fails. Older than 26 h: fail, unknown in the first 15 min after boot (the timer runs 5 min after boot). No result: fail |
 | home-watch | path | the home watch's report (sectop-home@<user>.service, `/run/sectop-home/<user>/report.json`, owner sectop-home, max 180 s old) against the accepted list in path (root-owned, like setuid-known; lines `user<TAB>name`, `entry<TAB>path<TAB>sig`). New / changed / gone / unreadable entries: fail, have = count + the first, detail = each (`changed` names the fields: mode, size, ctime, link target, ...), `more` when cut, fix hint `--home-accept`. No list or no fresh report: fail. Unsafe list: unknown |
+| iommu-vendor | - | the IOMMU arg of the CPU (`vendor_id` in `/proc/cpuinfo`) is in `/proc/cmdline`: GenuineIntel `intel_iommu=on`, AuthenticAMD `amd_iommu=force_isolation`. Another vendor: unknown |
+| iommu-groups | want | every `/sys/kernel/iommu_groups/<n>/type` = want (`DMA`: translated, strict flush; not `identity`, not `DMA-FQ`). No group: fail (IOMMU off). have = counts per type, detail = the groups that differ |
+| irq-remap | - | `/proc/interrupts` names `IR-` chips (IR-PCI-MSI*, IR-IO-APIC): interrupt remapping on |
 | free-space | path, min_mb | `statvfs(path)`: free blocks for users (`f_bavail`) x `f_frsize` >= min_mb MiB. Search on the parent folders is enough (`/var/log/audit` itself is root 0700) |
 
 Limits: 100 checks, 64 items per list / table, paths `A-Z a-z 0-9 _ . @ % + : / -`
@@ -114,13 +117,13 @@ without `..`.
 
 From silverblue-cis-hardening (harden-workstation.sh, docs/deviations.md,
 docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agreed
-2026-10-26. 86 checks.
+2026-10-26. 91 checks.
 
     crit  SELinux enforcing now; audit=1 + backlog in kernel args; audit not switched
           off; auditd, firewalld running; auditd not suspended; firewalld zone drop; only root UID 0; wheel =
           the admin; /var on LUKS; system image not unlocked; ostree remotes verify; listeners;
           Secure Boot on; no hardware MAC on a link that is up; hostname localhost; fwupd
-          sends no reports
+          sends no reports; every IOMMU group type DMA
     warn  SELinux config enforcing + targeted; audit rules >= 53 + 2 per setuid file; audit locked
           (-e 2); audit rules loaded without an error; >= 2 GiB free on /var; no setuid
           / setgid program I have not seen; no file changed since I accepted it and
@@ -143,8 +146,9 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
           hands resolved no DNS; no DNS in Wi-Fi / cable profiles; Mullvad
           socket only for group mullvad; sectop, sectop-feed, mullvad groups; kernel
           args (AF_ALG off, page shuffle, no initrd shell, init_on_free, iommu.strict,
-          KSPP: hash_pointers, proc_mem, module.sig_enforce, intel_iommu, debugfs,
-          bdev_allow_write_mounted);
+          KSPP: hash_pointers, proc_mem, module.sig_enforce, debugfs,
+          bdev_allow_write_mounted); IOMMU arg of the CPU vendor, iommu.passthrough=0,
+          interrupt remapping, efi=disable_early_pci_dma (trial);
           chronyd running; chrony NTS only (authselectmode require, minsources 2)
     info  update staged, waiting for a reboot
 
@@ -281,3 +285,12 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
   (`sudo ./install.sh --home-accept`). silverblue-privacy-hardening's homelock section
   makes the unused places immutable (nothing new there), so a change there is rare and
   loud; the places in use (~/.local/bin, desktop files, ~/.ssh, git config) are watched.
+- IOMMU (2026-11-24, silverblue-privacy-hardening kargs `IOMMU=vendor`,
+  `EARLY_PCI_DMA_OFF=yes`, KSPP): DMA protection from devices. `iommu-vendor` (warn, the
+  arg of the CPU vendor; moved out of `kspp-kargs`), `iommu-no-passthrough` (warn,
+  cmdline `iommu.passthrough=0`), `iommu-groups` (crit: no group or a group not `DMA`
+  means a device can reach memory the IOMMU should guard; firmware VT-d switched off
+  shows here), `irq-remap` (warn), `early-pci-dma` (warn, cmdline
+  `efi=disable_early_pci_dma`, trial: the row goes if the trial ends). Read as user
+  sectop from sysfs / proc: the kernel log lines (`DMAR: IOMMU enabled`, `Enabled IRQ
+  remapping`) need root, the admin checks them after a reboot.

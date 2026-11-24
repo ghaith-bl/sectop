@@ -1077,6 +1077,79 @@ def k_setuid_known(c, cx: Cx) -> Res:
 ACCEPT = "sudo ./install.sh --setuid-accept (the admin's sectop clone)"
 
 
+# --- IOMMU (silverblue-privacy-hardening kargs, 2026-11-24, KSPP) ----------------------
+
+CPUINFO = "/proc/cpuinfo"
+INTERRUPTS = "/proc/interrupts"
+IOMMU_GROUPS = "/sys/kernel/iommu_groups"
+# kernel arg that turns the IOMMU on for a CPU vendor (vendor_id in /proc/cpuinfo)
+IOMMU_VENDOR_ARG = {"GenuineIntel": "intel_iommu=on", "AuthenticAMD": "amd_iommu=force_isolation"}
+VENDOR_RE = re.compile(r"^vendor_id\s*:\s*(\S+)", re.M)
+IR_RE = re.compile(r"\sIR-\S+")
+
+
+def k_iommu_vendor(c, cx: Cx) -> Res:
+    """The IOMMU arg of this CPU's vendor is on the command line (Intel intel_iommu=on, AMD
+    amd_iommu=force_isolation). Another vendor: unknown (no arg known)."""
+    src = f"{CPUINFO} + {CMDLINE}"
+    try:
+        m = VENDOR_RE.search(cx.host.read(CPUINFO))
+        words = set(cx.host.read(CMDLINE).split())
+    except OSError as e:
+        return Res("unknown", _err(e), source=src)
+    vendor = m.group(1) if m else ""
+    arg = IOMMU_VENDOR_ARG.get(vendor)
+    if arg is None:
+        return Res("unknown", f"CPU vendor {vendor or '?'}: no arg known", source=src)
+    res = Res("pass" if arg in words else "fail", arg if arg in words else f"missing {arg}",
+              source=src)
+    res.lines = [("cpu", vendor)]
+    return res
+
+
+def k_iommu_groups(c, cx: Cx) -> Res:
+    """Every IOMMU group has the domain type want (DMA: translated, strict flush; not
+    identity = no IOMMU for that device, not DMA-FQ = lazy flush). No group: the IOMMU
+    is off (firmware VT-d / AMD-Vi off, or no arg)."""
+    try:
+        groups = [g for g in cx.host.listdir(IOMMU_GROUPS) if g.isdigit()]
+    except FileNotFoundError:
+        return Res("fail", "no IOMMU groups (IOMMU off)", source=IOMMU_GROUPS)
+    except OSError as e:
+        return Res("unknown", _err(e), source=IOMMU_GROUPS)
+    if not groups:
+        return Res("fail", "no IOMMU groups (IOMMU off)", source=IOMMU_GROUPS)
+    types, bad, unread = {}, [], 0
+    for g in sorted(groups, key=int):
+        try:
+            t = cx.host.read(f"{IOMMU_GROUPS}/{g}/type").strip()
+        except OSError:
+            unread += 1
+            continue
+        types[t] = types.get(t, 0) + 1
+        if t != c.want:
+            bad.append((g, t))
+    if unread and not types:
+        return Res("unknown", f"{unread} group types not readable", source=IOMMU_GROUPS)
+    have = ", ".join(f"{n} {t}" for t, n in sorted(types.items()))
+    res = Res("fail" if bad or unread else "pass", f"{len(groups)} groups: {have}"[:120],
+              source=f"{IOMMU_GROUPS}/*/type")
+    res.lines = [(f"group {g}", t) for g, t in bad] + ([("unread", str(unread))] if unread else [])
+    res.lines = res.lines[:MAX_LINES]
+    return res
+
+
+def k_irq_remap(c, cx: Cx) -> Res:
+    """Interrupt remapping on: /proc/interrupts names IR- chips (IR-PCI-MSI*, IR-IO-APIC).
+    Without it a device that may DMA can also send forged interrupts (MSI)."""
+    try:
+        n = len(IR_RE.findall(cx.host.read(INTERRUPTS)))
+    except OSError as e:
+        return Res("unknown", _err(e), source=INTERRUPTS)
+    return Res("pass" if n else "fail", f"{n} IR- interrupt lines" if n else "no IR- interrupt",
+               source=INTERRUPTS)
+
+
 # --- harden-check (silverblue-privacy-hardening integrity section) ----------------------
 
 HC_STALE = 26 * 3600               # daily timer + a late day
@@ -1267,7 +1340,8 @@ KINDS = {
     "fwupd-reports": k_fwupd_reports, "audit-load": k_audit_load,
     "auditd-logging": k_auditd_logging, "free-space": k_free_space,
     "setuid-known": k_setuid_known, "harden-check": k_harden_check,
-    "home-watch": k_home_watch,
+    "home-watch": k_home_watch, "iommu-vendor": k_iommu_vendor,
+    "iommu-groups": k_iommu_groups, "irq-remap": k_irq_remap,
 }
 
 
@@ -1299,6 +1373,8 @@ def want_text(c) -> str:
         return "allowlist"
     if k == "failed-units":
         return "0 failed"
+    if k == "iommu-groups":
+        return f"every type {c.want}"
     if k in ("lockdown", "firewalld-zone", "wifi-ipv6"):
         return c.want
     if k == "hostname":
@@ -1314,7 +1390,8 @@ def want_text(c) -> str:
             "fwupd-reports": "no report address", "audit-load": "loaded, no error",
             "auditd-logging": "not suspended",
             "setuid-known": "none new", "harden-check": "no change, all pass",
-            "home-watch": "as accepted"}.get(k, "-")
+            "home-watch": "as accepted", "iommu-vendor": "arg of the CPU vendor",
+            "irq-remap": "on"}.get(k, "-")
 
 
 def check(c, cx: Cx, unit_names: list) -> Res:
