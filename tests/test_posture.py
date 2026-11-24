@@ -119,7 +119,7 @@ class FakeHost(kinds.Host):
                              "rd.emergency=halt init_on_free=1 iommu.strict=1 "
                              "hash_pointers=always proc_mem.force_override=never "
                              "module.sig_enforce=1 intel_iommu=on debugfs=off "
-                             "bdev_allow_write_mounted=0\n",
+                             "bdev_allow_write_mounted=0 systemd.ssh_auto=no\n",
             "/etc/security/faillock.conf": "# deny = 3\ndeny = 5\nunlock_time = 900\n",
             "/etc/security/pwquality.conf": "minlen = 15\nminclass = 4\nenforce_for_root\n",
             "/etc/login.defs": "#\tPASS_MIN_DAYS\tMinimum number of days allowed\n"

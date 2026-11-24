@@ -480,7 +480,17 @@ id = "units-masked"
 kind = "units"
 sev = "warn"
 why = "services off by the hardening (masked)"
-units = { "sshd.service" = "masked", "sshd.socket" = "masked", "nftables.service" = "masked", "rpcbind.service" = "masked", "rpcbind.socket" = "masked", "nfs-server.service" = "masked" }
+units = { "sshd.service" = "masked", "sshd.socket" = "masked", "sshd-unix-local.socket" = "masked", "nftables.service" = "masked", "rpcbind.service" = "masked", "rpcbind.socket" = "masked", "nfs-server.service" = "masked" }
+
+# systemd >= 256 binds sshd to /run/ssh-unix-local/socket (any local user) whenever sshd is
+# installed; off with this kernel arg + the socket masked (silverblue-privacy-hardening
+# sshd section, 2026-11-24). The arg works from the next boot.
+[[check]]
+id = "ssh-local-off"
+kind = "cmdline"
+sev = "warn"
+why = "no local SSH socket from systemd (kernel arg)"
+want = ["systemd.ssh_auto=no"]
 
 [[check]]
 id = "failed-units"
