@@ -492,6 +492,15 @@ sev = "warn"
 why = "no local SSH socket from systemd (kernel arg)"
 want = ["systemd.ssh_auto=no"]
 
+# No printer on this laptop (silverblue-privacy-hardening services section, PRINTING=off,
+# 2026-11-24): CIS 2.1 print server not in use.
+[[check]]
+id = "printing-off"
+kind = "units"
+sev = "warn"
+why = "printing off: CUPS + cups-browsed masked"
+units = { "cups.service" = "masked", "cups.socket" = "masked", "cups.path" = "masked", "cups-browsed.service" = "masked" }
+
 [[check]]
 id = "failed-units"
 kind = "failed-units"
