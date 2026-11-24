@@ -516,12 +516,65 @@ key = "Storage"
 want = "persistent"
 
 [[check]]
+id = "journald-retention"
+kind = "file"
+sev = "warn"
+why = "journal entries older than a month deleted"
+path = "/etc/systemd/journald.conf.d/90-cis.conf"
+key = "MaxRetentionSec"
+want = "1month"
+
+[[check]]
 id = "gnome-locks"
 kind = "lines"
 sev = "warn"
 why = "GNOME automount off + screen lock, locked (CIS 1.8)"
 path = "/etc/dconf/db/local.d/locks/90-cis-hardening"
 want = ["/org/gnome/desktop/media-handling/automount", "/org/gnome/desktop/media-handling/automount-open", "/org/gnome/desktop/media-handling/autorun-never", "/org/gnome/desktop/screensaver/lock-enabled", "/org/gnome/desktop/screensaver/lock-delay", "/org/gnome/desktop/session/idle-delay"]
+
+# ---- devices + desktop privacy (silverblue-privacy-hardening mic + gnome, 2026-11-24) ----
+# Files only: the mic rule is read by WirePlumber at its start, the dconf keyfiles by
+# dconf update (the gnome section runs it). Location + privacy keys: one keyfile and its
+# locks (91-privacy); locked = the user cannot turn them back on in Settings.
+
+[[check]]
+id = "mic-off"
+kind = "lines"
+sev = "warn"
+why = "every microphone off in WirePlumber (laptop, jack, USB, Bluetooth)"
+path = "/etc/wireplumber/wireplumber.conf.d/90-disable-mic.conf"
+want = ["matches = [ { node.name = \"~alsa_input.*\" } ]", "matches = [ { node.name = \"~bluez_input.*\" } ]", "actions = { update-props = { node.disabled = true } }"]
+
+[[check]]
+id = "location-off"
+kind = "lines"
+sev = "warn"
+why = "GNOME location + automatic time zone off, locked"
+path = "/etc/dconf/db/local.d/locks/91-privacy"
+want = ["/org/gnome/system/location/enabled", "/org/gnome/desktop/datetime/automatic-timezone"]
+
+[[check]]
+id = "location-service"
+kind = "units"
+sev = "warn"
+why = "geoclue (location over D-Bus) masked"
+units = { "geoclue.service" = "masked" }
+
+[[check]]
+id = "gnome-privacy-locks"
+kind = "lines"
+sev = "warn"
+why = "GNOME privacy keys locked (history, old files, reports, identity, camera / mic for apps, lock screen)"
+path = "/etc/dconf/db/local.d/locks/91-privacy"
+want = ["/org/gnome/desktop/privacy/remember-recent-files", "/org/gnome/desktop/privacy/recent-files-max-age", "/org/gnome/desktop/privacy/remember-app-usage", "/org/gnome/desktop/privacy/remove-old-trash-files", "/org/gnome/desktop/privacy/remove-old-temp-files", "/org/gnome/desktop/privacy/old-files-age", "/org/gnome/desktop/privacy/report-technical-problems", "/org/gnome/desktop/privacy/send-software-usage-stats", "/org/gnome/desktop/privacy/hide-identity", "/org/gnome/desktop/privacy/show-full-name-in-top-bar", "/org/gnome/desktop/privacy/disable-camera", "/org/gnome/desktop/privacy/disable-microphone", "/org/gnome/desktop/notifications/show-in-lock-screen"]
+
+[[check]]
+id = "gnome-privacy-values"
+kind = "lines"
+sev = "warn"
+why = "values of those keys: off, 1 day, no notifications on the lock screen"
+path = "/etc/dconf/db/local.d/91-privacy"
+want = ["enabled=false", "automatic-timezone=false", "remember-recent-files=false", "recent-files-max-age=1", "remember-app-usage=false", "remove-old-trash-files=true", "remove-old-temp-files=true", "old-files-age=uint32 1", "report-technical-problems=false", "send-software-usage-stats=false", "hide-identity=true", "show-full-name-in-top-bar=false", "disable-camera=true", "disable-microphone=true", "show-in-lock-screen=false"]
 
 # ---- network ----
 

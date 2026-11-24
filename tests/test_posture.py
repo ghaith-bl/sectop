@@ -1154,7 +1154,8 @@ class TestModule(unittest.TestCase):
         h.files.update({"/etc/systemd/coredump.conf.d/90-cis.conf": "[Coredump]\nStorage=none\n"
                                                                     "ProcessSizeMax=0\n",
                         "/etc/systemd/journald.conf.d/90-cis.conf": "[Journal]\n"
-                                                                    "Storage=persistent\n",
+                                                                    "Storage=persistent\n"
+                                                                    "MaxRetentionSec=1month\n",
 })
         self.assertTrue(allow)
         st = pos.State(checks=checks, host=h, wall=lambda: NOW, stamp=lambda ts: "12:00:00")
