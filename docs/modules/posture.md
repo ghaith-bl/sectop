@@ -114,7 +114,7 @@ without `..`.
 
 From silverblue-cis-hardening (harden-workstation.sh, docs/deviations.md,
 docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agreed
-2026-10-26. 84 checks.
+2026-10-26. 86 checks.
 
     crit  SELinux enforcing now; audit=1 + backlog in kernel args; audit not switched
           off; auditd, firewalld running; auditd not suspended; firewalld zone drop; only root UID 0; wheel =
@@ -132,7 +132,8 @@ docs/verification.md) and CIS / RHEL STIG where the hardening follows them. Agre
           90-hardening.conf (kernel, KSPP, IPv4, IPv6); no taint; CIS module blocks;
           lockdown integrity; crypto policy not LEGACY; masked units (sshd, its local
           socket, nftables, rpcbind, nfs); no local SSH socket (kernel arg); printing
-          off (CUPS, cups-browsed masked);
+          off (CUPS, cups-browsed masked); Thunderbolt level not none + IOMMU DMA
+          protection on;
           no failed units; core dumps off; journal persistent, one month; GNOME locks;
           every mic off (WirePlumber); location off + locked, geoclue masked; GNOME
           privacy keys locked + their values; IPv6 off

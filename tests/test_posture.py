@@ -145,6 +145,9 @@ class FakeHost(kinds.Host):
             "/sys/class/net/wlan0/address": "02:00:00:00:00:01\n",
             "/sys/class/net/eth0/type": "1\n", "/sys/class/net/eth0/operstate": "down\n",
             "/sys/class/net/eth0/address": "00:00:5e:00:53:01\n",
+            # Thunderbolt 4 port (host 2026-11-24)
+            "/sys/bus/thunderbolt/devices/domain0/security": "user\n",
+            "/sys/bus/thunderbolt/devices/domain0/iommu_dma_protection": "1\n",
         }
         self.blobs = {kinds.SECUREBOOT: bytes([6, 0, 0, 0, 0])}
         self.dirs = {"/sys/block": ["dm-0", "nvme0n1"], "/sys/block/dm-0/slaves": ["nvme0n1p3"],
@@ -311,6 +314,24 @@ class TestKinds(unittest.TestCase):
         h.denied.add("/etc/selinux/config")
         self.assertEqual(res(chk(path="/etc/selinux/config", key="SELINUX", want="x"), h),
                          ("unknown", "Permission denied"))
+
+    def test_thunderbolt_rows(self):
+        """Deploy rows thunderbolt-level / -dma: none or 0 fail, no bus = fail missing."""
+        with open(DEPLOY, "rb") as f:
+            rows = {c.id: c for c in policy.parse(f.read(), DEPLOY)
+                    if c.id.startswith("thunderbolt-")}
+        self.assertEqual(sorted(rows), ["thunderbolt-dma", "thunderbolt-level"])
+        self.assertEqual(res(rows["thunderbolt-level"]), ("pass", "user"))
+        self.assertEqual(res(rows["thunderbolt-dma"]), ("pass", "1"))
+        h = FakeHost()
+        h.files["/sys/bus/thunderbolt/devices/domain0/security"] = "none\n"
+        h.files["/sys/bus/thunderbolt/devices/domain0/iommu_dma_protection"] = "0\n"
+        self.assertEqual(res(rows["thunderbolt-level"], h), ("fail", "none"))
+        self.assertEqual(res(rows["thunderbolt-dma"], h), ("fail", "0"))
+        for p in list(h.files):
+            if p.startswith("/sys/bus/thunderbolt/"):
+                del h.files[p]
+        self.assertEqual(res(rows["thunderbolt-level"], h), ("fail", "missing"))
 
     def test_file_sep_space(self):
         """login.defs: KEY, spaces / tabs, value (2026-11-18, pwage min age)."""

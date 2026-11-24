@@ -501,6 +501,26 @@ sev = "warn"
 why = "printing off: CUPS + cups-browsed masked"
 units = { "cups.service" = "masked", "cups.socket" = "masked", "cups.path" = "masked", "cups-browsed.service" = "masked" }
 
+# Thunderbolt 4 / USB4 port (host 2026-11-24: security user, iommu_dma_protection 1, no
+# device ever approved; silverblue-privacy-hardening docs/THREAT_MODEL.md). Level none =
+# every device gets PCIe (DMA) without approval: switched in the firmware setup.
+[[check]]
+id = "thunderbolt-level"
+kind = "file"
+sev = "warn"
+why = "Thunderbolt: a new device needs approval (security level not none)"
+path = "/sys/bus/thunderbolt/devices/domain0/security"
+op = "in"
+want = "user|secure|dponly|usbonly|nopcie"
+
+[[check]]
+id = "thunderbolt-dma"
+kind = "file"
+sev = "warn"
+why = "Thunderbolt: IOMMU DMA protection on (kernel DMA protection)"
+path = "/sys/bus/thunderbolt/devices/domain0/iommu_dma_protection"
+want = "1"
+
 [[check]]
 id = "failed-units"
 kind = "failed-units"
