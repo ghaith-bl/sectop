@@ -24,7 +24,7 @@ can decide from what is on screen. Read-only until the privilege split (phase 3)
 
 | key | screen | content |
 |---|---|---|
-| 1 | firewall | hostfw, vpn, counters (non-zero only), out_leak, spark, programs (one row per program), peers (remote IPs), audit (in + out, allowed + blocked, grouped) |
+| 1 | firewall | hostfw, vpn, counters (non-zero only), out_leak, spark, programs (one row per program), peers (remote IPs), audit (in + out, allowed + blocked, grouped); ids (Suricata alerts grouped, eve tail; docs/modules/ids.md) |
 | 2 | security | commands, auth, kernel, posture, logs (grouped). See Security screen |
 | 3 | processes | system (cpu, memory, swap, load, pressure, disk, temperatures), services (system units), processes. See Processes screen |
 
@@ -640,6 +640,9 @@ Design (least privilege: NIST SP 800-53 / 800-171 AC-6, systemd.exec(5), capabil
   particular group ... dynamic users are probably not the best option".
   Journal via `SupplementaryGroups=systemd-journal` (journalctl(1): this group reads all
   journal files).
+  Suricata's eve.json (ids box, 2026-11-25): group `suricata` through a drop-in install.sh
+  writes only when that group exists (an unknown group stops the unit). Read only, the
+  file itself; a filter unit as user suricata writing a summary = later idea.
 - Output: `RuntimeDirectory=sectop`, mode 0750 -> `/run/sectop/state.json` (write +
   rename). The admin in group `sectop`, read only. File, not socket: one-way, less code.
   Written after every collect and every 5 s. No update for 3 x `interval` of the state

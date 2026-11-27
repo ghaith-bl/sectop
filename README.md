@@ -42,7 +42,8 @@ Public IPs masked (key m), the way the screens start.
 ## Security model
 
 - Five services, none as root: `sectop-net` (CAP_NET_ADMIN only, no network: `nft`,
-  `wg`), `sectop` collector (group systemd-journal, no capabilities, no network),
+  `wg`), `sectop` collector (group systemd-journal, + group suricata when Suricata is installed:
+  reads its eve.json; no capabilities, no network),
   `sectop-whois@` (dynamic user, network only, one RDAP lookup per connection),
   `sectop-user@<desktop user>` (no capabilities, no network, group sectop-feed only:
   names the processes in GNOME Shell's shared cgroup, display only),
