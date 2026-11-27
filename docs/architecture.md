@@ -24,7 +24,7 @@ can decide from what is on screen. Read-only until the privilege split (phase 3)
 
 | key | screen | content |
 |---|---|---|
-| 1 | firewall | hostfw, vpn, counters (non-zero only), out_leak, spark, programs (one row per program), peers (remote IPs), audit (in + out, allowed + blocked, grouped); ids (Suricata alerts per rule + source, exact counts from sectop-ids, eve tail, ids key; docs/modules/ids.md) |
+| 1 | firewall | hostfw, vpn, counters (non-zero only), out_leak, spark, programs (one row per program), peers (remote IPs), audit (in + out, allowed + blocked, grouped); lan (router MAC per network, ARP, DHCP servers; docs/modules/lan.md); ids (Suricata alerts per rule + source, exact counts from sectop-ids, eve tail, ids key; docs/modules/ids.md) |
 | 2 | security | commands, auth, kernel, posture, logs (grouped). See Security screen |
 | 3 | processes | system (cpu, memory, swap, load, pressure, disk, temperatures), services (system units), processes. See Processes screen |
 
@@ -648,6 +648,15 @@ Design (least privilege: NIST SP 800-53 / 800-171 AC-6, systemd.exec(5), capabil
   through sectop-feed and is no longer in group suricata (the 2026-11-25 drop-in goes).
   install.sh starts the unit only when group suricata exists (an unknown group stops a
   unit). Own user, not suricata: it can never write Suricata's files or rules.
+  It also counts the DHCP answers per interface + server for the lan box (step 11b2a).
+- LAN (2026-11-27, step 11b2a, docs/modules/lan.md): the collector reads
+  `/proc/net/{route,arp,fib_trie}` and asks the kernel for the uplink's Wi-Fi name over
+  generic netlink (nl80211, unprivileged, `AF_NETLINK` already allowed). No new unit, no
+  capability. A MAC or a Wi-Fi name never leaves the process: HMAC-SHA256 with
+  `/etc/sectop/lan.key` (root:sectop 0640). Trusted routers per network:
+  `/etc/sectop/lan-known.txt` (root:sectop 0640), written only by root
+  (`install.sh --lan-accept`, as `--home-accept`): the collector stays without a
+  writable state on disk.
 - Output: `RuntimeDirectory=sectop`, mode 0750 -> `/run/sectop/state.json` (write +
   rename). The admin in group `sectop`, read only. File, not socket: one-way, less code.
   Written after every collect and every 5 s. No update for 3 x `interval` of the state

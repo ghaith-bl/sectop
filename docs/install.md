@@ -127,12 +127,29 @@ Limit: a program running as the desktop user can change a place (shown) or take 
 access away (shown), not the report; one running as root can do anything (silverblue-
 privacy-hardening AIDE watches `/etc/sectop`).
 
+## LAN: trusted routers
+
+The lan box (screen 1, docs/modules/lan.md) compares the router's MAC with the routers
+accepted for the network. On a network I trust (my own, or the owner agrees), once:
+
+    sudo ./install.sh --lan-accept
+
+Shows the network id (8 hex digits, no Wi-Fi name), the router's address and whether it
+is already accepted, then asks `1 accept / 0 stop`. The first accept makes
+`/etc/sectop/lan.key` (32 random bytes); the list is `/etc/sectop/lan-known.txt`; both
+root:sectop 0640, ids only (HMAC-SHA256, no MAC, no Wi-Fi name). A replaced router:
+accept again on that network. silverblue-privacy-hardening's AIDE watches `/etc/sectop`:
+both files show up once after the first accept.
+
+A DHCP server that is fine besides the router (a Pi-hole):
+`[modules.lan] dhcp_ok = ["<address>"]` in `/etc/sectop/config.toml`.
+
 ## Remove
 
     sudo ./install.sh --remove
 
 Stops and removes the units (every sectop-user@ / sectop-home@ instance too), `/usr/local/lib/sectop`,
 the launcher and the sysusers file.
-Kept: `/etc/sectop`, users sectop / sectop-net / sectop-home and groups sectop /
+Kept: `/etc/sectop` (config, lists, lan.key), users sectop / sectop-net / sectop-home and groups sectop /
 sectop-feed (`userdel sectop; userdel sectop-net; userdel sectop-home; groupdel sectop;
 groupdel sectop-feed` by hand; the desktop user: `setfacl -R -x u:sectop-home ~`).

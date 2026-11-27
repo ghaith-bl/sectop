@@ -44,7 +44,7 @@ Public IPs masked (key m), the way the screens start.
 - Six services (five without Suricata), none as root: `sectop-net` (CAP_NET_ADMIN only, no network: `nft`,
   `wg`), `sectop` collector (group systemd-journal; no capabilities, no network),
   `sectop-ids` (only with Suricata: user sectop-ids, group suricata, reads eve.json read
-  only, counts the alerts for the collector; no capabilities, no network),
+  only, counts the alerts and DHCP answers for the collector; no capabilities, no network),
   `sectop-whois@` (dynamic user, network only, one RDAP lookup per connection),
   `sectop-user@<desktop user>` (no capabilities, no network, group sectop-feed only:
   names the processes in GNOME Shell's shared cgroup, display only),
@@ -87,6 +87,11 @@ Public IPs masked (key m), the way the screens start.
 
 - firewall: hostfw mode + counters, kernel log (HFW-*), programs, peers (remote IPs),
   WireGuard (docs/modules/firewall.md)
+- lan (screen 1): the router's MAC per network against the routers I accepted (ARP
+  spoofing, a fake router), the router's MAC on a second address, DHCP servers that are
+  not the router (rogue DHCP, from Suricata); ids only, never a MAC or a Wi-Fi name
+  (docs/modules/lan.md)
+- ids (screen 1): Suricata alerts counted per rule + source (docs/modules/ids.md)
 - security: commands run as root after a login (sudo, pkexec, su, setuid programs), from
   the audit records in the journal, rated by `/etc/sectop/watch.toml` (crit / warn /
   info); auth box: sudo / su / unlock / polkit passwords, faillock locks, sudo refusals
@@ -153,6 +158,7 @@ terminal, else the 8 basic colors.
     sudo ./install.sh --remove
     sudo ./install.sh --setuid-accept   # new setuid / setgid programs seen: on my list
     sudo ./install.sh --home-accept     # start places in the desktop home as now: accepted
+    sudo ./install.sh --lan-accept      # this network's router: trusted (lan box)
 
 First install: log out and in once (the sudo user joins group sectop).
 

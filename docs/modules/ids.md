@@ -30,6 +30,10 @@ Tests: tests/test_ids.py (real eve lines in tests/fixtures/ids/eve-local-rules.j
   mode, size 1 MiB, types, lengths, addresses), and shows "stale" (warn check
   `ids:stale`) when it is older than 120 s. Max 200 groups (the leak / scan ones kept
   first, pushed-out groups counted), 50 tail lines.
+- DHCP (step 11b2a): the DHCP answers in eve.json (Suricata logs ACKs) counted per
+  interface + server address in the same hour buckets, summary part `dhcp` (max 50),
+  for the lan box's rogue DHCP check (docs/modules/lan.md). Only who answered, where,
+  when and the message type: the client's MAC, address and name are never read.
 - Symlink at eve.json: refused (O_NOFOLLOW). Not readable: header + warn check
   `ids:no_access`. No file: "no eve.json", status info. No summary: "no ids summary".
 
