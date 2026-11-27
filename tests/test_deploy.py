@@ -215,13 +215,16 @@ class TestLaunchers(unittest.TestCase):
             r = self.run_bin(name, "x")                         # args refused before anything
             self.assertEqual(r.returncode, 2, r.stderr)
             self.assertIn(f"usage: {name}", r.stderr)
+        r = self.run_bin("sectop-lan", "x")                     # --accept only
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("usage: sectop-lan --accept", r.stderr)
         r = self.run_bin("sectop-home", "x", "y")               # one user name only
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("usage: sectop-home USER", r.stderr)
 
     def test_executable_and_shebang(self):
         for name in ("sectop", "sectop-collector", "sectop-net", "sectop-user", "sectop-home",
-                     "sectop-ids"):
+                     "sectop-ids", "sectop-lan"):
             p = os.path.join(ROOT, "bin", name)
             self.assertTrue(os.access(p, os.X_OK), name)
             with open(p, encoding="ascii") as f:
@@ -237,6 +240,17 @@ class TestInstallScript(unittest.TestCase):
         r = subprocess.run([bash, "-n", p], capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(os.access(p, os.X_OK))
+
+    def test_lan_accept(self):
+        """--lan-accept (step 11b2a): root-owned code asks, both files relabeled, the usage
+        line names it."""
+        with open(os.path.join(ROOT, "install.sh"), encoding="ascii") as f:
+            text = f.read()
+        body = text[text.index("lan_accept() {"):text.index("\n}\n", text.index("lan_accept() {"))]
+        self.assertIn('/usr/bin/python3 -I -B "$DEST/bin/sectop-lan" --accept', body)
+        self.assertIn('"$CONF/lan.key" "$CONF/lan-known.txt"', body)
+        self.assertIn('[[ ${1:-} == --lan-accept ]] && { [[ $# -eq 1 ]]', text)
+        self.assertIn("| --lan-accept]", text)
 
     def test_creates_dirs_it_writes_to(self):
         """Silverblue has no /etc/sysusers.d (2026-10-20 install: 'No such file')."""

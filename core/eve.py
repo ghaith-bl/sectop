@@ -1,4 +1,4 @@
-"""Suricata eve.json: follow the file, parse alert lines (step 11b1, 2026-11-27).
+"""Suricata eve.json: follow the file, parse alert and DHCP lines (step 11b1 / 11b2a).
 
 Used by the ids summary helper (core/idsd.py, sectop-ids.service), the only part of sectop
 that opens eve.json. The collector reads the helper's summary, never eve.json
@@ -10,6 +10,11 @@ start). The first open of a run can start at the last `backlog` bytes (a whole l
 boundary). At most `budget` bytes per read; lines over LINE_MAX are skipped. Alert text
 comes from rules (ET Open, local), never from a packet: the eve config has no payload /
 app-layer metadata (hardening ids/suricata.yaml).
+
+DHCP lines (step 11b2a, for the lan box's rogue DHCP check): only who answered, where and
+when: the server's address (src_ip: Suricata writes a DHCP record in packet direction),
+the interface (in_iface), the message type. The client's MAC, address, name and id in
+the same line are never read.
 """
 
 import datetime
@@ -17,10 +22,13 @@ import errno
 import ipaddress
 import json
 import os
+import re
 import stat
 
 EVE_PATH = "/var/log/suricata/harden-ids/eve.json"
 LINE_MAX = 64 << 10
+IFNAME_RE = re.compile(r"[A-Za-z0-9_.-]{1,15}")
+DHCP_TYPE_RE = re.compile(r"[a-z_]{1,12}")
 
 NOTE_MISSING = "no eve.json (Suricata not installed / not started)"
 NOTE_DENIED = "eve.json not readable: sectop-ids not in group suricata (sudo ./install.sh)"
@@ -64,8 +72,32 @@ class Alert:
                  "category", "severity", "sigsev", "target", "confidence")
 
 
+class Dhcp:
+    """A DHCP server's answer (Suricata logs ACKs only unless `extended`)."""
+    __slots__ = ("ts", "iface", "server", "dtype")
+
+
+def parse_dhcp(ev: dict, now: float):
+    """eve dhcp record -> Dhcp, None for a client's request or a line without a server."""
+    d = ev.get("dhcp")
+    if not isinstance(d, dict) or d.get("type") != "reply":
+        return None
+    server = _addr(ev.get("src_ip"))
+    if not server or ":" in server:
+        return None
+    x = Dhcp()
+    x.ts = parse_ts(ev.get("timestamp")) or now
+    x.server = server
+    iface = ev.get("in_iface")
+    x.iface = iface if isinstance(iface, str) and IFNAME_RE.fullmatch(iface) else ""
+    dtype = d.get("dhcp_type")
+    x.dtype = dtype if isinstance(dtype, str) and DHCP_TYPE_RE.fullmatch(dtype) else "?"
+    return x
+
+
 def parse_line(raw: bytes, now: float):
-    """One eve line -> (event_type, Alert or None). Not json / not a dict -> (None, None)."""
+    """One eve line -> (event_type, Alert / Dhcp or None). Not json / not a dict ->
+    (None, None)."""
     try:
         ev = json.loads(raw)
     except (ValueError, UnicodeDecodeError, RecursionError):
@@ -73,6 +105,8 @@ def parse_line(raw: bytes, now: float):
     if not isinstance(ev, dict):
         return None, None
     et = _str(ev.get("event_type"), 40) or "?"
+    if et == "dhcp":
+        return et, parse_dhcp(ev, now)
     if et != "alert":
         return et, None
     al = ev.get("alert")

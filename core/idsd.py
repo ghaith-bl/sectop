@@ -11,6 +11,9 @@ uncompressed by logrotate delaycompress) and today's file from their start (max
 START_BYTES each), so a restart keeps exact 24 h counts. Then followed live
 (core/eve.py). Plus the newest TAIL alert lines and a count of the other event types.
 
+DHCP answers (step 11b2a, for the lan box's rogue DHCP check): per interface + server
+address, the same hour buckets, the message types; nothing about the client.
+
 Who: system user sectop-ids, group sectop-feed (unit Group=), supplementary group
 suricata (eve.json is 0640 suricata): read only (ProtectSystem=strict), never writes a
 Suricata file, no capabilities, no network. The collector reads the summary through
@@ -49,6 +52,7 @@ MAX_DSTS = 5
 START_BYTES = 64 << 20           # each file at start: from its start, at most this much
 BUDGET = 4 << 20                 # per read
 CRIT_KINDS = ("leak", "scan")    # kept first when MAX_GROUPS is reached
+MAX_DHCP = 50                    # DHCP servers (interface + address) kept
 
 
 class Quit(BaseException):
@@ -83,9 +87,29 @@ class Group:
         self.dsts.appendleft(to)
 
 
+class DhcpGroup:
+    """One DHCP server on one interface: its answers per clock hour."""
+    __slots__ = ("iface", "server", "first", "last", "hours", "types")
+
+    def __init__(self, x):
+        self.iface, self.server = x.iface, x.server
+        self.first = self.last = x.ts
+        self.hours = {}
+        self.types = set()
+
+    def add(self, x, now: float) -> None:
+        ts = min(x.ts, now)
+        h = hour(ts)
+        self.hours[h] = self.hours.get(h, 0) + 1
+        self.first, self.last = min(self.first, ts), max(self.last, ts)
+        if len(self.types) < 4:
+            self.types.add(x.dtype)
+
+
 class Counts:
     def __init__(self):
         self.groups = {}            # (sid, src) -> Group
+        self.dhcp = {}              # (iface, server) -> DhcpGroup
         self.tail = collections.deque(maxlen=TAIL)
         self.other = collections.Counter()   # other event types (anomaly, dhcp ...)
         self.bad = 0                # lines that are not a JSON object
@@ -97,8 +121,10 @@ class Counts:
             if et is None:
                 self.bad += 1
                 continue
-            if a is None:
+            if a is None or isinstance(a, evemod.Dhcp):
                 self.other[et] += 1
+                if a is not None:
+                    self.add_dhcp(a, now)
                 continue
             key = (a.sid, a.src)
             g = self.groups.get(key)
@@ -107,8 +133,24 @@ class Counts:
             g.add(a, now)
             self.tail.appendleft(a)
 
+    def add_dhcp(self, x, now: float) -> None:
+        key = (x.iface, x.server)
+        g = self.dhcp.get(key)
+        if g is None:
+            g = self.dhcp[key] = DhcpGroup(x)
+        g.add(x, now)
+
     def prune(self, now: float) -> None:
         lo = hour(now) - (HOURS - 1) * 3600
+        for key in list(self.dhcp):
+            g = self.dhcp[key]
+            for h in [h for h in g.hours if h < lo]:
+                del g.hours[h]
+            if not g.hours:
+                del self.dhcp[key]
+        if len(self.dhcp) > MAX_DHCP:       # the newest kept
+            keep = sorted(self.dhcp.items(), key=lambda kv: kv[1].last, reverse=True)
+            self.dhcp = dict(keep[:MAX_DHCP])
         for key in list(self.groups):
             g = self.groups[key]
             for h in [h for h in g.hours if h < lo]:
@@ -136,9 +178,14 @@ class Counts:
                  "severity": a.severity, "sigsev": a.sigsev, "category": a.category,
                  "src": a.src, "dst": a.dst, "dport": a.dport, "proto": a.proto}
                 for a in self.tail]
+        dhcp = [{"iface": g.iface, "server": g.server, "types": sorted(g.types),
+                 "first": g.first, "last": g.last, "n24": sum(g.hours.values()),
+                 "nh": g.hours.get(h, 0)}
+                for g in sorted(self.dhcp.values(), key=lambda g: g.last, reverse=True)]
         return {"v": VERSION, "ts": now, "started": started, "note": note,
                 "skipped": skipped + self.bad, "dropped": self.dropped,
-                "other": dict(sorted(self.other.items())[:20]), "groups": groups, "tail": tail}
+                "other": dict(sorted(self.other.items())[:20]), "groups": groups, "tail": tail,
+                "dhcp": dhcp}
 
 
 def _log(msg: str) -> None:

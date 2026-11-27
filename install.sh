@@ -7,6 +7,7 @@
 #   sudo ./install.sh --check               requirements only, changes nothing
 #   sudo ./install.sh --setuid-accept       new setuid / setgid programs seen: on my list
 #   sudo ./install.sh --home-accept         start places in the desktop home as now: accepted
+#   sudo ./install.sh --lan-accept          this network's router: trusted (lan box)
 #   sudo ./install.sh --remove              stop + remove units, code, launcher, sysusers file
 #
 # Users: the one running sudo is the admin: member of group sectop (reads the UI state,
@@ -55,7 +56,7 @@ remove() {
   rm -rf "$DEST"
   rm -f "$SYSUSERS"
   log "removed: units, $DEST, $BIN, $SYSUSERS"
-  log "kept: $CONF; users sectop, sectop-net, sectop-home, sectop-ids and groups sectop, sectop-feed"
+  log "kept: $CONF (config, lists, lan.key); users sectop, sectop-net, sectop-home, sectop-ids and groups sectop, sectop-feed"
   log "  (by hand: userdel sectop; userdel sectop-net; userdel sectop-home; userdel sectop-ids;"
   log "  groupdel sectop; groupdel sectop-feed; the desktop user: setfacl -R -x u:sectop-home"
   log "  on its home)"
@@ -251,6 +252,21 @@ home_accept() {
   return 0
 }
 
+# --lan-accept: the router of the network this laptop is on now as trusted for that network
+# (core/lan.py accept: numbered question; ids only, no MAC / Wi-Fi name in the files).
+# The first one makes the key. Both files root:sectop 0640 (the collector reads them).
+lan_accept() {
+  [[ -d $CONF ]] || die "no $CONF: install first"
+  [[ -f $DEST/bin/sectop-lan ]] || die "no $DEST/bin/sectop-lan: install first"
+  local rc=0
+  /usr/bin/python3 -I -B "$DEST/bin/sectop-lan" --accept || rc=$?
+  local f
+  for f in "$CONF/lan.key" "$CONF/lan-known.txt"; do
+    [[ -f $f ]] && relabel "$f"
+  done
+  return "$rc"
+}
+
 install_units() {  # $1 = desktop user: its user helper + home watch
   local u inst helper=sectop-user@$1.service watch=sectop-home@$1.service
   for u in "${UNITS[@]}"; do
@@ -339,12 +355,13 @@ main() {
   [[ ${1:-} == --check ]] && { preflight; return; }
   [[ ${1:-} == --setuid-accept ]] && { [[ $# -eq 1 ]] || die "usage: sudo $0 --setuid-accept"; setuid_accept; return; }
   [[ ${1:-} == --home-accept ]] && { [[ $# -eq 1 ]] || die "usage: sudo $0 --home-accept"; home_accept; return; }
+  [[ ${1:-} == --lan-accept ]] && { [[ $# -eq 1 ]] || die "usage: sudo $0 --lan-accept"; lan_accept; return; }
   local desktop=""
   if [[ ${1:-} == --desktop-user ]]; then
     [[ $# -eq 2 ]] || die "usage: sudo $0 --desktop-user NAME"
     desktop=$2; shift 2
   fi
-  [[ $# -eq 0 ]] || die "usage: sudo $0 [--desktop-user NAME | --check | --remove | --setuid-accept | --home-accept]"
+  [[ $# -eq 0 ]] || die "usage: sudo $0 [--desktop-user NAME | --check | --remove | --setuid-accept | --home-accept | --lan-accept]"
   local user=${SUDO_USER:-} repo
   [[ $user =~ $USER_RE && $user != root ]] \
     || die "run with sudo from your login (SUDO_USER missing or root)"
@@ -371,6 +388,9 @@ main() {
   fi
   log "check: systemd-analyze security sectop.service sectop-net.service sectop-whois@x.service"
   log "       systemd-analyze security sectop-user@$desktop.service sectop-home@$desktop.service"
+  if [[ ! -e $CONF/lan-known.txt ]]; then
+    log "lan box: on your own network, its router as trusted once: sudo ./install.sh --lan-accept"
+  fi
   if [[ ! -e $CONF/home-known.txt ]]; then
     log "home watch: $desktop's account gives sectop-home read access (docs/install.md, Home"
     log "  watch), then the first list: sudo ./install.sh --home-accept"

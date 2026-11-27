@@ -22,6 +22,7 @@ from core.module import check_module
 MODULES: tuple[str, ...] = (
     "modules.firewall",
     "modules.ids",
+    "modules.lan",
     "modules.security",
     "modules.posture",
     "modules.system",
