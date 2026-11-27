@@ -1,0 +1,68 @@
+# sectop ids summary: Suricata's eve.json counted per rule + source (exact, every line),
+# for the collector's ids box (core/idsd.py, docs/modules/ids.md). Runs as system user
+# sectop-ids: reads eve.json through group suricata (0640), read only; Suricata's files,
+# rules and the capture are never touched. The collector is not in group suricata.
+# No capabilities, no network. install.sh installs this unit only when group suricata
+# exists (an unknown group in SupplementaryGroups= stops a unit: 216/GROUP).
+# docs/architecture.md (Privilege split), docs/install.md
+[Unit]
+Description=sectop ids summary (Suricata alerts counted, read only)
+Documentation=file:/usr/local/lib/sectop/docs/modules/ids.md
+After=suricata.service
+Before=sectop.service
+
+[Service]
+Type=exec
+User=sectop-ids
+# primary group sectop-feed: the runtime dir and the summary get it, the collector reads
+# them (SupplementaryGroups=). No member has it.
+Group=sectop-feed
+SupplementaryGroups=suricata
+ExecStart=/usr/bin/python3 -I -B /usr/local/lib/sectop/bin/sectop-ids
+Restart=on-failure
+RestartSec=5s
+RestartSteps=5
+RestartMaxDelaySec=5min
+# /run/sectop-ids: sectop-ids:sectop-feed 0750, made by systemd
+RuntimeDirectory=sectop-ids
+RuntimeDirectoryMode=0750
+UMask=0027
+# the collector's state: never needed here ('-': fine when missing)
+InaccessiblePaths=-/run/sectop
+
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+
+# strict: every path read-only (eve.json too); no home needed
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+DevicePolicy=closed
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+KeyringMode=private
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+MemoryMax=64M
+TasksMax=4
+
+[Install]
+WantedBy=multi-user.target

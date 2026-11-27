@@ -5,8 +5,12 @@
 # SupplementaryGroups=: the helper -> collector channel (/run/sectop-user/<user>/).
 # sectop-home: the home watch (sectop-home@<user>.service), reads the desktop user's start
 # places through ACL entries, writes /run/sectop-home/<user>/ for the collector.
+# sectop-ids: the ids summary (sectop-ids.service), reads Suricata's eve.json through
+# group suricata (unit SupplementaryGroups=, only when Suricata is installed), writes
+# /run/sectop-ids/ for the collector.
 g sectop      -
 g sectop-feed -
 u sectop      -:sectop  "sectop collector"  -  -
 u sectop-net  -:sectop  "sectop net unit"   -  -
 u sectop-home -:sectop-feed "sectop home watch" - -
+u sectop-ids  -:sectop-feed "sectop ids summary" - -

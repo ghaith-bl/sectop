@@ -24,7 +24,7 @@ set -euo pipefail
 DEST=/usr/local/lib/sectop
 BIN=/usr/local/bin/sectop
 UNIT_DIR=/etc/systemd/system
-UNITS=(sectop-net.service sectop.service sectop-whois.socket sectop-whois@.service sectop-user@.service sectop-home@.service)
+UNITS=(sectop-net.service sectop.service sectop-whois.socket sectop-whois@.service sectop-user@.service sectop-home@.service sectop-ids.service)
 SYSUSERS=/etc/sysusers.d/sectop.conf
 CONF=/etc/sectop
 SETUID_LIST=$CONF/setuid-known.txt
@@ -38,7 +38,7 @@ relabel() { if command -v restorecon >/dev/null; then restorecon -R "$@"; fi; }
 
 remove() {
   systemctl disable --now sectop.service sectop-net.service sectop-whois.socket \
-    >/dev/null 2>&1 || true
+    sectop-ids.service >/dev/null 2>&1 || true
   local inst
   for inst in $(systemctl list-units --all --plain --no-legend 'sectop-user@*.service' \
                   'sectop-home@*.service' | awk '{print $1}'); do
@@ -55,9 +55,10 @@ remove() {
   rm -rf "$DEST"
   rm -f "$SYSUSERS"
   log "removed: units, $DEST, $BIN, $SYSUSERS"
-  log "kept: $CONF; users sectop, sectop-net, sectop-home and groups sectop, sectop-feed"
-  log "  (by hand: userdel sectop; userdel sectop-net; userdel sectop-home; groupdel sectop;"
-  log "  groupdel sectop-feed; the desktop user: setfacl -R -x u:sectop-home on its home)"
+  log "kept: $CONF; users sectop, sectop-net, sectop-home, sectop-ids and groups sectop, sectop-feed"
+  log "  (by hand: userdel sectop; userdel sectop-net; userdel sectop-home; userdel sectop-ids;"
+  log "  groupdel sectop; groupdel sectop-feed; the desktop user: setfacl -R -x u:sectop-home"
+  log "  on its home)"
 }
 
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -255,7 +256,7 @@ install_units() {  # $1 = desktop user: its user helper + home watch
   for u in "${UNITS[@]}"; do
     install -m 0644 -o root -g root "$DEST/deploy/$u" "$UNIT_DIR/$u"
   done
-  ids_dropin
+  ids_old_dropin
   relabel "$UNIT_DIR"/sectop*
   systemctl daemon-reload
   # one helper: another desktop user's instance (older install) goes
@@ -268,6 +269,7 @@ install_units() {  # $1 = desktop user: its user helper + home watch
     systemctl disable --now "$inst" >/dev/null 2>&1 || true
     log "$inst stopped + disabled (desktop user is now $1)"
   done
+  ids_helper
   systemctl enable sectop-net.service sectop.service sectop-whois.socket "$helper" "$watch" >/dev/null
   systemctl restart sectop-net.service sectop.service sectop-whois.socket "$helper" "$watch"
   for u in sectop-net.service sectop.service sectop-whois.socket "$helper" "$watch"; do
@@ -279,25 +281,33 @@ install_units() {  # $1 = desktop user: its user helper + home watch
   done
 }
 
-# ids box (modules/ids): the collector reads Suricata's eve.json (suricata:suricata 0640)
-# through group suricata. Only when that group exists: an unknown group in
-# SupplementaryGroups= stops the unit (216/GROUP). Read only; no other right.
-IDS_DROPIN_DIR=$UNIT_DIR/sectop.service.d
-IDS_DROPIN=$IDS_DROPIN_DIR/ids.conf
-ids_dropin() {
+# ids box (modules/ids): sectop-ids.service reads Suricata's eve.json (suricata 0640)
+# through group suricata, read only, and writes a summary for the collector (core/idsd.py).
+# Started only when the group exists: an unknown group in SupplementaryGroups= stops the
+# unit (216/GROUP). The collector itself is not in group suricata: the drop-in an older
+# install wrote (2026-11-25) goes. Install Suricata later: run install.sh again.
+IDS_UNIT=sectop-ids.service
+OLD_DROPIN_DIR=$UNIT_DIR/sectop.service.d
+OLD_DROPIN=$OLD_DROPIN_DIR/ids.conf
+ids_old_dropin() {   # before daemon-reload
+  if [[ -e $OLD_DROPIN || -L $OLD_DROPIN ]]; then
+    rm -f "$OLD_DROPIN"
+    rmdir "$OLD_DROPIN_DIR" 2>/dev/null || true
+    log "ids: collector no longer in group suricata ($OLD_DROPIN removed)"
+  fi
+}
+ids_helper() {       # after daemon-reload
   if getent group suricata >/dev/null; then
-    install -d -m 0755 "$IDS_DROPIN_DIR"     # root runs this: root-owned
-    printf '%s\n' "# sectop install.sh: the ids box reads Suricata's eve.json (group suricata, read only)" \
-      "[Service]" "SupplementaryGroups=suricata" > "$IDS_DROPIN.tmp"
-    chmod 0644 "$IDS_DROPIN.tmp"
-    mv -f "$IDS_DROPIN.tmp" "$IDS_DROPIN"
-    log "ids: collector in group suricata ($IDS_DROPIN)"
-  elif [[ -e $IDS_DROPIN ]]; then
-    rm -f "$IDS_DROPIN"
-    rmdir "$IDS_DROPIN_DIR" 2>/dev/null || true
-    log "ids: no group suricata: $IDS_DROPIN removed"
+    systemctl enable "$IDS_UNIT" >/dev/null
+    systemctl restart "$IDS_UNIT"
+    if systemctl is-active --quiet "$IDS_UNIT"; then
+      log "ids: $IDS_UNIT active (eve.json read through group suricata, read only)"
+    else
+      warn "ids: $IDS_UNIT not active: journalctl -b -u $IDS_UNIT"
+    fi
   else
-    log "ids: no group suricata (Suricata not installed): ids box shows no eve.json"
+    systemctl disable --now "$IDS_UNIT" >/dev/null 2>&1 || true
+    log "ids: no group suricata (Suricata not installed): $IDS_UNIT off, ids box empty"
   fi
 }
 

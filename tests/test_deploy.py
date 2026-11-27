@@ -7,13 +7,13 @@ import sys
 import tempfile
 import unittest
 
-from core import app, collector, homed, lookup, netd, userd
+from core import app, collector, homed, idsd, lookup, netd, userd
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEPLOY = os.path.join(ROOT, "deploy")
 PREFIX = "/usr/local/lib/sectop/"
 SERVICES = ("sectop.service", "sectop-net.service", "sectop-whois@.service",
-            "sectop-user@.service", "sectop-home@.service")
+            "sectop-user@.service", "sectop-home@.service", "sectop-ids.service")
 
 
 def unit(name: str) -> dict:
@@ -45,8 +45,8 @@ class TestUnits(unittest.TestCase):
         self.assertNotIn("m", {ln[0] for ln in lines})        # members: install.sh only
         users = {ln[1]: ln[2] for ln in lines if ln[0] == "u"}
         self.assertEqual(users, {"sectop": "-:sectop", "sectop-net": "-:sectop",
-                                 "sectop-home": "-:sectop-feed"})
-        self.assertEqual(homed.OWNER, "sectop-home")
+                                 "sectop-home": "-:sectop-feed", "sectop-ids": "-:sectop-feed"})
+        self.assertEqual((homed.OWNER, idsd.OWNER), ("sectop-home", "sectop-ids"))
         self.assertEqual((app.COLLECTOR_USER, netd.NET_USER), ("sectop", "sectop-net"))
         c, n = svc("sectop.service"), svc("sectop-net.service")
         self.assertEqual((c["User"], c["Group"], n["User"], n["Group"]),
@@ -79,7 +79,7 @@ class TestUnits(unittest.TestCase):
         self.assertEqual((n["AmbientCapabilities"], n["CapabilityBoundingSet"]),
                          ("CAP_NET_ADMIN", "CAP_NET_ADMIN"))
         for name in ("sectop.service", "sectop-whois@.service", "sectop-user@.service",
-                     "sectop-home@.service"):
+                     "sectop-home@.service", "sectop-ids.service"):
             s = svc(name)
             self.assertEqual((s["AmbientCapabilities"], s["CapabilityBoundingSet"]), ("", ""),
                              name)
@@ -106,7 +106,8 @@ class TestUnits(unittest.TestCase):
         user helper sees its own user's (fd of the shared cgroup, 2026-11-03)."""
         self.assertEqual(svc("sectop.service")["ProtectProc"], "default")
         self.assertEqual(svc("sectop-user@.service")["ProtectProc"], "default")
-        for name in ("sectop-net.service", "sectop-whois@.service", "sectop-home@.service"):
+        for name in ("sectop-net.service", "sectop-whois@.service", "sectop-home@.service",
+                     "sectop-ids.service"):
             self.assertEqual(svc(name)["ProtectProc"], "invisible", name)
         self.assertNotIn("CAP_SYS_PTRACE", svc("sectop.service").get("CapabilityBoundingSet",
                                                                       ""))
@@ -143,7 +144,7 @@ class TestUnits(unittest.TestCase):
         """2026-11-06: a helper that can never start was restarted every 5 s (169 times
         in 30 min). Long-running units back off to 5 min instead of giving up."""
         for name in ("sectop.service", "sectop-net.service", "sectop-user@.service",
-                     "sectop-home@.service"):
+                     "sectop-home@.service", "sectop-ids.service"):
             s = svc(name)
             self.assertEqual((s["Restart"], s["RestartSec"], s["RestartSteps"],
                               s["RestartMaxDelaySec"]),
@@ -164,6 +165,25 @@ class TestUnits(unittest.TestCase):
         self.assertEqual(h["InaccessiblePaths"], "-" + os.path.dirname(collector.STATE_PATH))
         for k in ("ReadWritePaths", "ReadOnlyPaths", "BindPaths", "BindReadOnlyPaths"):
             self.assertNotIn(k, h)                            # no mounton (lessons)
+
+    def test_ids_summary_unit(self):
+        """sectop-ids.service (step 11b1): system user sectop-ids, group sectop-feed, reads
+        eve.json through group suricata (read only), no network; the collector is not in
+        group suricata."""
+        h = svc("sectop-ids.service")
+        self.assertEqual((h["User"], h["Group"], h["SupplementaryGroups"], h["RuntimeDirectory"],
+                          h["RuntimeDirectoryMode"], h["UMask"]),
+                         (idsd.OWNER, idsd.GROUP, "suricata", "sectop-ids", "0750", "0027"))
+        self.assertEqual(idsd.RUN_DIR, "/run/sectop-ids")
+        self.assertTrue(h["ExecStart"].endswith("/bin/sectop-ids"))
+        self.assertEqual((h["PrivateNetwork"], h["IPAddressDeny"], h["RestrictAddressFamilies"]),
+                         ("yes", "any", "AF_UNIX"))
+        self.assertEqual(h["InaccessiblePaths"], "-" + os.path.dirname(collector.STATE_PATH))
+        for k in ("ReadWritePaths", "ReadOnlyPaths", "BindPaths", "BindReadOnlyPaths"):
+            self.assertNotIn(k, h)
+        self.assertNotIn("suricata", svc("sectop.service")["SupplementaryGroups"])
+        before = unit("sectop-ids.service")["Unit"]["Before"][-1].split()
+        self.assertEqual(before, ["sectop.service"])
 
     def test_user_helper_hides_reader_paths(self):
         """2026-11-05 account split: the helper runs as the desktop user, who must not
@@ -191,7 +211,7 @@ class TestLaunchers(unittest.TestCase):
         r = self.run_bin("sectop", "--help")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("usage: sectop [SCREEN]", r.stdout)
-        for name in ("sectop-collector", "sectop-net", "sectop-user"):
+        for name in ("sectop-collector", "sectop-net", "sectop-user", "sectop-ids"):
             r = self.run_bin(name, "x")                         # args refused before anything
             self.assertEqual(r.returncode, 2, r.stderr)
             self.assertIn(f"usage: {name}", r.stderr)
@@ -200,7 +220,8 @@ class TestLaunchers(unittest.TestCase):
         self.assertIn("usage: sectop-home USER", r.stderr)
 
     def test_executable_and_shebang(self):
-        for name in ("sectop", "sectop-collector", "sectop-net", "sectop-user", "sectop-home"):
+        for name in ("sectop", "sectop-collector", "sectop-net", "sectop-user", "sectop-home",
+                     "sectop-ids"):
             p = os.path.join(ROOT, "bin", name)
             self.assertTrue(os.access(p, os.X_OK), name)
             with open(p, encoding="ascii") as f:
@@ -296,42 +317,49 @@ class TestInstallScript(unittest.TestCase):
         line = next(ln for ln in text.splitlines() if ln.startswith("UNITS=("))
         self.assertEqual(sorted(line[len("UNITS=("):-1].split()), units)
 
-    def test_ids_dropin_only_with_group_suricata(self):
-        """install.sh ids_dropin: group suricata there -> drop-in with SupplementaryGroups
-        (added to the unit's list), gone -> drop-in removed; --remove removes it too."""
+    def test_ids_helper_only_with_group_suricata(self):
+        """install.sh (step 11b1): sectop-ids.service enabled + started only when group
+        suricata exists, else stopped + disabled; the drop-in an older install wrote (the
+        collector in group suricata, 2026-11-25) is removed; --remove removes it too."""
         with open(os.path.join(ROOT, "install.sh"), encoding="ascii") as f:
             text = f.read()
-        start = text.index("IDS_DROPIN_DIR=")
-        end = text.index("\n}\n", start) + 3
+        start = text.index("IDS_UNIT=")
+        end = text.index("\n}\n", text.index("ids_helper() {")) + 3
         func = text[start:end]
         self.assertIn('rm -f "$UNIT_DIR/sectop.service.d/ids.conf"', text)
+        self.assertNotIn("SupplementaryGroups=suricata", text)
+        self.assertLess(text.index("  ids_old_dropin\n"), text.index("  systemctl daemon-reload\n  #"))
+        self.assertLess(text.index("  ids_helper\n"), text.index("  systemctl enable sectop-net"))
         with tempfile.TemporaryDirectory() as d:
             fake = os.path.join(d, "bin")
             os.mkdir(fake)
-            getent = os.path.join(fake, "getent")
-            with open(getent, "w", encoding="ascii") as f:
-                f.write('#!/bin/sh\n[ -e "$HAVE" ]\n')
-            os.chmod(getent, 0o755)
-            env = dict(os.environ, PATH=fake + ":/usr/bin:/bin", HAVE=os.path.join(d, "have"))
-            script = ("set -euo pipefail\nlog() { :; }\nUNIT_DIR=$1\n" + func +
-                      "\nids_dropin\n")
+            calls = os.path.join(d, "calls")
+            for name, body in (("getent", '[ -e "$HAVE" ]'),
+                               ("systemctl", 'echo "$*" >> "$CALLS"')):
+                with open(os.path.join(fake, name), "w", encoding="ascii") as f:
+                    f.write(f"#!/bin/sh\n{body}\n")
+                os.chmod(os.path.join(fake, name), 0o755)
+            env = dict(os.environ, PATH=fake + ":/usr/bin:/bin", HAVE=os.path.join(d, "have"),
+                       CALLS=calls)
+            script = ("set -euo pipefail\nlog() { :; }\nwarn() { :; }\nUNIT_DIR=$1\n" + func +
+                      "\nids_old_dropin\nids_helper\n")
             units = os.path.join(d, "units")
-            os.mkdir(units)
             dropin = os.path.join(units, "sectop.service.d", "ids.conf")
+            os.makedirs(os.path.dirname(dropin))
+            open(dropin, "w").close()
             run = lambda: subprocess.run(["bash", "-c", script, "x", units], env=env,  # noqa: E731
                                          check=True, capture_output=True)
             run()
-            self.assertFalse(os.path.exists(dropin))
+            self.assertFalse(os.path.exists(os.path.dirname(dropin)))      # old drop-in gone
+            with open(calls, encoding="ascii") as f:
+                self.assertEqual(f.read().splitlines(), ["disable --now sectop-ids.service"])
+            os.unlink(calls)
             open(env["HAVE"], "w").close()
             run()
-            with open(dropin, encoding="ascii") as f:
-                lines = [ln for ln in f.read().splitlines() if not ln.startswith("#")]
-            self.assertEqual(lines, ["[Service]", "SupplementaryGroups=suricata"])
-            self.assertEqual(os.stat(dropin).st_mode & 0o777, 0o644)
-            os.unlink(env["HAVE"])
-            run()
-            self.assertFalse(os.path.exists(os.path.dirname(dropin)))
-
+            with open(calls, encoding="ascii") as f:
+                self.assertEqual(f.read().splitlines(),
+                                 ["enable sectop-ids.service", "restart sectop-ids.service",
+                                  "is-active --quiet sectop-ids.service"])
 
 if __name__ == "__main__":
     unittest.main()
