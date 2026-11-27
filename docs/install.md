@@ -5,10 +5,11 @@ sectop runs as separate parts (docs/architecture.md, Privilege split):
 | part | user | rights | writes |
 |---|---|---|---|
 | sectop-net.service | sectop-net | CAP_NET_ADMIN only, no network | /run/sectop-net/*.json |
-| sectop.service (collector) | sectop | groups systemd-journal + sectop-feed (+ suricata when that group exists: reads eve.json for the ids box, drop-in sectop.service.d/ids.conf), no capabilities, no network | /run/sectop/state.json |
+| sectop.service (collector) | sectop | groups systemd-journal + sectop-feed, no capabilities, no network | /run/sectop/state.json |
 | sectop-whois.socket + sectop-whois@.service | dynamic, per lookup | network only | the answer, on the socket |
 | sectop-user@<desktop user>.service | desktop user, group sectop-feed (unit `Group=`) | no capabilities, no network; reads its own processes' fds in GNOME Shell's cgroup | /run/sectop-user/<desktop user>/socks.json |
 | sectop-home@<desktop user>.service | sectop-home, group sectop-feed | no capabilities, no network; lstat + list of the desktop home's start places (ACL entries the desktop user sets), never file content | /run/sectop-home/<desktop user>/report.json |
+| sectop-ids.service (only when Suricata's group suricata exists) | sectop-ids, group sectop-feed + suricata | no capabilities, no network; reads Suricata's eve.json, read only, counts alerts per rule + source | /run/sectop-ids/summary.json |
 | sectop (UI) | admin (the sudo user), no sudo | group sectop: reads /run/sectop, connects to the whois socket | nothing |
 
 Two accounts (admin on the text console, daily user in GNOME, no sudo):
