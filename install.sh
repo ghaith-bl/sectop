@@ -48,6 +48,8 @@ remove() {
         "$UNIT_DIR"/multi-user.target.wants/sectop-home@*.service
   local u
   for u in "${UNITS[@]}"; do rm -f "$UNIT_DIR/$u"; done
+  rm -f "$UNIT_DIR/sectop.service.d/ids.conf"
+  rmdir "$UNIT_DIR/sectop.service.d" 2>/dev/null || true
   systemctl daemon-reload
   rm -f "$BIN"
   rm -rf "$DEST"
@@ -253,6 +255,7 @@ install_units() {  # $1 = desktop user: its user helper + home watch
   for u in "${UNITS[@]}"; do
     install -m 0644 -o root -g root "$DEST/deploy/$u" "$UNIT_DIR/$u"
   done
+  ids_dropin
   relabel "$UNIT_DIR"/sectop*
   systemctl daemon-reload
   # one helper: another desktop user's instance (older install) goes
@@ -274,6 +277,28 @@ install_units() {  # $1 = desktop user: its user helper + home watch
       warn "$u not active: journalctl -b -u $u"
     fi
   done
+}
+
+# ids box (modules/ids): the collector reads Suricata's eve.json (suricata:suricata 0640)
+# through group suricata. Only when that group exists: an unknown group in
+# SupplementaryGroups= stops the unit (216/GROUP). Read only; no other right.
+IDS_DROPIN_DIR=$UNIT_DIR/sectop.service.d
+IDS_DROPIN=$IDS_DROPIN_DIR/ids.conf
+ids_dropin() {
+  if getent group suricata >/dev/null; then
+    install -d -m 0755 "$IDS_DROPIN_DIR"     # root runs this: root-owned
+    printf '%s\n' "# sectop install.sh: the ids box reads Suricata's eve.json (group suricata, read only)" \
+      "[Service]" "SupplementaryGroups=suricata" > "$IDS_DROPIN.tmp"
+    chmod 0644 "$IDS_DROPIN.tmp"
+    mv -f "$IDS_DROPIN.tmp" "$IDS_DROPIN"
+    log "ids: collector in group suricata ($IDS_DROPIN)"
+  elif [[ -e $IDS_DROPIN ]]; then
+    rm -f "$IDS_DROPIN"
+    rmdir "$IDS_DROPIN_DIR" 2>/dev/null || true
+    log "ids: no group suricata: $IDS_DROPIN removed"
+  else
+    log "ids: no group suricata (Suricata not installed): ids box shows no eve.json"
+  fi
 }
 
 USER_RE='^[a-z_][a-z0-9_-]{0,31}$'

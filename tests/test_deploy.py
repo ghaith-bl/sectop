@@ -296,6 +296,42 @@ class TestInstallScript(unittest.TestCase):
         line = next(ln for ln in text.splitlines() if ln.startswith("UNITS=("))
         self.assertEqual(sorted(line[len("UNITS=("):-1].split()), units)
 
+    def test_ids_dropin_only_with_group_suricata(self):
+        """install.sh ids_dropin: group suricata there -> drop-in with SupplementaryGroups
+        (added to the unit's list), gone -> drop-in removed; --remove removes it too."""
+        with open(os.path.join(ROOT, "install.sh"), encoding="ascii") as f:
+            text = f.read()
+        start = text.index("IDS_DROPIN_DIR=")
+        end = text.index("\n}\n", start) + 3
+        func = text[start:end]
+        self.assertIn('rm -f "$UNIT_DIR/sectop.service.d/ids.conf"', text)
+        with tempfile.TemporaryDirectory() as d:
+            fake = os.path.join(d, "bin")
+            os.mkdir(fake)
+            getent = os.path.join(fake, "getent")
+            with open(getent, "w", encoding="ascii") as f:
+                f.write('#!/bin/sh\n[ -e "$HAVE" ]\n')
+            os.chmod(getent, 0o755)
+            env = dict(os.environ, PATH=fake + ":/usr/bin:/bin", HAVE=os.path.join(d, "have"))
+            script = ("set -euo pipefail\nlog() { :; }\nUNIT_DIR=$1\n" + func +
+                      "\nids_dropin\n")
+            units = os.path.join(d, "units")
+            os.mkdir(units)
+            dropin = os.path.join(units, "sectop.service.d", "ids.conf")
+            run = lambda: subprocess.run(["bash", "-c", script, "x", units], env=env,  # noqa: E731
+                                         check=True, capture_output=True)
+            run()
+            self.assertFalse(os.path.exists(dropin))
+            open(env["HAVE"], "w").close()
+            run()
+            with open(dropin, encoding="ascii") as f:
+                lines = [ln for ln in f.read().splitlines() if not ln.startswith("#")]
+            self.assertEqual(lines, ["[Service]", "SupplementaryGroups=suricata"])
+            self.assertEqual(os.stat(dropin).st_mode & 0o777, 0o644)
+            os.unlink(env["HAVE"])
+            run()
+            self.assertFalse(os.path.exists(os.path.dirname(dropin)))
+
 
 if __name__ == "__main__":
     unittest.main()
