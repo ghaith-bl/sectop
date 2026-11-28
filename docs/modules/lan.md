@@ -86,7 +86,7 @@ at its next collect.
 
 | box | rows |
 |---|---|
-| lan | network (kind + id8), router (address, device, subnet), router MAC (accepted + date / not accepted yet / CHANGED), MACs seen this session (how many not trusted), same MAC (another address with the router's MAC), accept hint, DHCP 24 h (servers, rogue), notes |
+| lan | network (kind + id8), router (address, device, subnet), this laptop (its own address(es) in that subnet from fib_trie + the device; none found: info row), router MAC (accepted + date / not accepted yet / CHANGED), MACs seen this session (how many not trusted), same MAC (another address with the router's MAC), accept hint, DHCP 24 h (servers, rogue), notes |
 | dhcp | servers that answered in the last 24 h: last, 24 h, hour, where (interface), server, is (the router / this host / fine (config) / NOT the router / NOT this host / before this network / another network) |
 
 Header: `Wi-Fi <id8>: router accepted | DHCP <n> server(s)`; `CHANGED` / `ROGUE` when red.

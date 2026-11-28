@@ -36,6 +36,8 @@ class TestValidate(unittest.TestCase):
         s = snap()
         s["panels"][1]["width"] = "full"
         self.assertEqual(validate(s)["panels"][1]["width"], "full")
+        s["panels"][1]["width"] = "help"
+        self.assertEqual(validate(s)["panels"][1]["width"], "help")
         for bad in ("half", "", None, 1):
             s["panels"][1]["width"] = bad
             self.assertInvalid(s)

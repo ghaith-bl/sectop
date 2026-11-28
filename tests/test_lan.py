@@ -412,6 +412,18 @@ class RouterTest(unittest.TestCase):
         self.assertEqual(items(snap)["router MAC"], ("not in the ARP table yet", "info"))
         self.assertEqual(snap["checks"], [])
 
+    def test_this_laptop_own_address_and_device(self):
+        r = Rig(self)
+        self.assertEqual(items(r.collect())["this laptop"], (f"{ME} on wlo1", "ok"))
+        r.view = seen(local={BRIDGE_HOST, "127.0.0.1"})      # none in the subnet
+        self.assertEqual(items(r.collect())["this laptop"],
+                         ("no own address in 192.168.8.0/24 found (wlo1)", "info"))
+        r.view = seen(local={"192.168.8.30", "192.168.8.4", "192.168.8.200"})
+        self.assertEqual(items(r.collect())["this laptop"][0],
+                         "192.168.8.4, 192.168.8.30 +1 on wlo1")
+        r.view = seen(up=False)
+        self.assertNotIn("this laptop", items(r.collect()))
+
     def test_no_mac_or_wifi_name_in_the_snapshot(self):
         r = Rig(self)
         r.collect()

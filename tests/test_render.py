@@ -1537,3 +1537,65 @@ class TestColors(unittest.TestCase):
         ui = UI(2)
         ui.hint = "c: no program on this line"
         self.assertEqual(text(lay(ui=ui)[-1]), " c: no program on this line")
+
+
+def wide_mod():
+    """A module with a long table cell and a help panel (a colour key)."""
+    m = mod()
+    m["panels"] = m["panels"] + [
+        {"id": "key", "title": "fw key  colours", "type": "kv", "sev": "ok", "width": "help",
+         "items": [{"k": "red", "v": "act now", "sev": "crit"},
+                   {"k": "hour", "v": "every line since hh:00", "sev": "ok"}]},
+        {"id": "long", "title": "long", "type": "table", "sev": "ok", "columns": ["what"],
+         "rows": [{"cells": ["w" * 60 + "END"], "sev": "ok"}]}]
+    return m
+
+
+class TestZoom(unittest.TestCase):
+    def test_only_the_zoomed_box_all_rows_wide_columns(self):
+        u = UI(len(SCR))
+        u.zoom = "firewall/long"
+        f = frame([wide_mod()], ui=u, width=120, height=30)
+        self.assertEqual([b.key for b in f.boxes], ["firewall/long"])
+        self.assertTrue(find(f.lines, "END"))            # 63 cells: not cut at 40
+        self.assertTrue(find(f.lines, "zoom: z / Esc back"))
+        self.assertFalse(find(f.lines, "Connections"))
+        self.assertTrue(find(f.lines, " z Esc back "))  # its footer
+        self.assertEqual(f.boxes[0].page, 30 - 7)        # tabs, bar, header, 2 borders, head, footer
+        u.zoom = None
+        f = frame([wide_mod()], ui=u, width=120, height=30)
+        self.assertIn("firewall/conns", [b.key for b in f.boxes])
+
+    def test_gone_box_shows_the_screen(self):
+        u = UI(len(SCR))
+        u.zoom = "firewall/nothere"
+        f = frame([wide_mod()], ui=u, width=120)
+        self.assertIn("firewall/conns", [b.key for b in f.boxes])
+
+    def test_detail_over_the_zoom(self):
+        u = UI(len(SCR))
+        u.zoom, u.detail = "firewall/long", "firewall/long"
+        f = frame([wide_mod()], ui=u, width=120)
+        self.assertEqual([b.key for b in f.boxes], ["detail"])
+        self.assertTrue(find(f.lines, "detail: long   real IPs shown   Esc close"))
+
+
+class TestHelpPanels(unittest.TestCase):
+    def test_not_a_box_not_in_the_alerts_view(self):
+        f = frame([wide_mod()], width=120)
+        self.assertNotIn("firewall/key", [b.key for b in f.boxes])
+        self.assertFalse(find(f.lines, "act now"))
+        u = UI(len(SCR))
+        u.alerts = True
+        f = frame([wide_mod()], ui=u, width=120)
+        self.assertFalse(find(f.lines, "act now"))       # a key line is not a crit line
+
+    def test_in_the_help_in_colour(self):
+        u = UI(len(SCR))
+        u.help = True
+        f = frame([wide_mod()], ui=u, width=120, height=80)
+        self.assertTrue(find(f.lines, "firewall: fw key  colours"))
+        line = next(x for x in f.lines if "act now" in text(x))
+        self.assertIn(("act now", "crit"), line)
+        self.assertTrue(find(f.lines, "z                     zoom"))
+

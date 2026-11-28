@@ -606,5 +606,61 @@ class TestAlertsKeys(unittest.TestCase):
         self.assertFalse(u.alerts)
 
 
+class TestZoomKeys(unittest.TestCase):
+    def test_z_zooms_the_focused_box_and_back(self):
+        u = ui()
+        u.focus[0] = "m/b"
+        u.key(ord("z"))
+        self.assertEqual(u.zoom, "m/b")
+        u.key(ord("j"))                                  # the cursor still moves in it
+        self.assertEqual(u.sel["m/b"], 4)
+        u.key(ord("z"))
+        self.assertIsNone(u.zoom)
+
+    def test_esc_clears_a_filter_first_then_back(self):
+        u = ui()
+        u.focus[0] = "m/b"
+        u.key(ord("z"))
+        u.filters["m/b"] = "ssh"
+        u.key(ESC)
+        self.assertEqual((u.zoom, u.filters), ("m/b", {}))
+        u.key(ESC)
+        self.assertIsNone(u.zoom)
+
+    def test_screen_key_and_alerts_view_end_it(self):
+        u = ui()
+        u.key(ord("z"))
+        u.key(ord("2"))
+        self.assertIsNone(u.zoom)
+        u.key(ord("z"))
+        u.key(ord("!"))
+        self.assertIsNone(u.zoom)
+        u.key(ord("z"))                                  # a severity box of the view
+        self.assertEqual(u.zoom, "m/a")
+        u.key(ord("!"))                                  # closes the view
+        self.assertEqual((u.alerts, u.zoom), (False, None))
+
+    def test_detail_closes_back_to_the_zoom(self):
+        u = ui()
+        u.focus[0] = "m/b"
+        u.key(ord("z"))
+        u.key(10)
+        self.assertEqual(u.detail, "m/b")
+        u.key(ord("z"))                                  # no zoom key in an overlay
+        u.key(ESC)
+        self.assertEqual((u.detail, u.zoom), (None, "m/b"))
+
+    def test_gone_box_drops_the_zoom(self):
+        u = ui()
+        u.zoom = "m/b"
+        u.update(Frame([], (BoxInfo("m/b", 1, 1),), "m/b"))
+        self.assertEqual(u.zoom, "m/b")
+        u.update(Frame([], (BoxInfo("m/a", 1, 1),), "m/a"))
+        self.assertIsNone(u.zoom)
+        u.zoom, u.detail = "m/b", "m/b"                  # an overlay frame: kept
+        u.update(Frame([], (BoxInfo("detail", 1, 1, cursor=False),), None))
+        self.assertEqual(u.zoom, "m/b")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -214,6 +214,23 @@ def judge(g: dict, s, since: float, ok: set) -> tuple:
     return "another network (not checked)", "info"
 
 
+def own_item(s) -> dict:
+    """This laptop on the LAN: its own address(es) in the router's subnet + the device
+    (2026-11-28; a local address is fine to show, his privacy rule). From fib_trie."""
+    try:
+        net = ipaddress.IPv4Network(s.up.subnet) if s.up.subnet else None
+    except ValueError:
+        net = None
+    mine = sorted((ip for ip in s.local if net is not None
+                   and ipaddress.IPv4Address(ip) in net), key=ipaddress.IPv4Address)
+    if not mine:
+        where = f" in {s.up.subnet}" if s.up.subnet else ""
+        return {"k": "this laptop", "v": f"no own address{where} found ({s.up.dev})",
+                "sev": "info"}
+    more = f" +{len(mine) - 2}" if len(mine) > 2 else ""
+    return {"k": "this laptop", "v": f"{', '.join(mine[:2])}{more} on {s.up.dev}"}
+
+
 def _session(st: State, nid: str, now: float) -> Session:
     sess = st.sessions.get(nid)
     if sess is None:
@@ -247,6 +264,7 @@ def collect(st: State, ctx) -> dict:
         items.append({"k": "network", "v": f"{kind}, id {id8} (no name shown)"})
         items.append({"k": "router", "v": f"{s.up.gw} on {s.up.dev}"
                       + (f", {s.up.subnet}" if s.up.subnet else "")})
+        items.append(own_item(s))
         sess = _session(st, nid, now)
         if s.gw_mac is None:
             items.append({"k": "router MAC", "v": "not in the ARP table yet", "sev": "info"})

@@ -146,6 +146,7 @@ class SampleTest(unittest.TestCase):
         self.assertEqual(d["proto"], "UDP / dns")
         self.assertTrue(d["rule"].startswith("local rule"))
         self.assertEqual(d["colour"], "red: act now")
+        self.assertEqual(d["key"], "all colours, counts and rule groups: ? (help)")
         self.assertEqual(len(rows(snap, "eve")), 9)
         self.assertEqual(snap["summary"], "24 h: crit 5 | warn 4 | info 0")
 
@@ -410,6 +411,8 @@ class SummaryTest(unittest.TestCase):
         titles = {x["id"]: x["title"] for x in snap["panels"]}
         self.assertEqual(titles["ids"], "ids  alerts last 24 h, per rule + source: 2 in 1 group(s)")
         self.assertEqual(titles["eve"], "eve  last 2 alert lines (any age, oldest 2 h ago)")
+        panel = next(x for x in snap["panels"] if x["id"] == "ids_key")
+        self.assertEqual(panel["width"], "help")           # in the help (?), not a box
         key = {it["k"]: it for it in rows(snap, "ids_key")}
         self.assertEqual((key["red"]["sev"], key["yellow"]["sev"], key["white"]["sev"]),
                          ("crit", "warn", "info"))

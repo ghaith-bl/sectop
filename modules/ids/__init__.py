@@ -11,7 +11,10 @@ Boxes:
   last, 24 h count, this hour's count (since hh:00), rule (local / ET Open), the rule's
   own severity, its type (category / local kind), signature, from, to.
 - eve: the newest alert lines (any age), newest first.
-- ids key: what the colours mean and what the ET rule groups are.
+- ids key: what the colours mean and what the ET rule groups are. Not a box on the
+  screen (2026-11-28, Ghaith: the severity column already shows each row's colour): a
+  panel with width "help", shown in the help (?); each ids row's detail has one line
+  pointing there.
 
 Colour (decision 2026-11-27, Ghaith): the hardening's own rules by kind (leak, scan =
 red; probe, vm_lan, vm_probe = yellow). ET Open: red = signature_severity Critical, or
@@ -321,13 +324,14 @@ def _row(st: State, g: dict) -> dict:
               ("rule", "local rule (hardening ids/local.rules)" if g["sid"] in LOCAL_SIDS
                else "ET Open")]
     if grp_:
-        detail.append(("ET group", f"{grp_}: {ET_WHAT.get(grp_, 'see the ids key box')}"))
+        detail.append(("ET group", f"{grp_}: {ET_WHAT.get(grp_, 'see the help (?), ids key')}"))
     detail.append(("type", _type(g)))
     if g["kind"]:
         detail.append(("kind", g["kind"]))
     detail.append(("rule severity", _rule_sev(g)))
     detail.append(("colour", {"crit": "red: act now", "warn": "yellow: look at it",
                               "info": "white: info, no alert"}[g["sev"]]))
+    detail.append(("key", "all colours, counts and rule groups: ? (help)"))
     if g["target"]:
         detail.append(("target", g["target"]))
     if g["confidence"]:
@@ -421,7 +425,7 @@ def collect(st: State, ctx) -> dict:
          "type": "table", "columns": list(TAIL_COLUMNS), "types": list(TAIL_TYPES),
          "rows": [_tail_row(a) for a in tail]},
         {"id": "ids_key", "title": "ids key  colours, counts, rule types", "type": "kv",
-         "items": [dict(it) for it in KEY_ITEMS]},
+         "items": [dict(it) for it in KEY_ITEMS], "width": "help"},
     ]
     if note:
         summary = note

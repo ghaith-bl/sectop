@@ -83,7 +83,10 @@ this tick. Core overrides both for stale / error (see Errors).
 ## Panels
 
 Common keys: `id` (unique in module), `title`, `type`. `sev` optional, default ok.
-`width` optional (layout hint): `auto` (default) or `full` = a grid row of its own.
+`width` optional (layout hint): `auto` (default), `full` = a grid row of its own, or `help` =
+not a box on the screen: a kv panel whose items (a colour key, what the counts mean) show in
+the help (`?`), under the panel's title, each item in its severity colour. Not in the
+alerts view (`!`) either.
 All displayed values are str. Module formats numbers.
 
 kv:
@@ -345,7 +348,14 @@ A condition that is not true any more is left out.
   `enter` detail (a row with `logs`: its log card); `/` filter (in a detail: search, `n`
   `N` next / previous match);
   `Esc` clear filter; `f` follow; `x` hide; `c` card; `w` whois; `a` ack; `!` alerts;
-  `p` pause; `m` mask; `?` help; `q` quit.
+  `z` zoom; `p` pause; `m` mask; `?` help; `q` quit.
+- Zoom (`z`, 2026-11-28, tmux `prefix z` as precedent): the focused box alone fills the
+  grid: every row it has, table columns up to 120 cells (else 40). Title ends with
+  `zoom: z / Esc back`. `z` again, `Esc` (when the box has no filter), a screen key or
+  `!` go back. The cursor keeps its line. enter / c / ? open over it and close back to it.
+  In the alerts view too (one severity box). Rendering only: nothing collected changes.
+- Help (`?`): the keys, then every help panel (`width` help) of the loaded modules
+  under its title, each item in its severity colour (the ids colour key).
 - Alerts view (`!`): every engine alert (core/alerts.py active()) and every crit / warn /
   info table row and kv item of every module, one table per severity (box keys
   `alerts/crit`, `alerts/warn`, `alerts/info`). Cols: last (the row's first age cell),

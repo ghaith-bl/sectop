@@ -48,6 +48,12 @@ _alert_boxes). Its own focus (place "alerts"); keys as on a screen: tab, select,
 detail, c card, / filter, w whois, a ack. ! Esc (no filter to clear) q or a screen number
 closes it (2026-11-04: crit and warn each in a box of their own, the source on the line).
 
+Zoom: z (not in an overlay) shows the focused box alone: the whole grid, every row it has,
+wide columns (render: full row, ZOOM_COL). z again, or Esc when the box has no filter, goes
+back; a screen key or ! too. The cursor stays on its line both ways (same box key).
+Overlays (enter, c, ?) open over the zoomed box and close back to it. A box that is gone
+(module not loaded any more): zoom dropped. Rendering only (2026-11-28, like tmux prefix z).
+
 Ack: a acks every engine alert in the last alert bar (Frame.alerts): key ->
 (count, sev) at ack. render.acked() dims it until its count or severity
 rises. Kept here, not in core: the channel stays one-way (docs/architecture.md).
@@ -74,6 +80,7 @@ class UI:
     mask: bool = True
     help: bool = False
     alerts: bool = False             # alerts view (!) instead of the screen
+    zoom: str | None = None          # box key shown alone (z)
     paused: bool = False
     detail: str | None = None        # box key whose selected line is shown in detail
     card: str | None = None          # program whose card is shown (c)
@@ -111,6 +118,9 @@ class UI:
         self.seek = None                         # the frame did the move
         if frame.focus is not None and not self.overlay:
             self.focus[self.place] = frame.focus
+        if self.zoom and not self.overlay and frame.boxes and \
+                self.zoom not in {b.key for b in frame.boxes}:
+            self.zoom = None                     # the zoomed box is gone
 
     @property
     def place(self):
@@ -168,11 +178,17 @@ class UI:
                     self.seek = "next" if k == ord("n") else "prev"
             else:
                 self._move_key(k)
+        elif k in (ord("z"), ord("Z")):
+            self.zoom = None if self.zoom else self.focused()
+        elif self.zoom and k == ESC and not self.filters.get(self.zoom):
+            self.zoom = None                     # back to the whole screen
         elif self.alerts and (k in (ord("q"), ord("Q"), ord("!")) or (
                 k == ESC and not self.filters.get(self.focused() or ""))):
             self.alerts = False                  # close the alerts view, never quit here
+            self.zoom = None
         elif k == ord("!"):
             self.alerts = True
+            self.zoom = None
         elif k in (ord("q"), ord("Q")):
             return False
         elif k == ord("/"):
@@ -198,6 +214,7 @@ class UI:
             if k - ord("1") < self.n_screens:
                 self.screen = k - ord("1")
                 self.alerts = False
+                self.zoom = None
         elif k in (TAB, curses.KEY_RIGHT, ord("l")):
             self._cycle(1)
         elif k in (curses.KEY_BTAB, curses.KEY_LEFT, ord("h")):

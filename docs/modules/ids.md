@@ -43,10 +43,13 @@ Tests: tests/test_ids.py (real eve lines in tests/fixtures/ids/eve-local-rules.j
 |---|---|
 | ids | `alerts last 24 h, per rule + source`: last, 24 h, hour, rule (local / ET Open), sev (the rule's own: signature severity + priority p1..p4), type (local kind in words, or the ET category), signature, from, to (newest destination, `+N` more). Worst first, then newest |
 | eve | `last N alert lines (any age, oldest ... ago)`: the newest 50 lines, newest first |
-| ids key | what red / yellow / white mean, how counts and alerts work, the ET groups |
+
+ids key (what red / yellow / white mean, how counts and alerts work, the ET groups): not a
+box since 2026-11-28 (the severity column shows each row's colour), but in the help (`?`):
+a panel with width `help` (docs/module-interface.md).
 
 Detail (`enter`): signature, sid, rule, ET group (the word after `ET` and what it
-means), type, kind, rule severity, colour, target, confidence, from, to (up to 5), proto
+means), type, kind, rule severity, colour, key (`?` = help, the whole key), target, confidence, from, to (up to 5), proto
 / app, 24 h, this hour, first, last. `w` on a row: whois of the source.
 
 ## Colour (decision 2026-11-27)

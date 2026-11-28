@@ -24,7 +24,7 @@ can decide from what is on screen. Read-only until the privilege split (phase 3)
 
 | key | screen | content |
 |---|---|---|
-| 1 | firewall | hostfw, vpn, counters (non-zero only), out_leak, spark, programs (one row per program), peers (remote IPs), audit (in + out, allowed + blocked, grouped); lan (router MAC per network, ARP, DHCP servers; docs/modules/lan.md); ids (Suricata alerts per rule + source, exact counts from sectop-ids, eve tail, ids key; docs/modules/ids.md) |
+| 1 | firewall | hostfw, vpn, counters (non-zero only), out_leak, spark, programs (one row per program), peers (remote IPs), audit (in + out, allowed + blocked, grouped); lan (router MAC per network, ARP, DHCP servers; docs/modules/lan.md); ids (Suricata alerts per rule + source, exact counts from sectop-ids, eve tail; its key in the help `?`; docs/modules/ids.md) |
 | 2 | security | commands, auth, kernel, posture, logs (grouped). See Security screen |
 | 3 | processes | system (cpu, memory, swap, load, pressure, disk, temperatures), services (system units), processes. See Processes screen |
 

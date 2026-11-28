@@ -148,6 +148,8 @@ terminal, else the 8 basic colors.
   mask is on (key m shows them there).
 - Top border right: `/ <filter>  <shown> of <all>`, detail search, `first-last/total`
   when the box is cut.
+- `z`: the focused box alone on the screen (all rows, wide columns); `z` / `Esc` back.
+- `?` (help): the keys, then what the ids colours, counts and rule groups mean.
 
 ## Install
 

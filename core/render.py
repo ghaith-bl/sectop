@@ -117,7 +117,8 @@ HELP = (
     ("w", "whois of the selected IP (RDAP by sectop-whois.service, via the tunnel)"),
     ("a", "ack the alerts in the alert bar (they leave the bar, dim in the alerts "
           "view; a higher count or severity shows them again)"),
-    ("Esc", "clear the filter of the focused table"),
+    ("Esc", "clear the filter of the focused table (zoomed, no filter: back)"),
+    ("z", "zoom: the focused box alone, all rows, wide columns; z / Esc back"),
     ("f", "on a row with a filter (programs): filter the other tables of the screen to "
           "it; again: clear"),
     ("!", "alerts: every alert and every crit / warn / info line of all screens, one box "
@@ -136,10 +137,14 @@ HELP = (
                       "the card)"),
     ("q", "quit"),
 )
-FOOTER = ("1-{n} screen  tab <- -> box  up down j k select  enter detail  c card  / filter  "
+FOOTER = ("1-{n} screen  tab <- -> box  j k select  enter detail  z zoom  c card  / filter  "
           "w whois  a ack  ! alerts  p pause  m mask  ? help  q quit")
-FOOTER_ALERTS = (" ! Esc q close  tab box  up down j k select  enter detail  c card  / filter  "
-                 "w whois  a ack  p pause")
+FOOTER_ALERTS = (" ! Esc q close  tab box  up down j k select  enter detail  z zoom  c card  "
+                 "/ filter  w whois  a ack  p pause")
+FOOTER_ZOOM = (" z Esc back  up down j k select  PgUp PgDn page  enter detail  c card  "
+               "/ filter  w whois  a ack  p pause  ? help")
+ZOOM_TITLE = "   zoom: z / Esc back"
+ZOOM_COL = 120                               # table column max while zoomed (else COL_MAX)
 TYPING = "  enter apply  esc cancel  (all words match, !word must not)"
 TYPING_FIND = "  enter keep  esc cancel  (any case, text of a line)"
 FOOTER_DETAIL = (" up down PgUp PgDn scroll  g G Home End top / end  / search  n N match  "
@@ -490,6 +495,9 @@ def _footer(n_screens: int, width: int, ui=None) -> list:
         return _line(width, False, (FOOTER_DETAIL, "note"))
     if getattr(ui, "logcard", None) is not None:
         return _line(width, False, (FOOTER_LOGS, "note"))
+    if getattr(ui, "zoom", None) and not getattr(ui, "card", None) \
+            and not getattr(ui, "help", False):
+        return _line(width, False, (FOOTER_ZOOM, "note"))
     if getattr(ui, "alerts", False) and not getattr(ui, "card", None) \
             and not getattr(ui, "help", False):
         return _line(width, False, (FOOTER_ALERTS, "note"))
@@ -540,6 +548,8 @@ class _Box:
         self.tsfmt = _ts                     # clock time: an age cell without a reference
         self.stampfmt = _stamp               # full time in a detail
         self.secrets = True                  # detail: mask secrets (mask on), IPs real
+        self.colmax = COL_MAX                # table column max (zoom: ZOOM_COL)
+        self.zoomed = False                  # z: this box alone on the screen
 
     @property
     def filterable(self) -> bool:
@@ -596,7 +606,7 @@ class _Box:
             rows = [[display(self.cell(c, t), mask) for c, t in zip(r["cells"], types)]
                     for r in self.view]
             full = [max(cols(c) for c in col) for col in zip(head, *rows)]
-            widths = [min(COL_MAX, w) for w in full]
+            widths = [min(self.colmax, w) for w in full]
             floors = [min(w, max(COL_MIN, cols(h))) for w, h in zip(widths, head)]
             self.prep = (head, rows, widths, floors, full)
             gaps = 2 * (len(widths) - 1)
@@ -681,7 +691,8 @@ class _Box:
             lines, owner = _detail_rows(d, w, False, self.secrets)
             self.found = _found(d, owner, self.find) if self.find.strip() else ()
             return [], lines or dash
-        return [], [_line(w, mask, (t, "note")) for t in d] or dash
+        return [], [_line(w, mask, (t, "note")) if isinstance(t, str) else _line(w, mask, *t)
+                    for t in d] or dash
 
     def pairs(self, i: int, tsfmt) -> list:
         """(key, value) pairs for the detail of body line i. [] = nothing."""
@@ -834,6 +845,8 @@ def _boxes(screen, mods: list, feed: list) -> list:
     out = []
     for m in mods:
         for p in m["panels"]:
+            if p.get("width") == "help":     # a key for the help (?), not a box
+                continue
             out.append(_Box(f"{m['name']}/{p['id']}", p["title"], p["sev"], p["type"], p,
                             stale=m["stale"]))
             if p.get("width") == "full":     # layout hint: a row of its own
@@ -880,6 +893,8 @@ def _box_rows(view: list, stampfmt) -> list:
     for m in view:
         for p in m.get("panels", ()):
             where = f"{m['name']}/{p['id']}"
+            if p.get("width") == "help":     # a colour key: its items are not problems
+                continue
             if p.get("type") == "kv":
                 for it in p["items"]:
                     if it.get("sev") in ALERT_SEVS:
@@ -1088,7 +1103,8 @@ def _logcard(ui, ref, tsfmt, stampfmt):
 def _overlay(boxes: list, ui, mask: bool, tsfmt, view=(), ref=None, stampfmt=_stamp):
     """Help, detail, card or log card box instead of the grid, or None."""
     if ui.help:
-        return _Box("help", "keys", "ok", "note", [f"{k:<22}{v}" for k, v in HELP])
+        return _Box("help", "keys, and what the boxes' colours and counts mean", "ok", "note",
+                    _help_lines(view))
     if getattr(ui, "logcard", None) is not None:
         lbox = _logcard(ui, ref, tsfmt, stampfmt)
         if ui.detail is None or ui.detail != lbox.key:
@@ -1124,6 +1140,23 @@ def _overlay(boxes: list, ui, mask: bool, tsfmt, view=(), ref=None, stampfmt=_st
     box.find, box.seek, box.mark = (getattr(ui, "find", ""), getattr(ui, "seek", None),
                                     getattr(ui, "mark", None))
     return box
+
+
+def _help_lines(view) -> list:
+    """Help: the keys, then every module's help panels (width help: a colour key), each
+    under its title, its items in their severity colour (a crit line red, ...)."""
+    out = [f"{k:<22}{v}" for k, v in HELP]
+    for m in view:
+        for p in m.get("panels", ()):
+            if p.get("width") != "help" or p.get("type") != "kv":
+                continue
+            out += ["", ((f"{m['name']}: {p['title']}", "title"),)]
+            for it in p["items"]:
+                sev = it.get("sev", "ok")
+                out.append(((f"  {it['k']:<20}", "crit" if sev == "crit" else
+                             ("warn" if sev == "warn" else "name")),
+                            (it["v"], _pair_style(sev) if sev != "ok" else "text")))
+    return out
 
 
 def _whois(ui, ip: str) -> list:
@@ -1387,7 +1420,7 @@ def _grid(boxes: list, ui, width: int, room: int, mask: bool, tsfmt, pref) -> tu
                                  b.filterable, b.ip_at(sel), b.pick_at(sel), mark,
                                  b.progs_at(sel), b.logs_at(sel)))
             on = b.key == focus
-            left = _title(b, on and b.cursor, mask)
+            left = _title(b, on and b.cursor, mask, ZOOM_TITLE if b.zoomed else "")
             titles.append((x, left, max(0, cw - 3)))
             room = cw - 3 - _len(left) - 1           # flush right, never over the title
             state = _state(b, mark, off, vis, len(body), room)
@@ -1459,6 +1492,12 @@ def layout(screens, view: list, feed: list, ui, width: int, height: int,
     room -= len(footer)
     boxes = (_alert_boxes(view, list(alerts), getattr(ui, "acks", {}), stampfmt) if in_alerts
              else _boxes(scr, mods, feed))
+    zoom = getattr(ui, "zoom", None)
+    if zoom:                                 # z: the focused box alone, all rows, wide columns
+        hit = [b for b in boxes if b.key == zoom]
+        if hit:
+            boxes = hit
+            hit[0].full, hit[0].colmax, hit[0].zoomed = True, ZOOM_COL, True
     filters = getattr(ui, "filters", {})
     ref = now if ref is None else ref
     for b in boxes:
